@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches VERSION
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="v$(cat VERSION)"
+          if [ "$TAG" != "$VER" ]; then
+            echo "tag $TAG does not match VERSION $VER" >&2
+            exit 1
+          fi
+
+      - name: Verify CHANGELOG has a section for this version
+        run: grep -q "^## \[$(cat VERSION)\]" CHANGELOG.md
+
+      - name: Install toolchain
+        run: brew install --quiet shellcheck shfmt bats-core
+
+      - name: Full check
+        run: make lint test docs-check
+
+      - name: Build tarball + checksums
+        run: |
+          VER="$(cat VERSION)"
+          git archive --format=tar.gz --prefix="cleanmymac-$VER/" \
+            -o "cleanmymac-$VER.tar.gz" HEAD
+          shasum -a 256 "cleanmymac-$VER.tar.gz" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="$(cat VERSION)"
+          gh release create "$GITHUB_REF_NAME" \
+            "cleanmymac-$VER.tar.gz" SHA256SUMS \
+            --title "cleanmymac $VER" --generate-notes

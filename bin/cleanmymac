@@ -1,0 +1,623 @@
+#!/usr/bin/env bash
+# cleanmymac — maintenance for the dev tools on your Mac.
+#
+# Runs every enabled cleaner in cleaners/ (plus your own in
+# ~/.config/cleanmymac/cleaners.d/), each in its own process, and keeps going
+# when one fails. See `cleanmymac help`.
+set -euo pipefail
+export LC_ALL=C
+
+# ---------- locate ourselves (through symlinks; no state files) ----------
+CMM_SELF="${BASH_SOURCE[0]}"
+while [ -L "$CMM_SELF" ]; do
+  _dir="$(cd "$(dirname "$CMM_SELF")" && pwd)"
+  CMM_SELF="$(readlink "$CMM_SELF")"
+  case "$CMM_SELF" in
+    /*) ;;
+    *) CMM_SELF="$_dir/$CMM_SELF" ;;
+  esac
+done
+CMM_ROOT="$(cd "$(dirname "$CMM_SELF")/.." && pwd)"
+CMM_LIB="$CMM_ROOT/lib/common.sh"
+export CMM_LIB
+# shellcheck source=lib/common.sh
+. "$CMM_LIB"
+
+CMM_VERSION="$(cat "$CMM_ROOT/VERSION" 2>/dev/null || echo 0.0.0)"
+TAB=$'\t'
+
+# ---------- refuse root (S1) ----------
+if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+  err "cleanmymac manages user-level tooling and must not run as root"
+  exit 2
+fi
+
+# ---------- configuration ----------
+CMM_CONFIG_DIR="$(cmm_config_dir)"
+CMM_CONFIG_FILE="$CMM_CONFIG_DIR/config"
+CMM_DISABLED_FILE="$CMM_CONFIG_DIR/disabled"
+CMM_USER_CLEANERS_DIR="$CMM_CONFIG_DIR/cleaners.d"
+CMM_BUILTIN_CLEANERS_DIR="${CMM_CLEANERS_DIR:-$CMM_ROOT/cleaners}"
+# Heavy pruners are opt-in (D3); this baked default applies until a disabled
+# file exists (the wizard, installer, or enable/disable create one).
+CMM_DEFAULT_DISABLED="docker xcode"
+export CMM_CONFIG_FILE
+
+CMM_COLOR="$(config_get COLOR auto)"
+export CMM_COLOR
+cmm_init_colors
+
+# ---------- usage ----------
+usage() {
+  cat <<EOF
+${CMM_BOLD}cleanmymac${CMM_RESET} $CMM_VERSION — one command to update and clean your dev tools
+
+USAGE
+  cleanmymac [-n|--dry-run] [-q|--quiet] [cleaner ...]
+  cleanmymac <command> [args]
+
+COMMANDS
+  list                 show all cleaners and their status
+  doctor               environment and security report
+  configure            (re)run the setup wizard
+  enable <cleaner>     re-enable a disabled cleaner
+  disable <cleaner>    disable a cleaner
+  update               update cleanmymac itself
+  version              print the version
+  help                 show this page
+
+OPTIONS
+  -n, --dry-run        print every command without executing anything
+  -q, --quiet          hide cleaner output unless the cleaner fails
+
+Without arguments, every enabled cleaner runs. Naming cleaners runs exactly
+those (even if disabled). Cleaners live in:
+  $CMM_BUILTIN_CLEANERS_DIR
+  $CMM_USER_CLEANERS_DIR   (yours; a same-named cleaner overrides the built-in)
+
+EXIT STATUS
+  0 all cleaners succeeded or were skipped; 1 at least one cleaner failed;
+  2 usage or environment error; 130 interrupted.
+
+PROJECT
+  https://github.com/aviral2552/cleanmymac
+EOF
+}
+
+# ---------- cleaner discovery ----------
+# A cleaner's name is its basename without the NN- ordering prefix and .sh
+# suffix: cleaners/10-homebrew.sh -> homebrew.
+cleaner_name() {
+  local b
+  b="$(basename "$1")"
+  b="${b%.sh}"
+  printf '%s\n' "$b" | sed 's/^[0-9][0-9]*-//'
+}
+
+emit_dir() {
+  local d="$1" src="$2" f
+  [ -d "$d" ] || return 0
+  for f in "$d"/*.sh; do
+    [ -e "$f" ] || continue # unmatched glob
+    [ -f "$f" ] && [ -x "$f" ] || continue
+    printf '%s\t%s\t%s\t%s\n' "$(cleaner_name "$f")" "$(basename "$f")" "$f" "$src"
+  done
+}
+
+# discover — "name<TAB>basename<TAB>path<TAB>source" lines, ordered by
+# basename (the NN- prefix). A user cleaner shadows a built-in of the same
+# name: user lines are emitted first and awk keeps the first occurrence.
+discover() {
+  {
+    emit_dir "$CMM_USER_CLEANERS_DIR" user
+    emit_dir "$CMM_BUILTIN_CLEANERS_DIR" builtin
+  } | awk -F '\t' '!seen[$1]++' | sort -t "$TAB" -k2,2
+}
+
+known_cleaner() { discover | cut -f 1 | grep -Fxq "$1"; }
+
+is_disabled() {
+  if [ -f "$CMM_DISABLED_FILE" ]; then
+    grep -Fxq "$1" "$CMM_DISABLED_FILE" 2>/dev/null
+  else
+    case " $CMM_DEFAULT_DISABLED " in
+      *" $1 "*) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+}
+
+# Materialize the baked default into a real file so enable/disable edits have
+# a stable base to work from.
+materialize_disabled() {
+  [ -f "$CMM_DISABLED_FILE" ] && return 0
+  mkdir -p "$CMM_CONFIG_DIR"
+  local n
+  for n in $CMM_DEFAULT_DISABLED; do
+    printf '%s\n' "$n"
+  done >"$CMM_DISABLED_FILE"
+}
+
+write_default_config() {
+  mkdir -p "$CMM_CONFIG_DIR"
+  cat >"$CMM_CONFIG_FILE" <<EOF
+# cleanmymac configuration — KEY=value, one per line.
+# Values may contain only A-Z a-z 0-9 . _ / - ; this file is parsed, never
+# executed. Re-run 'cleanmymac configure' to change answers interactively.
+COOLDOWN_DAYS=0
+QUIET=0
+COLOR=auto
+DERIVEDDATA_AGE_DAYS=30
+EOF
+  materialize_disabled
+}
+
+# ---------- subcommands ----------
+cmd_list() {
+  local name base path src state gate present g
+  printf '%-16s %-9s %-5s %s\n' NAME STATE TOOL SOURCE
+  while IFS="$TAB" read -r name base path src; do
+    [ -n "$name" ] || continue
+    state=enabled
+    is_disabled "$name" && state=disabled
+    # Cleaners declare their gating command(s) in a "# gate:" header line.
+    gate="$(sed -n 's/^# gate: //p' "$path" | head -n 1)"
+    present='?'
+    if [ -n "$gate" ]; then
+      present='-'
+      for g in $gate; do
+        if have "$g"; then
+          present='yes'
+          break
+        fi
+      done
+    fi
+    printf '%-16s %-9s %-5s %s\n' "$name" "$state" "$present" "$src"
+  done <<EOF
+$(discover)
+EOF
+}
+
+cmd_enable() {
+  known_cleaner "$1" || {
+    err "unknown cleaner '$1' — see 'cleanmymac list'"
+    exit 2
+  }
+  materialize_disabled
+  { grep -Fvx "$1" "$CMM_DISABLED_FILE" || true; } >"$CMM_DISABLED_FILE.tmp"
+  mv "$CMM_DISABLED_FILE.tmp" "$CMM_DISABLED_FILE"
+  note "enabled: $1"
+}
+
+cmd_disable() {
+  known_cleaner "$1" || {
+    err "unknown cleaner '$1' — see 'cleanmymac list'"
+    exit 2
+  }
+  materialize_disabled
+  grep -Fxq "$1" "$CMM_DISABLED_FILE" || printf '%s\n' "$1" >>"$CMM_DISABLED_FILE"
+  note "disabled: $1"
+}
+
+cmd_version() {
+  local sha=""
+  if [ -d "$CMM_ROOT/.git" ] && have git; then
+    sha=" ($(git -C "$CMM_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown))"
+  fi
+  note "cleanmymac $CMM_VERSION$sha"
+}
+
+install_mode() {
+  if [ -d "$CMM_ROOT/.git" ]; then
+    printf 'git\n'
+  elif [ -n "${CMM_BREW_PREFIX:-}" ]; then
+    case "$CMM_ROOT" in
+      "$CMM_BREW_PREFIX"/*) printf 'brew\n' ;;
+      *) printf 'copy\n' ;;
+    esac
+  else
+    printf 'copy\n'
+  fi
+}
+
+cmd_update() {
+  case "$(install_mode)" in
+    git)
+      have git || {
+        err "git not found"
+        exit 2
+      }
+      note "Updating via git (fast-forward only)…"
+      local before after
+      before="$(git -C "$CMM_ROOT" rev-parse HEAD)"
+      if ! git -C "$CMM_ROOT" pull --ff-only; then
+        err "update failed — local history has diverged from the remote (S3: non-fast-forward pulls are refused)"
+        exit 1
+      fi
+      after="$(git -C "$CMM_ROOT" rev-parse HEAD)"
+      if [ "$before" = "$after" ]; then
+        note "Already up to date."
+      else
+        note "Updated. Changes pulled:"
+        git -C "$CMM_ROOT" --no-pager diff --stat "$before" "$after"
+      fi
+      ;;
+    brew)
+      note "This install is managed by Homebrew — updating via brew…"
+      brew upgrade cleanmymac
+      ;;
+    *)
+      err "cannot self-update: this copy has no .git directory and is not Homebrew-managed"
+      note "Reinstall from source:  git clone https://github.com/aviral2552/cleanmymac && cd cleanmymac && ./install.sh"
+      exit 1
+      ;;
+  esac
+}
+
+cmd_doctor() {
+  banner "cleanmymac doctor"
+  note "version:        $CMM_VERSION"
+  note "install mode:   $(install_mode)"
+  note "root:           $CMM_ROOT"
+  note "bash:           $BASH_VERSION"
+  if [ -n "${CMM_BREW_PREFIX:-}" ]; then
+    note "brew prefix:    $CMM_BREW_PREFIX"
+  else
+    note "brew prefix:    (homebrew not found)"
+  fi
+
+  banner "Configuration"
+  note "config dir:     $CMM_CONFIG_DIR"
+  if [ -f "$CMM_CONFIG_FILE" ]; then
+    note "COOLDOWN_DAYS=$(config_get COOLDOWN_DAYS 0)  QUIET=$(config_get QUIET 0)  COLOR=$(config_get COLOR auto)  DERIVEDDATA_AGE_DAYS=$(config_get DERIVEDDATA_AGE_DAYS 30)"
+  else
+    note "no config file — using defaults (run 'cleanmymac configure')"
+  fi
+  if [ -f "$CMM_DISABLED_FILE" ]; then
+    note "disabled:       $(tr '\n' ' ' <"$CMM_DISABLED_FILE")"
+  else
+    note "disabled:       $CMM_DEFAULT_DISABLED (built-in default)"
+  fi
+
+  banner "Cleaners"
+  local name base path src ok=0 bad=0
+  while IFS="$TAB" read -r name base path src; do
+    [ -n "$name" ] || continue
+    if assert_safe_to_execute "$path" >/dev/null 2>&1; then
+      ok=$((ok + 1))
+    else
+      bad=$((bad + 1))
+      warn "unsafe cleaner (would be refused): $path"
+    fi
+  done <<EOF
+$(discover)
+EOF
+  note "$ok cleaner(s) pass the execution-safety check; $bad refused"
+
+  banner "Tools"
+  local gate g seen=" "
+  while IFS="$TAB" read -r name base path src; do
+    [ -n "$name" ] || continue
+    gate="$(sed -n 's/^# gate: //p' "$path" | head -n 1)"
+    for g in $gate; do
+      case "$seen" in *" $g "*) continue ;; esac
+      seen="$seen$g "
+      if have "$g"; then
+        printf '  %-14s %s\n' "$g" "$(command -v "$g")"
+      else
+        printf '  %-14s -\n' "$g"
+      fi
+    done
+  done <<EOF
+$(discover)
+EOF
+
+  banner "PATH audit (S6)"
+  local dir warned=0 old_ifs="$IFS"
+  set -f # no pathname expansion while splitting $PATH
+  IFS=':'
+  for dir in $PATH; do
+    IFS="$old_ifs"
+    case "$dir" in
+      '' | .)
+        warn "PATH contains '.' (current directory) — a classic hijack vector"
+        warned=1
+        continue
+        ;;
+    esac
+    if [ -d "$dir" ]; then
+      local out mode
+      out="$(cmm_mode_uid "$dir")" || continue
+      mode="${out%% *}"
+      case "$mode" in '' | *[!0-9]*) continue ;; esac
+      # shellcheck disable=SC2004
+      if [ $((0$mode & 002)) -ne 0 ]; then
+        warn "PATH dir is world-writable: $dir"
+        warned=1
+      fi
+    fi
+    IFS=':'
+  done
+  IFS="$old_ifs"
+  set +f
+  [ "$warned" -eq 0 ] && note "no PATH issues found"
+
+  local link
+  link="$(command -v cleanmymac 2>/dev/null || true)"
+  if [ -n "$link" ] && [ -L "$link" ] && [ ! -e "$link" ]; then
+    warn "dangling cleanmymac symlink: $link"
+  fi
+  note ""
+}
+
+# ---------- run mode ----------
+# Result arrays are globals so the interrupt handler can print a partial
+# summary. Indexed access only (bash 3.2 + set -u safe).
+R_NAMES=()
+R_STATUS=()
+R_SECS=()
+CMM_TMP=""
+LOCK_DIR=""
+
+release_lock() {
+  if [ -n "$LOCK_DIR" ]; then
+    rm -rf "$LOCK_DIR"
+    LOCK_DIR=""
+  fi
+}
+
+on_exit() {
+  # Preserve the real exit status: a failing cleanup command in an EXIT trap
+  # would otherwise become the script's status.
+  local rc=$?
+  release_lock
+  if [ -n "$CMM_TMP" ]; then
+    rm -rf "$CMM_TMP"
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
+
+acquire_lock() {
+  local base="${TMPDIR:-/tmp}" pid
+  LOCK_DIR="${base%/}/cleanmymac.$(id -u).lock"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" >"$LOCK_DIR/pid"
+    return 0
+  fi
+  pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    err "another cleanmymac run is already in progress (pid $pid)"
+    LOCK_DIR="" # not ours — don't remove it on exit
+    exit 2
+  fi
+  warn "removing stale lock left by pid ${pid:-unknown}"
+  rm -rf "$LOCK_DIR"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    err "cannot acquire lock at $LOCK_DIR"
+    LOCK_DIR=""
+    exit 2
+  fi
+  printf '%s\n' "$$" >"$LOCK_DIR/pid"
+}
+
+print_summary() {
+  [ "${#R_NAMES[@]}" -eq 0 ] && return 0
+  local i=0 mark ok=0 skipped=0 failed=0
+  banner "Summary"
+  while [ "$i" -lt "${#R_NAMES[@]}" ]; do
+    case "${R_STATUS[$i]}" in
+      ok)
+        mark="${CMM_GREEN}ok  ${CMM_RESET}"
+        ok=$((ok + 1))
+        ;;
+      skip)
+        mark="${CMM_DIM}skip${CMM_RESET}"
+        skipped=$((skipped + 1))
+        ;;
+      *)
+        mark="${CMM_RED}FAIL${CMM_RESET}"
+        failed=$((failed + 1))
+        ;;
+    esac
+    printf '  %s  %-16s %3ss\n' "$mark" "${R_NAMES[$i]}" "${R_SECS[$i]}"
+    i=$((i + 1))
+  done
+  note ""
+  note "$ok ok, $skipped skipped, $failed failed"
+}
+
+on_int() {
+  trap - INT TERM
+  echo
+  warn "interrupted — partial summary follows"
+  print_summary
+  exit 130
+}
+
+first_run_offer() {
+  [ -f "$CMM_CONFIG_FILE" ] && return 0
+  if [ "${CMM_WIZARD_ASSUME_TTY:-0}" = "1" ] || { [ -t 0 ] && [ -t 1 ]; }; then
+    printf 'No configuration found. Run the setup wizard now? [Y/n] '
+    local a=""
+    IFS= read -r a || a=n
+    case "$a" in
+      n | N | no | NO)
+        write_default_config
+        note "Wrote defaults to $CMM_CONFIG_FILE — run 'cleanmymac configure' anytime."
+        ;;
+      *)
+        # shellcheck source=lib/wizard.sh
+        . "$CMM_ROOT/lib/wizard.sh"
+        wizard_main firstrun
+        # The wizard just wrote config; reload the policy values that were
+        # computed from defaults before it ran.
+        CMM_QUIET="${CMM_QUIET_FLAG:-$(config_get QUIET 0)}"
+        CMM_COOLDOWN_DAYS="$(config_get COOLDOWN_DAYS 0)"
+        CMM_DERIVEDDATA_AGE_DAYS="$(config_get DERIVEDDATA_AGE_DAYS 30)"
+        export CMM_QUIET CMM_COOLDOWN_DAYS CMM_DERIVEDDATA_AGE_DAYS
+        ;;
+    esac
+  else
+    note "(no config found — using defaults; run 'cleanmymac configure' to customize)"
+  fi
+}
+
+cmd_run() {
+  local sel=" $* " n name base path src rc start out
+
+  if [ "$#" -gt 0 ]; then
+    for n in "$@"; do
+      known_cleaner "$n" || {
+        err "unknown cleaner '$n' — try 'cleanmymac list'"
+        exit 2
+      }
+    done
+  else
+    first_run_offer
+  fi
+
+  acquire_lock
+  CMM_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cleanmymac.out.XXXXXX")"
+  trap on_int INT TERM
+
+  local df_before=""
+  df_before="$(df -k "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+
+  note "${CMM_BOLD}cleanmymac $CMM_VERSION${CMM_RESET} — starting up the cleaning engines"
+  [ "$CMM_DRY_RUN" = "1" ] && note "(dry run: commands are printed, nothing is executed)"
+
+  while IFS="$TAB" read -r name base path src; do
+    [ -n "$name" ] || continue
+    if [ "$#" -gt 0 ]; then
+      case "$sel" in
+        *" $name "*) ;;
+        *) continue ;;
+      esac
+    else
+      is_disabled "$name" && continue
+    fi
+    assert_safe_to_execute "$path" || continue
+
+    banner "$name"
+    start=$SECONDS
+    rc=0
+    if [ "$CMM_QUIET" = "1" ]; then
+      out="$CMM_TMP/$name.log"
+      "$path" >"$out" 2>&1 || rc=$?
+      if [ "$rc" -eq "$CMM_EXIT_SKIP" ]; then
+        tail -n 1 "$out" # surface the skip note
+      elif [ "$rc" -ne 0 ]; then
+        cat "$out" # quiet mode still shows full output on failure
+      fi
+    else
+      "$path" || rc=$?
+    fi
+
+    R_NAMES+=("$name")
+    R_SECS+=($((SECONDS - start)))
+    if [ "$rc" -eq 0 ]; then
+      R_STATUS+=(ok)
+    elif [ "$rc" -eq "$CMM_EXIT_SKIP" ]; then
+      R_STATUS+=(skip)
+    else
+      R_STATUS+=(fail)
+      warn "$name failed (exit $rc) — continuing with the remaining cleaners"
+    fi
+  done <<EOF
+$(discover)
+EOF
+
+  trap - INT TERM
+  print_summary
+
+  if [ -n "$df_before" ] && [ "$CMM_DRY_RUN" != "1" ]; then
+    local df_after freed
+    df_after="$(df -k "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+    if [ -n "$df_after" ] && [ "$df_after" -gt "$df_before" ] 2>/dev/null; then
+      freed=$((df_after - df_before))
+      note "approx. disk space freed: $(awk -v k="$freed" 'BEGIN { if (k < 1024) printf "%d KB", k; else if (k < 1048576) printf "%.1f MB", k / 1024; else printf "%.2f GB", k / 1048576 }')"
+    fi
+  fi
+
+  local i=0
+  while [ "$i" -lt "${#R_STATUS[@]}" ]; do
+    if [ "${R_STATUS[$i]}" = "fail" ]; then
+      exit 1
+    fi
+    i=$((i + 1))
+  done
+  exit 0
+}
+
+# ---------- argument parsing ----------
+CMM_DRY_RUN=0
+CMM_QUIET_FLAG=""
+CMD=""
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n | --dry-run) CMM_DRY_RUN=1 ;;
+    -q | --quiet) CMM_QUIET_FLAG=1 ;;
+    -h | --help) CMD=help ;;
+    -V | --version) CMD=version ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      err "unknown option: $1 (see 'cleanmymac help')"
+      exit 2
+      ;;
+    *)
+      if [ -z "$CMD" ]; then
+        case "$1" in
+          list | doctor | configure | enable | disable | update | version | help) CMD="$1" ;;
+          u | U) CMD=update ;; # legacy 1.x shorthands
+          h | H) CMD=help ;;
+          run) CMD=run ;;
+          *)
+            CMD=run
+            ARGS+=("$1")
+            ;;
+        esac
+      else
+        ARGS+=("$1")
+      fi
+      ;;
+  esac
+  shift
+done
+[ $# -gt 0 ] && ARGS+=("$@")
+: "${CMD:=run}"
+
+CMM_QUIET="${CMM_QUIET_FLAG:-$(config_get QUIET 0)}"
+CMM_COOLDOWN_DAYS="$(config_get COOLDOWN_DAYS 0)"
+CMM_DERIVEDDATA_AGE_DAYS="$(config_get DERIVEDDATA_AGE_DAYS 30)"
+if have brew; then
+  CMM_BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
+else
+  CMM_BREW_PREFIX=""
+fi
+export CMM_DRY_RUN CMM_QUIET CMM_COOLDOWN_DAYS CMM_DERIVEDDATA_AGE_DAYS CMM_BREW_PREFIX
+
+case "$CMD" in
+  run) cmd_run ${ARGS[@]+"${ARGS[@]}"} ;;
+  list) cmd_list ;;
+  doctor) cmd_doctor ;;
+  configure)
+    # shellcheck source=lib/wizard.sh
+    . "$CMM_ROOT/lib/wizard.sh"
+    wizard_main
+    ;;
+  enable | disable)
+    if [ "${#ARGS[@]}" -ne 1 ]; then
+      err "usage: cleanmymac $CMD <cleaner>"
+      exit 2
+    fi
+    "cmd_$CMD" "${ARGS[0]}"
+    ;;
+  update) cmd_update ;;
+  version) cmd_version ;;
+  help) usage ;;
+esac

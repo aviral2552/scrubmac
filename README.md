@@ -1,66 +1,176 @@
-# Clean my macOS
+# cleanmymac
 
-Clean My macOS is built for modern macOS systems. It performs maintainance for mostly commonly used components in the core OS and third party tools with a single terminal command.
+[![CI](https://github.com/aviral2552/cleanmymac/actions/workflows/ci.yml/badge.svg)](https://github.com/aviral2552/cleanmymac/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
-Clean My macOS uses a simple plugin system with all "cleaners" located in `~/.cleanmymac/cleaners` directory. Functionality can be added (or removed) by adding (or removing) files in the directory.
+One command that updates and cleans the dev tools on your Mac — Homebrew,
+npm/pnpm/yarn/bun, Python (uv/pipx/conda), Rust, Go, Composer, mise, the Mac
+App Store, your AI coding CLIs (Claude Code, Codex, Gemini, Cursor, Copilot
+via gh), and opt-in cache pruners for Docker and Xcode.
 
-## Pre-requisites
+> Not affiliated with MacPaw's CleanMyMac products. This is an independent,
+> open-source shell tool that predates any resemblance.
 
-You must have `brew` and `git` installed. You can use the cleaners that you need to or remove the ones that you do not want to use. Cleaners are located in the `~/.cleanmymac/cleaners` directory.
+```
+$ cleanmymac
 
-To install Homebrew open terminal and type
+cleanmymac 2.0.0 — starting up the cleaning engines
 
-`$ /usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"`
+homebrew
+========
++ brew update
+...
 
-After installing Homebrew, you can install `git` by typing the following in the terminal
+Summary
+=======
+  ok    homebrew          41s
+  skip  mas                0s
+  ok    npm                 8s
+  skip  conda               0s
+  ok    python              6s
+  ok    claude              2s
+  ...
 
-`$ brew install git`
+15 ok, 4 skipped, 0 failed
+approx. disk space freed: 1.24 GB
+```
 
-## Installation
+## Why you can trust it
 
-Open Terminal and type
+- **Never `sudo`.** Refuses to run as root. No system files, no SIP fights.
+- **Never your data.** Only updates and regenerable caches. AI tool state
+  (`~/.claude`, `~/.codex`, `~/.cursor`) is never touched — those tools get
+  updated, nothing more. No Trash, no `~/Library/Caches` sweeps, no Docker
+  containers or volumes.
+- **Preview everything.** `cleanmymac --dry-run` prints every command that
+  would run, runs nothing.
+- **One failure never stops the rest.** Each cleaner runs in its own process;
+  the summary tells you exactly what happened.
+- **Auditable.** ~1,500 lines of shellcheck-clean bash you can read in one
+  sitting, with a [threat model](docs/security.md) and a test suite pinning
+  the safety properties.
 
-`$ git clone https://github.com/aviral2552/cleanmymac.git && cd cleanmymac && ./install.sh`
+## Install
 
-Note: Clean My macOS is always installed in `~/.cleanmymac` directory
+**Homebrew** (once the tap is published — see [RELEASING.md](RELEASING.md)):
 
-## Supported commands
+```bash
+brew tap aviral2552/tap && brew install cleanmymac
+```
 
-Update all packages and run all maintainance cleaners on your system
+**From source** (installs to `~/.cleanmymac`, links into your PATH, no sudo):
 
-`$ cleanmymac`
+```bash
+git clone https://github.com/aviral2552/cleanmymac.git && cd cleanmymac && ./install.sh
+```
 
-Run self-update for Clean My macOS
+There is deliberately no `curl | bash` one-liner — an installer you can't
+read before running it would contradict [the security posture](docs/security.md).
+Release tarballs ship sha256 checksums.
 
-`$ cleanmymac update`
+## First run
 
-Display Clean My macOS help page
+The first interactive run offers a powerlevel10k-style setup wizard:
 
-`$ cleanmymac help`
+```
+$ cleanmymac
+No configuration found. Run the setup wizard now? [Y/n]
+```
 
-## Supported cleaners
+The wizard walks through service selection (grouped: package managers, JS,
+Python, AI tools, languages, heavy pruners), the **update cooldown** — skip
+package versions younger than N days as a supply-chain guard (it also delays
+security patches; the wizard says so) — and output preferences. Nothing is
+written until you confirm the summary; re-run anytime with
+`cleanmymac configure`. Decline and sensible defaults are written instead.
+Non-interactive runs (cron) never prompt.
 
-*   macOS core maintenance
-*   Homebrew
-*   Anaconda Navigator
-*   npm
-*   Yarn
-*   Composer
-*   Rustup
-*   Atom
+## Usage
 
-## Uninstallation
+```
+cleanmymac                  run every enabled cleaner
+cleanmymac --dry-run        preview every command, execute nothing
+cleanmymac -q               quiet: banners + summary; failures still dump output
+cleanmymac homebrew npm     run exactly these cleaners (even if disabled)
+cleanmymac list             all cleaners: state, tool present, source
+cleanmymac doctor           environment + security report
+cleanmymac configure        (re)run the wizard
+cleanmymac enable docker    opt in to a disabled cleaner
+cleanmymac disable xcode    opt out of a cleaner
+cleanmymac update           update cleanmymac itself (git pull --ff-only / brew)
+```
 
-To uninstall, run the following command in terminal
+Exit codes: `0` all ok/skipped · `1` something failed · `2` usage error ·
+`130` interrupted. See `man cleanmymac`.
 
-`$ ~/.cleanmymac/setup/uninstall.sh`
+## What it cleans
 
-Note: Uninstallation is not required for updates. You can run `$ cleanmymac update` to perform auto-update.
+Every cleaner is presence-gated — absent tools skip harmlessly, so the full
+set is safe on any machine. The exact commands each cleaner runs are
+documented (and CI-enforced) in **[docs/cleaners.md](docs/cleaners.md)**:
 
-## How do cleaners work
+| Group | Cleaners |
+|---|---|
+| Package managers | homebrew, mas |
+| JavaScript | npm, pnpm, yarn, bun |
+| Python | python (uv/pipx/pip), conda |
+| AI dev tools | claude, codex, gemini, gh (extensions/Copilot), cursor |
+| Languages | rustup, composer, go, mise |
+| Heavy pruners (opt-in, **disabled by default**) | docker, xcode |
 
-Cleaners are located under `~/.cleanmymac/cleaners` directory. You may remove the cleaners that are not applicable on your system.
+There is intentionally **no** "macOS deep clean": modern macOS maintains
+itself, the old core cleaner died fighting SIP, and a tool that refuses sudo
+can't (and shouldn't) do it. [docs/security.md](docs/security.md) explains.
 
-## How do I contribute
+## Configuration
 
-Feel free to fork the project and submit a pull request for new or updated cleaner scripts.
+Lives in `~/.config/cleanmymac/` — a strict `KEY=value` `config` file
+(parsed, never executed), a `disabled` list, and `cleaners.d/` for your own
+cleaners (a same-named cleaner overrides a built-in). Details:
+[docs/configuration.md](docs/configuration.md).
+
+## Writing your own cleaner
+
+A cleaner is a ~10-line executable script dropped into
+`~/.config/cleanmymac/cleaners.d/`. Template and contract:
+[docs/writing-cleaners.md](docs/writing-cleaners.md).
+
+## Migrating from 1.x
+
+2.x is a full rework; the visible changes:
+
+- `cleanmymac update` actually works now (installs keep their `.git`)
+- cleaner selection moved from "delete files in `~/.cleanmymac/cleaners`" to
+  `cleanmymac enable/disable` + `~/.config/cleanmymac/`
+- the installer no longer sudo-links into `/usr/local/bin` and no longer
+  deletes its source directory; re-running `./install.sh` migrates a 1.x
+  layout automatically
+- Atom cleaners are gone (Atom sunset in 2022); the always-commented-out
+  "macOS core cleaner" is gone on purpose
+- uninstall: `~/.cleanmymac/uninstall.sh` (add `--purge` to also remove config)
+
+## Documentation
+
+| | |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | how the dispatcher, lib, and cleaners fit together |
+| [docs/cleaners.md](docs/cleaners.md) | every cleaner, every command it runs |
+| [docs/configuration.md](docs/configuration.md) | wizard, config keys, env vars, cron usage |
+| [docs/security.md](docs/security.md) | threat model, S1–S7, residual risks |
+| [docs/writing-cleaners.md](docs/writing-cleaners.md) | cleaner contract + annotated template |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | common questions and failure modes |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | dev setup, tests, PR checklist |
+| [SECURITY.md](SECURITY.md) | reporting vulnerabilities |
+
+## Uninstall
+
+```bash
+~/.cleanmymac/uninstall.sh
+```
+
+Keeps your config by default; `--purge` removes that too. Homebrew installs:
+`brew uninstall cleanmymac`.
+
+## License
+
+[GPL-3.0](LICENSE)

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  lint:
+    name: lint + docs-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck and shfmt
+        run: sudo apt-get update -q && sudo apt-get install -y shellcheck shfmt
+      - run: make lint
+      - run: make docs-check
+
+  test-macos:
+    name: bats (macOS) + bash 3.2 smoke
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats-core
+        run: brew install --quiet bats-core
+      - name: Run test suite
+        run: make test
+      - name: bash 3.2 smoke — the shipped macOS bash must run everything
+        run: |
+          /bin/bash --version | head -1
+          for f in bin/cleanmymac lib/common.sh lib/wizard.sh install.sh uninstall.sh cleaners/*.sh scripts/*.sh; do
+            /bin/bash -n "$f"
+          done
+          /bin/bash bin/cleanmymac version
+          /bin/bash bin/cleanmymac list
+          /bin/bash bin/cleanmymac --dry-run
+
+  test-linux:
+    name: bats (Linux — GNU userland portability)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y bats
+      - run: make test

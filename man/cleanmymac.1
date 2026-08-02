@@ -1,0 +1,117 @@
+.TH CLEANMYMAC 1 "August 2026" "cleanmymac 2.0.0" "User Commands"
+.SH NAME
+cleanmymac \- update and clean your dev tools with one command
+.SH SYNOPSIS
+.B cleanmymac
+.RB [ \-n | \-\-dry\-run ]
+.RB [ \-q | \-\-quiet ]
+.RI [ cleaner .\|.\|.]
+.br
+.B cleanmymac
+.I command
+.RI [ args ]
+.SH DESCRIPTION
+.B cleanmymac
+runs a set of drop-in "cleaner" scripts, each of which updates and cleans one
+development tool (Homebrew, npm, uv, Claude Code, Docker, ...). Each cleaner
+runs in its own process; a failing cleaner never stops the rest. Cleaners
+whose tool is not installed skip themselves. A summary table ends every run.
+.PP
+Safety doctrine: never
+.BR sudo ,
+never user data \(em only updates and regenerable caches. Heavy pruners
+(docker, xcode) are disabled until explicitly enabled. See
+.I docs/security.md
+for the threat model.
+.SH COMMANDS
+.TP
+.B list
+Show every cleaner with its state (enabled/disabled), whether its tool is
+present, and whether it is built-in or yours.
+.TP
+.B doctor
+Environment and security report: install mode, config, tool presence,
+cleaner-file permission audit, PATH audit.
+.TP
+.B configure
+(Re)run the interactive setup wizard: pick services, set the update cooldown
+and output preferences. Offered automatically on the first interactive run.
+.TP
+.BI "enable " cleaner
+Re-enable a disabled cleaner.
+.TP
+.BI "disable " cleaner
+Disable a cleaner.
+.TP
+.B update
+Update cleanmymac itself: fast-forward
+.B git pull
+for git installs,
+.B brew upgrade
+for Homebrew installs.
+.TP
+.B version
+Print the version (and commit for git installs).
+.TP
+.B help
+Show the help page.
+.SH OPTIONS
+.TP
+.BR \-n ", " \-\-dry\-run
+Print every command that would run, execute nothing.
+.TP
+.BR \-q ", " \-\-quiet
+Hide cleaner output; a failing cleaner still dumps its full output.
+.SH EXIT STATUS
+.TP
+.B 0
+every cleaner succeeded or was skipped
+.TP
+.B 1
+at least one cleaner failed
+.TP
+.B 2
+usage or environment error (including a concurrent run holding the lock)
+.TP
+.B 130
+interrupted; a partial summary was printed
+.PP
+Individual cleaners exit 0 (ok), 75 (skipped), or anything else (failed).
+.SH FILES
+.TP
+.I ~/.cleanmymac/
+the installed application (git installs)
+.TP
+.I ~/.config/cleanmymac/config
+KEY=value configuration \(em parsed, never executed
+.TP
+.I ~/.config/cleanmymac/disabled
+disabled cleaner names, one per line
+.TP
+.I ~/.config/cleanmymac/cleaners.d/
+your own cleaners; a same-named cleaner overrides the built-in
+.SH ENVIRONMENT
+.TP
+.B CMM_COOLDOWN_DAYS
+skip package versions younger than this many days (see docs/security.md)
+.TP
+.B CMM_DERIVEDDATA_AGE_DAYS
+Xcode DerivedData age gate (default 30)
+.TP
+.B NO_COLOR
+disable colored output
+.SH EXAMPLES
+.TP
+Preview everything without executing:
+.B cleanmymac \-\-dry\-run
+.TP
+Run only the Homebrew cleaner:
+.B cleanmymac homebrew
+.TP
+Opt in to the Docker cache pruner:
+.B cleanmymac enable docker
+.SH SEE ALSO
+Project documentation in
+.IR docs/ ;
+.UR https://github.com/aviral2552/cleanmymac
+.UE

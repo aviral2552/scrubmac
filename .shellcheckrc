@@ -1,0 +1,5 @@
+# shellcheck configuration for cleanmymac
+shell=bash
+# SC1091: sourced files are resolved at runtime (CMM_LIB); paths are provided
+# via `# shellcheck source=` directives where they are static.
+disable=SC1091
