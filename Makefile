@@ -13,7 +13,7 @@ fmt:
 	shfmt -w -i 2 -ci $(SH_FILES)
 
 test:
-	bats tests
+	bats --print-output-on-failure tests
 
 docs-check:
 	./scripts/docs-check.sh
