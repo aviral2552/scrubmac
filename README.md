@@ -64,6 +64,9 @@ brew install aviral2552/tap/cleanmymac
 Use the **fully-qualified name**: a bare `brew install cleanmymac` resolves to
 MacPaw's unrelated commercial cask of the same name, not this tool. The
 `brew trust` step is Homebrew's standard confirmation for third-party taps.
+Note: MacPaw's `cleanmymac-cli` cask also links a `bin/cleanmymac` — the two
+cannot be brew-linked side by side
+([details](docs/troubleshooting.md#brew-link-conflict-with-macpaws-cleanmymac-cli)).
 
 **From source** (installs to `~/.cleanmymac`, links into your PATH, no sudo):
 

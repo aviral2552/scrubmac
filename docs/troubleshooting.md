@@ -1,5 +1,15 @@
 # Troubleshooting & FAQ
 
+## brew link conflict with MacPaw's cleanmymac-cli
+
+MacPaw's official CLI cask (`cleanmymac-cli`) symlinks
+`$(brew --prefix)/bin/cleanmymac` **and** `bin/cmm`; this tool links the same
+`bin/cleanmymac`. Installing both on one machine makes whichever comes second
+fail to link (`Error: … already exists`). Pick one, or run this tool by its
+full path (`~/.cleanmymac/bin/cleanmymac` or
+`$(brew --prefix)/Cellar/cleanmymac/*/libexec/bin/cleanmymac`). Background
+and the (deferred) rename plan: [renaming.md](renaming.md).
+
 ## "brew doctor said something scary but the run shows ok"
 
 `brew doctor` and `brew missing` are *advisory* — brew exits non-zero
