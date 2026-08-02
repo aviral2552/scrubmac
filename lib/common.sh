@@ -176,9 +176,12 @@ ai_self_update() {
 }
 
 # ---------- execution-safety guards (S2) ----------
-# BSD stat first (macOS), GNU fallback (CI). Prints "<octal-mode> <uid>".
+# Prints "<octal-mode> <uid>". GNU form first, BSD fallback — the order
+# matters: BSD `stat -c` fails cleanly on GNU-isms, but GNU `stat -f` does
+# NOT fail on the BSD form (it means "filesystem status" there and exits 0
+# with garbage output).
 cmm_mode_uid() {
-  stat -f '%Lp %u' "$1" 2>/dev/null || stat -c '%a %u' "$1" 2>/dev/null
+  stat -c '%a %u' "$1" 2>/dev/null || stat -f '%Lp %u' "$1" 2>/dev/null
 }
 
 # cmm_path_is_safe PATH — owned by the current user and not group/world-writable.

@@ -1,8 +1,10 @@
 name: CI
 
+# push is limited to master so PR commits run once (via pull_request),
+# not twice.
 on:
   push:
-    branches: ["**"]
+    branches: [master]
   pull_request:
 
 jobs:

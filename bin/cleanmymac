@@ -99,7 +99,9 @@ emit_dir() {
   [ -d "$d" ] || return 0
   for f in "$d"/*.sh; do
     [ -e "$f" ] || continue # unmatched glob
-    [ -f "$f" ] && [ -x "$f" ] || continue
+    if [ ! -f "$f" ] || [ ! -x "$f" ]; then
+      continue
+    fi
     printf '%s\t%s\t%s\t%s\n' "$(cleaner_name "$f")" "$(basename "$f")" "$f" "$src"
   done
 }
