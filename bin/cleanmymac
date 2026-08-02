@@ -246,7 +246,9 @@ cmd_update() {
       ;;
     brew)
       note "This install is managed by Homebrew — updating via brew…"
-      brew upgrade cleanmymac
+      # Fully qualified: a bare "cleanmymac" is ambiguous with an unrelated
+      # cask of the same name in homebrew/cask.
+      brew upgrade aviral2552/tap/cleanmymac
       ;;
     *)
       err "cannot self-update: this copy has no .git directory and is not Homebrew-managed"

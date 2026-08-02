@@ -35,11 +35,13 @@ a plain public repo named `homebrew-tap` with a `Formula/` directory).
    brew audit --strict cleanmymac
    ```
 
-Users then install with:
+Users then install with (fully qualified — a bare `cleanmymac` resolves to
+MacPaw's unrelated cask; `brew trust` is Homebrew's third-party-tap gate):
 
 ```
 brew tap aviral2552/tap
-brew install cleanmymac
+brew trust aviral2552/tap
+brew install aviral2552/tap/cleanmymac
 ```
 
 ## Post-release checklist

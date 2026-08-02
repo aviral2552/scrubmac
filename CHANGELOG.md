@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [semver](https://semver.org).
 
+## [2.0.1] - 2026-08-02
+
+### Fixed
+
+- Homebrew name collision with MacPaw's unrelated `cleanmymac` cask: install
+  docs now use the fully-qualified `brew install aviral2552/tap/cleanmymac`
+  (a bare `brew install cleanmymac` installs the cask!), README documents the
+  `brew trust` step for third-party taps, and `cleanmymac update` upgrades
+  via the fully-qualified formula name.
+
 ## [2.0.0] - 2026-08-02
 
 Full rework ("the 2026 rebirth"). Everything below is relative to 1.x.

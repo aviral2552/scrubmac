@@ -52,11 +52,17 @@ approx. disk space freed: 1.24 GB
 
 ## Install
 
-**Homebrew** (once the tap is published — see [RELEASING.md](RELEASING.md)):
+**Homebrew:**
 
 ```bash
-brew tap aviral2552/tap && brew install cleanmymac
+brew tap aviral2552/tap
+brew trust aviral2552/tap
+brew install aviral2552/tap/cleanmymac
 ```
+
+Use the **fully-qualified name**: a bare `brew install cleanmymac` resolves to
+MacPaw's unrelated commercial cask of the same name, not this tool. The
+`brew trust` step is Homebrew's standard confirmation for third-party taps.
 
 **From source** (installs to `~/.cleanmymac`, links into your PATH, no sudo):
 
@@ -169,7 +175,7 @@ A cleaner is a ~10-line executable script dropped into
 ```
 
 Keeps your config by default; `--purge` removes that too. Homebrew installs:
-`brew uninstall cleanmymac`.
+`brew uninstall aviral2552/tap/cleanmymac`.
 
 ## License
 
