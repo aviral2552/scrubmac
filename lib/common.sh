@@ -181,7 +181,11 @@ ai_self_update() {
 # NOT fail on the BSD form (it means "filesystem status" there and exits 0
 # with garbage output).
 cmm_mode_uid() {
-  stat -c '%a %u' "$1" 2>/dev/null || stat -f '%Lp %u' "$1" 2>/dev/null
+  # -L dereferences: on merged-usr Linux, /bin is a symlink whose own mode is
+  # 777 — the permissions that matter are the target's. Symlinked *cleaners*
+  # are rejected before any mode check (assert_safe_to_execute), so
+  # dereferencing here is always the right reading.
+  stat -L -c '%a %u' "$1" 2>/dev/null || stat -L -f '%Lp %u' "$1" 2>/dev/null
 }
 
 # cmm_path_is_safe PATH — owned by the current user and not group/world-writable.
