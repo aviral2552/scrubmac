@@ -75,7 +75,7 @@ if [ -n "$BREW_BIN" ]; then
   fi
 fi
 
-echo "Removing $DEST_DIR…"
+echo "Removing ${DEST_DIR}…"
 if [ -d "$DEST_DIR" ]; then
   rm -rf "$DEST_DIR"
 else
@@ -83,7 +83,7 @@ else
 fi
 
 if [ "$PURGE" -eq 1 ]; then
-  echo "Removing configuration $CONFIG_DIR…"
+  echo "Removing configuration ${CONFIG_DIR}…"
   rm -rf "$CONFIG_DIR"
 else
   if [ -d "$CONFIG_DIR" ]; then
