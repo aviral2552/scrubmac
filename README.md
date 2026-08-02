@@ -8,8 +8,9 @@ npm/pnpm/yarn/bun, Python (uv/pipx/conda), Rust, Go, Composer, mise, the Mac
 App Store, your AI coding CLIs (Claude Code, Codex, Gemini, Cursor, Copilot
 via gh), and opt-in cache pruners for Docker and Xcode.
 
-> Not affiliated with MacPaw's CleanMyMac products. This is an independent,
-> open-source shell tool that predates any resemblance.
+> Not affiliated with MacPaw or its CleanMyMac products. This is an
+> independent, unrelated open-source shell tool; the similar name is a
+> historical accident of this repo's 2018 naming, nothing more.
 
 ```
 $ cleanmymac

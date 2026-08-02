@@ -246,9 +246,22 @@ cmd_update() {
       ;;
     brew)
       note "This install is managed by Homebrew — updating via brew…"
-      # Fully qualified: a bare "cleanmymac" is ambiguous with an unrelated
-      # cask of the same name in homebrew/cask.
-      brew upgrade aviral2552/tap/cleanmymac
+      # Derive our own fully-qualified formula name from the keg instead of
+      # hardcoding it: the token comes from the Cellar path
+      # (…/Cellar/<token>/<version>/libexec) and the tap from the install
+      # receipt. Fully qualified because a bare "cleanmymac" is ambiguous
+      # with an unrelated cask of the same name in homebrew/cask.
+      local keg token tap=""
+      keg="${CMM_ROOT%/libexec}"
+      token="$(basename "${keg%/*}")"
+      if [ -f "$keg/INSTALL_RECEIPT.json" ]; then
+        tap="$(sed -n 's/.*"tap":[[:space:]]*"\([^"]*\)".*/\1/p' "$keg/INSTALL_RECEIPT.json" | head -n 1)"
+      fi
+      if [ -n "$tap" ]; then
+        brew upgrade "$tap/$token"
+      else
+        brew upgrade "$token"
+      fi
       ;;
     *)
       err "cannot self-update: this copy has no .git directory and is not Homebrew-managed"

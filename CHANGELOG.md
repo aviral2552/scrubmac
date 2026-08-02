@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [semver](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+
+- `cleanmymac update` on Homebrew installs now derives its own formula name
+  (tap + token) from the install receipt and Cellar path instead of
+  hardcoding the personal tap — works unchanged for any tap or a future
+  homebrew-core name.
+- README: removed an incorrect claim that this project predates MacPaw's
+  CleanMyMac (it does not — this repo is from 2018, MacPaw's product from
+  2008/2009). The disclaimer now states the facts.
+
 ## [2.0.1] - 2026-08-02
 
 ### Fixed

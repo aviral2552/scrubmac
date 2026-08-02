@@ -203,6 +203,53 @@ teardown() { teardown_sandbox; }
   [ "$status" -eq 2 ]
 }
 
+# Build a realistic brew keg (Cellar/<token>/<ver>/libexec) around the real
+# bin+lib, with a stub brew answering --prefix, and return the launcher path.
+make_fake_keg() {
+  local token="$1" tap="$2" pfx="$SANDBOX/brewpfx"
+  local keg="$pfx/Cellar/$token/9.9.9"
+  mkdir -p "$keg/libexec" "$pfx/bin"
+  cp -R "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/VERSION" "$keg/libexec/"
+  mkdir -p "$keg/libexec/cleaners"
+  [ -n "$tap" ] && printf '{"source":{"spec":"stable","tap":"%s"}}' "$tap" >"$keg/INSTALL_RECEIPT.json"
+  ln -s "$keg/libexec/bin/cleanmymac" "$pfx/bin/$token"
+  cat >"$STUB_BIN/brew" <<EOF
+#!/bin/sh
+[ "\$1" = "--prefix" ] && { echo "$pfx"; exit 0; }
+printf '%s %s\n' brew "\$*" >>"\$CALL_LOG"
+exit 0
+EOF
+  chmod 755 "$STUB_BIN/brew"
+  printf '%s\n' "$pfx/bin/$token"
+}
+
+@test "update on a brew install upgrades its own fully-qualified formula (tap derived from receipt)" {
+  local launcher
+  launcher="$(make_fake_keg mytool someuser/tap)"
+  unset CMM_BREW_PREFIX
+  run "$launcher" update
+  [ "$status" -eq 0 ]
+  grep -q '^brew upgrade someuser/tap/mytool$' "$CALL_LOG"
+}
+
+@test "update on a core-installed keg uses the core-qualified name" {
+  local launcher
+  launcher="$(make_fake_keg coretool homebrew/core)"
+  unset CMM_BREW_PREFIX
+  run "$launcher" update
+  [ "$status" -eq 0 ]
+  grep -q '^brew upgrade homebrew/core/coretool$' "$CALL_LOG"
+}
+
+@test "update without an install receipt falls back to the bare Cellar token" {
+  local launcher
+  launcher="$(make_fake_keg baretool "")"
+  unset CMM_BREW_PREFIX
+  run "$launcher" update
+  [ "$status" -eq 0 ]
+  grep -q '^brew upgrade baretool$' "$CALL_LOG"
+}
+
 @test "version prints the VERSION file value" {
   run "$CMM" version
   [ "$status" -eq 0 ]
