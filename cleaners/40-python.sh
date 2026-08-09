@@ -14,6 +14,18 @@ if ! have uv && ! have pipx && ! have python3; then
   skip "skipping: no python tooling found (uv, pipx, python3)"
 fi
 
+# uv's `cache prune` waits INDEFINITELY for other uv processes ("Cache is
+# currently in-use, waiting…") — an unbounded hang in cron. Resident
+# uvx-served tools (e.g. MCP servers) run straight out of the cache and
+# never exit, so pruning must be skipped while they live; --force would
+# delete the environments they are executing from. Upgrades are unaffected.
+uv_cache_busy() {
+  pgrep -x uv >/dev/null 2>&1 && return 0
+  local cdir
+  cdir="$(uv cache dir 2>/dev/null)" || return 1
+  [ -n "$cdir" ] && pgrep -f "$cdir" >/dev/null 2>&1
+}
+
 if have uv; then
   ai_self_update uv uv self update
   if [ "${CMM_COOLDOWN_DAYS:-0}" -gt 0 ] 2>/dev/null; then
@@ -21,7 +33,11 @@ if have uv; then
   else
     try uv tool upgrade --all
   fi
-  run uv cache prune
+  if uv_cache_busy; then
+    note "- uv cache is in use by running processes (uvx-served tools?) — skipping 'uv cache prune' this run"
+  else
+    run uv cache prune
+  fi
 fi
 
 if have pipx; then

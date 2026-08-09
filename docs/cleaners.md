@@ -68,7 +68,10 @@ nothing.
 
 - uv: `uv self update` (standalone installs only), `uv tool upgrade --all`
   (with `--exclude-newer <cutoff>` when a cooldown is set — the native
-  mechanical cooldown), `uv cache prune`
+  mechanical cooldown), `uv cache prune` — **skipped with a note while any
+  uv process is using the cache** (resident uvx-served tools such as MCP
+  servers run out of the cache; pruning would wait forever and `--force`
+  would break them)
 - pipx: `pipx upgrade-all` *(advisory)*
 - pip: `python3 -m pip cache purge` *(advisory, only when pip exists)*
 

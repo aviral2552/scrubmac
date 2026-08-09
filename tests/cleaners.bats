@@ -141,15 +141,25 @@ bun pm cache rm
 EOF
 }
 
+# pgrep must be stubbed in python-cleaner tests: the REAL pgrep would report
+# whatever uv processes happen to live on the host (nondeterministic). The
+# stub is silent (no call-log line) to keep exact-sequence diffs stable.
+stub_pgrep() {
+  printf '#!/bin/sh\nexit %s\n' "$1" >"$STUB_BIN/pgrep"
+  chmod 755 "$STUB_BIN/pgrep"
+}
+
 @test "python: uv + pipx + pip sequence (standalone uv self-updates)" {
   make_stub uv
   make_stub pipx
   make_stub python3
+  stub_pgrep 1 # cache idle
   run run_cleaner 40-python.sh
   [ "$status" -eq 0 ]
   diff <(calls) - <<'EOF'
 uv self update
 uv tool upgrade --all
+uv cache dir
 uv cache prune
 pipx upgrade-all
 python3 -m pip --version
@@ -157,8 +167,19 @@ python3 -m pip cache purge
 EOF
 }
 
+@test "python: cache prune is skipped, not hung, while the uv cache is in use" {
+  make_stub uv
+  stub_pgrep 0 # a resident uv/uvx process holds the cache
+  run run_cleaner 40-python.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipping 'uv cache prune'"* ]]
+  ! grep -q '^uv cache prune$' "$CALL_LOG"
+  grep -q '^uv tool upgrade --all$' "$CALL_LOG" # upgrades unaffected
+}
+
 @test "python: cooldown adds --exclude-newer with an RFC 3339 date to uv (S4)" {
   make_stub uv
+  stub_pgrep 1
   CMM_COOLDOWN_DAYS=7 run run_cleaner 40-python.sh
   [ "$status" -eq 0 ]
   grep -Eq '^uv tool upgrade --all --exclude-newer [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$CALL_LOG"
