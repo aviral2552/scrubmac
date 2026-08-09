@@ -1,17 +1,17 @@
-.TH CLEANMYMAC 1 "August 2026" "cleanmymac 2.0.1" "User Commands"
+.TH SCRUBMAC 1 "August 2026" "scrubmac 3.0.0" "User Commands"
 .SH NAME
-cleanmymac \- update and clean your dev tools with one command
+scrubmac \- update and clean your dev tools with one command
 .SH SYNOPSIS
-.B cleanmymac
+.B scrubmac
 .RB [ \-n | \-\-dry\-run ]
 .RB [ \-q | \-\-quiet ]
 .RI [ cleaner .\|.\|.]
 .br
-.B cleanmymac
+.B scrubmac
 .I command
 .RI [ args ]
 .SH DESCRIPTION
-.B cleanmymac
+.B scrubmac
 runs a set of drop-in "cleaner" scripts, each of which updates and cleans one
 development tool (Homebrew, npm, uv, Claude Code, Docker, ...). Each cleaner
 runs in its own process; a failing cleaner never stops the rest. Cleaners
@@ -44,7 +44,7 @@ Re-enable a disabled cleaner.
 Disable a cleaner.
 .TP
 .B update
-Update cleanmymac itself: fast-forward
+Update scrubmac itself: fast-forward
 .B git pull
 for git installs,
 .B brew upgrade
@@ -79,16 +79,16 @@ interrupted; a partial summary was printed
 Individual cleaners exit 0 (ok), 75 (skipped), or anything else (failed).
 .SH FILES
 .TP
-.I ~/.cleanmymac/
+.I ~/.scrubmac/
 the installed application (git installs)
 .TP
-.I ~/.config/cleanmymac/config
+.I ~/.config/scrubmac/config
 KEY=value configuration \(em parsed, never executed
 .TP
-.I ~/.config/cleanmymac/disabled
+.I ~/.config/scrubmac/disabled
 disabled cleaner names, one per line
 .TP
-.I ~/.config/cleanmymac/cleaners.d/
+.I ~/.config/scrubmac/cleaners.d/
 your own cleaners; a same-named cleaner overrides the built-in
 .SH ENVIRONMENT
 .TP
@@ -103,15 +103,15 @@ disable colored output
 .SH EXAMPLES
 .TP
 Preview everything without executing:
-.B cleanmymac \-\-dry\-run
+.B scrubmac \-\-dry\-run
 .TP
 Run only the Homebrew cleaner:
-.B cleanmymac homebrew
+.B scrubmac homebrew
 .TP
 Opt in to the Docker cache pruner:
-.B cleanmymac enable docker
+.B scrubmac enable docker
 .SH SEE ALSO
 Project documentation in
 .IR docs/ ;
-.UR https://github.com/aviral2552/cleanmymac
+.UR https://github.com/aviral2552/scrubmac
 .UE

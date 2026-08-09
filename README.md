@@ -1,6 +1,6 @@
-# cleanmymac
+# scrubmac
 
-[![CI](https://github.com/aviral2552/cleanmymac/actions/workflows/ci.yml/badge.svg)](https://github.com/aviral2552/cleanmymac/actions/workflows/ci.yml)
+[![CI](https://github.com/aviral2552/scrubmac/actions/workflows/ci.yml/badge.svg)](https://github.com/aviral2552/scrubmac/actions/workflows/ci.yml)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](#license)
 
 One command that updates and cleans the dev tools on your Mac — Homebrew,
@@ -8,14 +8,15 @@ npm/pnpm/yarn/bun, Python (uv/pipx/conda), Rust, Go, Composer, mise, the Mac
 App Store, your AI coding CLIs (Claude Code, Codex, Gemini, Cursor, Copilot
 via gh), and opt-in cache pruners for Docker and Xcode.
 
-> Not affiliated with MacPaw or its CleanMyMac products. This is an
-> independent, unrelated open-source shell tool; the similar name is a
-> historical accident of this repo's 2018 naming, nothing more.
+> **Formerly `cleanmymac` (2018–2026).** Renamed to end the collision and
+> confusion with MacPaw's unrelated commercial products of that name. Not
+> affiliated with MacPaw. Migration from 2.x is automatic — see
+> [Migrating](#migrating-from-cleanmymac-2x).
 
 ```
-$ cleanmymac
+$ scrubmac
 
-cleanmymac 2.0.0 — starting up the cleaning engines
+scrubmac 3.0.0 — starting up the cleaning engines
 
 homebrew
 ========
@@ -43,11 +44,11 @@ approx. disk space freed: 1.24 GB
   (`~/.claude`, `~/.codex`, `~/.cursor`) is never touched — those tools get
   updated, nothing more. No Trash, no `~/Library/Caches` sweeps, no Docker
   containers or volumes.
-- **Preview everything.** `cleanmymac --dry-run` prints every command that
+- **Preview everything.** `scrubmac --dry-run` prints every command that
   would run, runs nothing.
 - **One failure never stops the rest.** Each cleaner runs in its own process;
   the summary tells you exactly what happened.
-- **Auditable.** ~1,500 lines of shellcheck-clean bash you can read in one
+- **Auditable.** ~1,700 lines of shellcheck-clean bash you can read in one
   sitting, with a [threat model](docs/security.md) and a test suite pinning
   the safety properties.
 
@@ -58,20 +59,15 @@ approx. disk space freed: 1.24 GB
 ```bash
 brew tap aviral2552/tap
 brew trust aviral2552/tap
-brew install aviral2552/tap/cleanmymac
+brew install aviral2552/tap/scrubmac
 ```
 
-Use the **fully-qualified name**: a bare `brew install cleanmymac` resolves to
-MacPaw's unrelated commercial cask of the same name, not this tool. The
-`brew trust` step is Homebrew's standard confirmation for third-party taps.
-Note: MacPaw's `cleanmymac-cli` cask also links a `bin/cleanmymac` — the two
-cannot be brew-linked side by side
-([details](docs/troubleshooting.md#brew-link-conflict-with-macpaws-cleanmymac-cli)).
+(`brew trust` is Homebrew's standard confirmation for third-party taps.)
 
-**From source** (installs to `~/.cleanmymac`, links into your PATH, no sudo):
+**From source** (installs to `~/.scrubmac`, links into your PATH, no sudo):
 
 ```bash
-git clone https://github.com/aviral2552/cleanmymac.git && cd cleanmymac && ./install.sh
+git clone https://github.com/aviral2552/scrubmac.git && cd scrubmac && ./install.sh
 ```
 
 There is deliberately no `curl | bash` one-liner — an installer you can't
@@ -83,7 +79,7 @@ Release tarballs ship sha256 checksums.
 The first interactive run offers a powerlevel10k-style setup wizard:
 
 ```
-$ cleanmymac
+$ scrubmac
 No configuration found. Run the setup wizard now? [Y/n]
 ```
 
@@ -92,26 +88,26 @@ Python, AI tools, languages, heavy pruners), the **update cooldown** — skip
 package versions younger than N days as a supply-chain guard (it also delays
 security patches; the wizard says so) — and output preferences. Nothing is
 written until you confirm the summary; re-run anytime with
-`cleanmymac configure`. Decline and sensible defaults are written instead.
+`scrubmac configure`. Decline and sensible defaults are written instead.
 Non-interactive runs (cron) never prompt.
 
 ## Usage
 
 ```
-cleanmymac                  run every enabled cleaner
-cleanmymac --dry-run        preview every command, execute nothing
-cleanmymac -q               quiet: banners + summary; failures still dump output
-cleanmymac homebrew npm     run exactly these cleaners (even if disabled)
-cleanmymac list             all cleaners: state, tool present, source
-cleanmymac doctor           environment + security report
-cleanmymac configure        (re)run the wizard
-cleanmymac enable docker    opt in to a disabled cleaner
-cleanmymac disable xcode    opt out of a cleaner
-cleanmymac update           update cleanmymac itself (git pull --ff-only / brew)
+scrubmac                  run every enabled cleaner
+scrubmac --dry-run        preview every command, execute nothing
+scrubmac -q               quiet: banners + summary; failures still dump output
+scrubmac homebrew npm     run exactly these cleaners (even if disabled)
+scrubmac list             all cleaners: state, tool present, source
+scrubmac doctor           environment + security report
+scrubmac configure        (re)run the wizard
+scrubmac enable docker    opt in to a disabled cleaner
+scrubmac disable xcode    opt out of a cleaner
+scrubmac update           update scrubmac itself (git pull --ff-only / brew)
 ```
 
 Exit codes: `0` all ok/skipped · `1` something failed · `2` usage error ·
-`130` interrupted. See `man cleanmymac`.
+`130` interrupted. See `man scrubmac`.
 
 ## What it cleans
 
@@ -129,12 +125,12 @@ documented (and CI-enforced) in **[docs/cleaners.md](docs/cleaners.md)**:
 | Heavy pruners (opt-in, **disabled by default**) | docker, xcode |
 
 There is intentionally **no** "macOS deep clean": modern macOS maintains
-itself, the old core cleaner died fighting SIP, and a tool that refuses sudo
-can't (and shouldn't) do it. [docs/security.md](docs/security.md) explains.
+itself, and a tool that refuses sudo can't (and shouldn't) do it.
+[docs/security.md](docs/security.md) explains.
 
 ## Configuration
 
-Lives in `~/.config/cleanmymac/` — a strict `KEY=value` `config` file
+Lives in `~/.config/scrubmac/` — a strict `KEY=value` `config` file
 (parsed, never executed), a `disabled` list, and `cleaners.d/` for your own
 cleaners (a same-named cleaner overrides a built-in). Details:
 [docs/configuration.md](docs/configuration.md).
@@ -142,22 +138,26 @@ cleaners (a same-named cleaner overrides a built-in). Details:
 ## Writing your own cleaner
 
 A cleaner is a ~10-line executable script dropped into
-`~/.config/cleanmymac/cleaners.d/`. Template and contract:
+`~/.config/scrubmac/cleaners.d/`. Template and contract:
 [docs/writing-cleaners.md](docs/writing-cleaners.md).
 
-## Migrating from 1.x
+## Migrating from cleanmymac 2.x
 
-2.x is a full rework; the visible changes:
+Automatic, whichever way you installed:
 
-- `cleanmymac update` actually works now (installs keep their `.git`)
-- cleaner selection moved from "delete files in `~/.cleanmymac/cleaners`" to
-  `cleanmymac enable/disable` + `~/.config/cleanmymac/`
-- the installer no longer sudo-links into `/usr/local/bin` and no longer
-  deletes its source directory; re-running `./install.sh` migrates a 1.x
-  layout automatically
-- Atom cleaners are gone (Atom sunset in 2022); the always-commented-out
-  "macOS core cleaner" is gone on purpose
-- uninstall: `~/.cleanmymac/uninstall.sh` (add `--purge` to also remove config)
+- **Homebrew**: `brew update && brew upgrade` — the formula rename is handled
+  natively; you end up on `scrubmac`. If you pinned the old formula, `brew
+  unpin cleanmymac` first. If you trusted the formula individually (not the
+  tap), run `brew trust aviral2552/tap` once.
+- **Git install**: run `cleanmymac update` one last time, then re-run
+  `install.sh` (the old command tells you this too). Your install dir,
+  config, disabled list, and custom cleaners are migrated automatically; a
+  compat symlink keeps old hardcoded cron paths working, and a transitional
+  `cleanmymac` shim (removed in v4) keeps old PATH links alive — nagging you
+  to switch.
+- **Crontabs/aliases**: update them to `scrubmac`. Note: `cleanmymac` on
+  PATH may eventually resolve to MacPaw's unrelated CLI once our shim is
+  gone.
 
 ## Documentation
 
@@ -169,17 +169,18 @@ A cleaner is a ~10-line executable script dropped into
 | [docs/security.md](docs/security.md) | threat model, S1–S7, residual risks |
 | [docs/writing-cleaners.md](docs/writing-cleaners.md) | cleaner contract + annotated template |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | common questions and failure modes |
+| [docs/renaming.md](docs/renaming.md) | the cleanmymac → scrubmac rename record |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | dev setup, tests, PR checklist |
 | [SECURITY.md](SECURITY.md) | reporting vulnerabilities |
 
 ## Uninstall
 
 ```bash
-~/.cleanmymac/uninstall.sh
+~/.scrubmac/uninstall.sh
 ```
 
 Keeps your config by default; `--purge` removes that too. Homebrew installs:
-`brew uninstall aviral2552/tap/cleanmymac`.
+`brew uninstall scrubmac`.
 
 ## License
 

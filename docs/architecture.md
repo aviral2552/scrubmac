@@ -4,20 +4,20 @@
 shared library, and independent cleaner processes.
 
 ```
-bin/cleanmymac ──sources──▶ lib/common.sh          (helpers, guards, config)
+bin/scrubmac ──sources──▶ lib/common.sh          (helpers, guards, config)
       │        ──sources──▶ lib/wizard.sh          (configure / first run only)
       │
       ├─ discovers ▶ cleaners/NN-name.sh           (built-in)
-      │              ~/.config/cleanmymac/cleaners.d/*.sh   (yours; shadows built-ins by name)
+      │              ~/.config/scrubmac/cleaners.d/*.sh   (yours; shadows built-ins by name)
       │
       └─ executes each cleaner as a child process
              child sources lib/common.sh via $CMM_LIB
 ```
 
-## Execution flow (`cleanmymac [names…]`)
+## Execution flow (`scrubmac [names…]`)
 
 1. **Self-locate** — resolve `${BASH_SOURCE[0]}` through symlinks; everything
-   is relative to that root. No state files (the 1.x `~/.cleanmymac/path`
+   is relative to that root. No state files (the 1.x `~/.scrubmac/path`
    indirection is gone).
 2. **Refuse root**, set `LC_ALL=C`, read config (strict parser — see
    [security.md](security.md)).
@@ -61,20 +61,20 @@ The dispatcher resolves this once and exports `CMM_DRY_RUN`, `CMM_QUIET`,
 
 ## Install modes
 
-| Mode | Detected by | `cleanmymac update` does |
+| Mode | Detected by | `scrubmac update` does |
 |---|---|---|
 | git (`install.sh` or clone) | `.git` present at root | `git pull --ff-only` + diffstat |
-| Homebrew formula | root under `brew --prefix` | `brew upgrade cleanmymac` |
+| Homebrew formula | root under `brew --prefix` | `brew upgrade scrubmac` |
 | bare copy | neither | prints reinstall guidance |
 
-`install.sh` mirrors the source tree into `~/.cleanmymac` with
+`install.sh` mirrors the source tree into `~/.scrubmac` with
 `rsync -a --delete` — the app dir is wholly owned by the tool (user state
-lives in `~/.config/cleanmymac`), which is also what auto-purges a legacy 1.x
+lives in `~/.config/scrubmac`), which is also what auto-purges a legacy 1.x
 layout on upgrade.
 
 ## bash 3.2 compatibility
 
-macOS still ships bash 3.2.57 and cleanmymac runs on it natively (CI smokes
+macOS still ships bash 3.2.57 and scrubmac runs on it natively (CI smokes
 every script with `/bin/bash -n` plus a live `--dry-run`). Consequences: no
 associative arrays, no `mapfile`, no `${var,,}`; indexed arrays are accessed
 by position (`set -u`-safe on 3.2); `set -euo pipefail` throughout.

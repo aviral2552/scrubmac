@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
-# lib/common.sh — shared helpers for cleanmymac and its cleaners.
+# lib/common.sh — shared helpers for scrubmac and its cleaners.
 #
 # Sourced, never executed. Compatible with the bash 3.2 that ships with macOS:
 # no associative arrays, no mapfile, no ${var,,}.
@@ -105,7 +105,42 @@ date_days_ago() {
 }
 
 # ---------- configuration (S5: parsed, never sourced) ----------
-cmm_config_dir() { printf '%s/cleanmymac\n' "${XDG_CONFIG_HOME:-$HOME/.config}"; }
+cmm_config_dir() { printf '%s/scrubmac\n' "${XDG_CONFIG_HOME:-$HOME/.config}"; }
+
+# One-time config-dir migration (2026 rename): cleanmymac ≤2.x used
+# ~/.config/cleanmymac. Shared by the dispatcher and install.sh; runs before
+# any config read. Tolerant of concurrent callers — never aborts the caller
+# when the new dir ends up present (a racing cron and interactive run may
+# both attempt the mv).
+cmm_migrate_config_dir() {
+  local base new old
+  base="${XDG_CONFIG_HOME:-$HOME/.config}"
+  new="$base/scrubmac"
+  old="$base/cleanmymac"
+  if [ -L "$old" ]; then
+    # Ours (post-migration) or a dotfiles manager's. Only warn when it does
+    # not resolve to the new dir — contents are never auto-migrated through
+    # someone's stow/chezmoi symlink.
+    local tgt_old tgt_new
+    tgt_old="$(cd "$old" 2>/dev/null && pwd -P || true)"
+    tgt_new="$(cd "$new" 2>/dev/null && pwd -P || true)"
+    if [ -z "$tgt_new" ] || [ "$tgt_old" != "$tgt_new" ]; then
+      warn "config symlink $old does not point at $new — repoint your dotfiles symlink (contents were not auto-migrated)"
+    fi
+    return 0
+  fi
+  if [ -d "$old" ]; then
+    if [ ! -e "$new" ] && mv "$old" "$new" 2>/dev/null; then
+      ln -s "$new" "$old" 2>/dev/null || true
+      note "(migrated config to $new; a symlink covers the old path)"
+      return 0
+    fi
+    if [ -e "$new" ] && [ -d "$old" ] && [ ! -L "$old" ]; then
+      warn "both $new and $old exist; using the new one — merge or remove the old dir manually"
+    fi
+  fi
+  return 0
+}
 
 # config_get KEY DEFAULT — read KEY from the config file. Only lines matching
 # the strict KEY=value grammar are honored; anything else (shell syntax,

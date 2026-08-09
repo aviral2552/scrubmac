@@ -1,4 +1,4 @@
-NOTICE — cleanmymac
+NOTICE — scrubmac (formerly cleanmymac, 2018-2026)
 
 Copyright (C) 2018-2026 Aviral Sharma <https://github.com/aviral2552>
 
@@ -16,8 +16,8 @@ ADDITIONAL TERM under GNU GPL version 3, section 7(b)
   an "About"/help output, reasonably displaying the attribution there
   also satisfies this term:
 
-      Based on cleanmymac by Aviral Sharma
-      https://github.com/aviral2552/cleanmymac
+      Based on scrubmac (formerly cleanmymac) by Aviral Sharma
+      https://github.com/aviral2552/scrubmac
 
 As provided by GPLv3 section 7, this supplemental term is part of the
 license of this material and may not be removed from copies or
@@ -26,4 +26,5 @@ the GNU GPL v3.0.
 
 Historical note: this term applies to any copy of this material
 conveyed with this NOTICE file; releases up to and including v2.0.1
-were conveyed under GPL-3.0 without it.
+(published under the project's former name, cleanmymac) were conveyed
+under GPL-3.0 without it.

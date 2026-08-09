@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # shellcheck disable=SC2016  # single-quoted $-expressions here are deliberate: they expand later, in generated scripts
@@ -12,7 +12,7 @@
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 export REPO_ROOT
-export CMM="$REPO_ROOT/bin/cleanmymac"
+export CMM="$REPO_ROOT/bin/scrubmac"
 export CMM_LIB_PATH="$REPO_ROOT/lib/common.sh"
 
 setup_sandbox() {

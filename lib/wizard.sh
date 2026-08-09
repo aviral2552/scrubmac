@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # lib/wizard.sh — the powerlevel10k-style setup wizard.
 #
-# Sourced by bin/cleanmymac (never executed directly), so discover(),
+# Sourced by bin/scrubmac (never executed directly), so discover(),
 # config paths, and the lib helpers are all in scope. Bash 3.2 compatible.
 # Nothing is written until the summary screen is confirmed; (r) restarts
 # from the top and (q) quits without writing, on every screen.
@@ -85,7 +85,7 @@ w_tool_mark() {
 
 # ---------- screens ----------
 w_welcome() {
-  w_header 'Welcome to cleanmymac'
+  w_header 'Welcome to scrubmac'
   note 'This wizard picks which services to maintain and sets security policy.'
   note 'Safety doctrine: never sudo, never your data — only updates and'
   note 'regenerable caches. Every screen accepts (r)estart and (q)uit;'
@@ -253,7 +253,7 @@ w_summary_screen() {
 w_write() {
   mkdir -p "$CMM_CONFIG_DIR"
   cat >"$CMM_CONFIG_FILE" <<EOF
-# cleanmymac configuration — written by 'cleanmymac configure'.
+# scrubmac configuration — written by 'scrubmac configure'.
 # KEY=value, one per line; values restricted to A-Za-z0-9._/- .
 # This file is parsed, never executed.
 COOLDOWN_DAYS=$W_COOLDOWN
@@ -347,6 +347,6 @@ wizard_main() {
     note 'Configuration saved — continuing with this run.'
   else
     note ''
-    note "All set. Preview anytime with: cleanmymac --dry-run"
+    note "All set. Preview anytime with: scrubmac --dry-run"
   fi
 }

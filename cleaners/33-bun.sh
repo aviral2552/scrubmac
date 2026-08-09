@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # gate: bun

@@ -8,13 +8,13 @@ labels: bug
 
 **What you expected**
 
-**Output of `cleanmymac doctor`**
+**Output of `scrubmac doctor`**
 
 ```
 paste here
 ```
 
-**Output of `cleanmymac --dry-run`** (if relevant — it's always safe to run)
+**Output of `scrubmac --dry-run`** (if relevant — it's always safe to run)
 
 ```
 paste here

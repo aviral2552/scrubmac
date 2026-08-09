@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # Wizard: stdin-driven full passes, toggling, restart/quit, first-run flows.
@@ -11,8 +11,8 @@ setup() {
   setup_sandbox
   export CMM_CLEANERS_DIR="$REPO_ROOT/cleaners" # real cleaners → 6 group screens
   export CMM_WIZARD_ASSUME_TTY=1
-  CFG="$XDG_CONFIG_HOME/cleanmymac/config"
-  DIS="$XDG_CONFIG_HOME/cleanmymac/disabled"
+  CFG="$XDG_CONFIG_HOME/scrubmac/config"
+  DIS="$XDG_CONFIG_HOME/scrubmac/disabled"
 }
 teardown() { teardown_sandbox; }
 

@@ -1,6 +1,6 @@
 ---
 name: Cleaner request
-about: Propose a new tool for cleanmymac to maintain
+about: Propose a new tool for scrubmac to maintain
 labels: cleaner
 ---
 
