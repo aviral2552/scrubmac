@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [semver](https://semver.org).
 
+## [3.0.1] - 2026-08-10
+
+### Fixed
+
+- python cleaner: `uv cache prune` no longer waits indefinitely when the uv
+  cache is in use (resident uvx-served tools — e.g. MCP servers — run out of
+  the cache and never exit). The prune is skipped with a note instead;
+  upgrades are unaffected. `--force` is deliberately not used: it would
+  delete environments that running processes are executing from.
+
 ## [3.0.0] - 2026-08-09
 
 **The project is now `scrubmac`** (formerly cleanmymac, 2018–2026) — renamed

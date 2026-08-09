@@ -10,7 +10,7 @@ class Scrubmac < Formula
   # The uploaded release asset — the exact file SHA256SUMS describes. Not the
   # auto-generated /archive/ tarball, whose bytes GitHub does not guarantee
   # stable (the Jan 2023 archive-checksum breakage).
-  url "https://github.com/aviral2552/scrubmac/releases/download/v3.0.0/scrubmac-3.0.0.tar.gz"
+  url "https://github.com/aviral2552/scrubmac/releases/download/v3.0.1/scrubmac-3.0.1.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_SHA256"
   license "GPL-3.0-only"
 
