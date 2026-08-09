@@ -122,8 +122,8 @@ cmm_migrate_config_dir() {
     # not resolve to the new dir — contents are never auto-migrated through
     # someone's stow/chezmoi symlink.
     local tgt_old tgt_new
-    tgt_old="$(cd "$old" 2>/dev/null && pwd -P || true)"
-    tgt_new="$(cd "$new" 2>/dev/null && pwd -P || true)"
+    tgt_old="$(cd "$old" 2>/dev/null && pwd -P)" || tgt_old=""
+    tgt_new="$(cd "$new" 2>/dev/null && pwd -P)" || tgt_new=""
     if [ -z "$tgt_new" ] || [ "$tgt_old" != "$tgt_new" ]; then
       warn "config symlink $old does not point at $new — repoint your dotfiles symlink (contents were not auto-migrated)"
     fi
