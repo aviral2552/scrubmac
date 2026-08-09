@@ -18,7 +18,7 @@ with credit in the changelog (unless you prefer otherwise).
 
 ## Security model in one paragraph
 
-cleanmymac is a user-level bash tool that shells out to the package managers
+scrubmac is a user-level bash tool that shells out to the package managers
 you already trust. It never runs `sudo`, refuses to run as root, never deletes
 user data (only regenerable caches), executes only cleaner files that are
 owned by you and not writable by anyone else, parses (never sources) its

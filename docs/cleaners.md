@@ -5,9 +5,9 @@ and `cleaners/` drift apart (`make docs-check`).
 
 Shared contract: every cleaner is presence-gated (missing tool → skip, exit
 75), non-interactive, sudo-free, and routes every mutating command through the
-dry-run-aware `run` wrapper — `cleanmymac --dry-run` previews everything.
+dry-run-aware `run` wrapper — `scrubmac --dry-run` previews everything.
 Advisory commands (`try …`) may exit non-zero without failing the cleaner.
-Disable any cleaner with `cleanmymac disable <name>`.
+Disable any cleaner with `scrubmac disable <name>`.
 
 ### homebrew
 
@@ -38,7 +38,7 @@ Reports outdated Mac App Store apps (`mas outdated`, advisory), then
 - `npm outdated -g` *(advisory — exits 1 whenever anything is outdated)*
 - `npm update -g` — **held with a printed advisory while a cooldown is set**:
   npm's `--before` flag would *downgrade* globals installed more recently than
-  the cutoff (verified), so cleanmymac refuses to automate it
+  the cutoff (verified), so scrubmac refuses to automate it
 - `npm cache verify` — garbage-collect and verify the cache
 
 ### pnpm
@@ -154,7 +154,7 @@ a per-project decision.
 Skips (75) when the daemon is not running. Otherwise: `docker system df`
 *(advisory)*, `docker builder prune -f`, `docker image prune -f` (dangling
 images only). **Never** containers, volumes, or tagged images. Opt in with
-`cleanmymac enable docker`.
+`scrubmac enable docker`.
 
 ### xcode
 
@@ -164,4 +164,4 @@ images only). **Never** containers, volumes, or tagged images. Opt in with
 runtimes no longer installed — then deletes DerivedData subdirectories
 untouched for `DERIVEDDATA_AGE_DAYS` (default 30). DerivedData is a
 regenerable build cache; the age gate keeps active projects' builds warm.
-Opt in with `cleanmymac enable xcode`.
+Opt in with `scrubmac enable xcode`.

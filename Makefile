@@ -1,4 +1,4 @@
-SH_FILES = bin/cleanmymac lib/common.sh lib/wizard.sh install.sh uninstall.sh scripts/docs-check.sh $(wildcard cleaners/*.sh)
+SH_FILES = bin/scrubmac bin/cleanmymac lib/common.sh lib/wizard.sh install.sh uninstall.sh scripts/docs-check.sh $(wildcard cleaners/*.sh)
 BASH_HELPERS = $(wildcard tests/helpers/*.bash)
 
 .PHONY: all lint fmt test docs-check install uninstall

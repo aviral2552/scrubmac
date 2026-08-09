@@ -1,11 +1,9 @@
 # Renaming: decision record & future runbook
 
-**Status (2026-08-09): name LOCKED — `scrubmac`.** The GitHub name is
-reserved (private placeholder at `aviral2552/scrubmac`); the detailed
-execution plan lives in **[rename-plan-scrubmac.md](rename-plan-scrubmac.md)**
-and supersedes the generic checklist and candidate table below. Execution
-timing remains the maintainer's call; homebrew-core submission stays gated on
-the self-submission notability bar.
+**Status: EXECUTED — the project is `scrubmac` as of v3.0.0 (2026-08-09).**
+The execution followed **[rename-plan-scrubmac.md](rename-plan-scrubmac.md)**;
+homebrew-core submission stays gated on the self-submission notability bar
+(≥225 stars / ≥90 forks / ≥90 watchers).
 
 *(Historical record below — 2026-08-03 research that led here.)*
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # uninstall.sh: sandboxed removal — symlinks (incl. dangling legacy ones),
@@ -29,8 +29,8 @@ install_first() {
   run "$UNINSTALL"
   [ "$status" -eq 0 ]
   [ ! -d "$CMM_PREFIX" ]
-  [ ! -e "$CMM_BIN_DIR/cleanmymac" ]
-  [ -f "$XDG_CONFIG_HOME/cleanmymac/disabled" ]
+  [ ! -e "$CMM_BIN_DIR/scrubmac" ]
+  [ -f "$XDG_CONFIG_HOME/scrubmac/disabled" ]
   [[ "$output" == *"Kept your configuration"* ]]
 }
 
@@ -38,16 +38,16 @@ install_first() {
   install_first
   run "$UNINSTALL" --purge
   [ "$status" -eq 0 ]
-  [ ! -d "$XDG_CONFIG_HOME/cleanmymac" ]
+  [ ! -d "$XDG_CONFIG_HOME/scrubmac" ]
 }
 
 @test "removes a dangling legacy 1.x launcher symlink" {
   mkdir -p "$CMM_BIN_DIR" "$CMM_PREFIX"
-  ln -s "$CMM_PREFIX/cleanmymac.sh" "$CMM_BIN_DIR/cleanmymac" # dangling: 1.x target
+  ln -s "$CMM_PREFIX/scrubmac.sh" "$CMM_BIN_DIR/scrubmac" # dangling: 1.x target
   export PATH="$CMM_BIN_DIR:$PATH"
   run "$UNINSTALL"
   [ "$status" -eq 0 ]
-  [ ! -e "$CMM_BIN_DIR/cleanmymac" ] && [ ! -L "$CMM_BIN_DIR/cleanmymac" ]
+  [ ! -e "$CMM_BIN_DIR/scrubmac" ] && [ ! -L "$CMM_BIN_DIR/scrubmac" ]
 }
 
 @test "is graceful when nothing is installed" {
@@ -57,14 +57,14 @@ install_first() {
   [[ "$output" == *"nothing to remove"* ]]
 }
 
-@test "a foreign cleanmymac binary on PATH is left alone" {
+@test "a foreign scrubmac binary on PATH is left alone" {
   mkdir -p "$CMM_BIN_DIR"
-  printf '#!/bin/sh\necho other tool\n' >"$CMM_BIN_DIR/cleanmymac" # real file, not ours
-  chmod 755 "$CMM_BIN_DIR/cleanmymac"
+  printf '#!/bin/sh\necho other tool\n' >"$CMM_BIN_DIR/scrubmac" # real file, not ours
+  chmod 755 "$CMM_BIN_DIR/scrubmac"
   export PATH="$CMM_BIN_DIR:$PATH"
   run "$UNINSTALL"
   [ "$status" -eq 0 ]
-  [ -x "$CMM_BIN_DIR/cleanmymac" ]
+  [ -x "$CMM_BIN_DIR/scrubmac" ]
 }
 
 @test "rejects unknown flags" {

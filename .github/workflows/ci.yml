@@ -30,12 +30,12 @@ jobs:
       - name: bash 3.2 smoke — the shipped macOS bash must run everything
         run: |
           /bin/bash --version | head -1
-          for f in bin/cleanmymac lib/common.sh lib/wizard.sh install.sh uninstall.sh cleaners/*.sh scripts/*.sh; do
+          for f in bin/scrubmac bin/cleanmymac lib/common.sh lib/wizard.sh install.sh uninstall.sh cleaners/*.sh scripts/*.sh; do
             /bin/bash -n "$f"
           done
-          /bin/bash bin/cleanmymac version
-          /bin/bash bin/cleanmymac list
-          /bin/bash bin/cleanmymac --dry-run
+          /bin/bash bin/scrubmac version
+          /bin/bash bin/scrubmac list
+          /bin/bash bin/scrubmac --dry-run
 
   test-linux:
     name: bats (Linux — GNU userland portability)

@@ -4,14 +4,35 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [semver](https://semver.org).
 
-## [Unreleased]
+## [3.0.0] - 2026-08-09
+
+**The project is now `scrubmac`** (formerly cleanmymac, 2018–2026) — renamed
+to end the collision and confusion with MacPaw's unrelated commercial
+products, including their official `cleanmymac-cli`, which claims the
+`bin/cleanmymac` name in Homebrew.
+
+### Breaking / renamed
+
+- Binary: `cleanmymac` → `scrubmac`. A transitional shim keeps old PATH
+  links and cron paths working (never PATH-linked for new installs;
+  removed in v4).
+- Install dir: `~/.cleanmymac` → `~/.scrubmac`; config:
+  `~/.config/cleanmymac` → `~/.config/scrubmac`. Both migrate automatically
+  (config on first run or install; install dir on `install.sh` re-run, with
+  a compat symlink left at the old path). Dotfiles-manager symlinks are
+  detected and warned about, never silently lost.
+- Homebrew formula: `aviral2552/tap/cleanmymac` → `aviral2552/tap/scrubmac`
+  (`brew upgrade` follows the rename automatically).
+- `CMM_*` environment variables and config keys are unchanged.
 
 ### Changed
 
 - License: still GPL-3.0-only, now with a GPLv3 §7(b) additional term
   requiring preservation of attribution to the original project in
-  derivative works (new NOTICE file). Releases ≤ 2.0.1 remain plain
-  GPL-3.0 as published.
+  derivative works (new NOTICE file, license pointers in every source
+  file). Releases ≤ 2.0.1 remain plain GPL-3.0 as published.
+- The transitional scrubmac also holds the legacy `cleanmymac` run lock so
+  an untouched 2.x cron copy and 3.x still exclude each other.
 
 ### Fixed
 

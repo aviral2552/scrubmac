@@ -1,6 +1,6 @@
 # Configuration
 
-Everything lives in `~/.config/cleanmymac/` (respects `$XDG_CONFIG_HOME`):
+Everything lives in `~/.config/scrubmac/` (respects `$XDG_CONFIG_HOME`):
 
 | File | Purpose |
 |---|---|
@@ -10,7 +10,7 @@ Everything lives in `~/.config/cleanmymac/` (respects `$XDG_CONFIG_HOME`):
 
 ## The wizard
 
-`cleanmymac configure` (offered automatically on the first interactive run):
+`scrubmac configure` (offered automatically on the first interactive run):
 
 1. **Welcome** — the safety doctrine, and the rules: `(r)` restarts, `(q)`
    quits, nothing is written until the summary is confirmed.
@@ -54,12 +54,12 @@ Flags beat environment beats config beats defaults.
 ## Enabling and disabling cleaners
 
 ```bash
-cleanmymac list             # see states
-cleanmymac disable npm
-cleanmymac enable docker    # heavy pruners start disabled
+scrubmac list             # see states
+scrubmac disable npm
+scrubmac enable docker    # heavy pruners start disabled
 ```
 
-Naming cleaners explicitly (`cleanmymac docker`) runs them even when
+Naming cleaners explicitly (`scrubmac docker`) runs them even when
 disabled — explicit intent wins.
 
 ## Cron / non-interactive use
@@ -68,7 +68,7 @@ Non-TTY runs never prompt: with no config they use the defaults (heavy
 pruners off) and print a one-line hint. A sensible crontab entry:
 
 ```
-0 9 * * 1  $HOME/.cleanmymac/bin/cleanmymac -q
+0 9 * * 1  $HOME/.scrubmac/bin/scrubmac -q
 ```
 
 Exit code is 1 if any cleaner failed, so cron mail / your monitor sees it.

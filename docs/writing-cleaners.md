@@ -1,7 +1,7 @@
 # Writing your own cleaner
 
 A cleaner is one executable bash script. Drop it in
-`~/.config/cleanmymac/cleaners.d/` and it joins the run; name it the same as
+`~/.config/scrubmac/cleaners.d/` and it joins the run; name it the same as
 a built-in (`10-homebrew.sh`) and yours **replaces** it.
 
 ## Annotated template
@@ -61,7 +61,7 @@ Environment available to every cleaner: `CMM_DRY_RUN`, `CMM_COOLDOWN_DAYS`,
 
 `NN-name.sh` — NN orders the run. Package managers early (they update the
 runtimes everything else uses), heavy pruners last. Built-ins use 10–70;
-pick anything that reads sensibly next to `cleanmymac list`.
+pick anything that reads sensibly next to `scrubmac list`.
 
 ## Contributing a cleaner upstream
 

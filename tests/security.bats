@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # Security guarantees (S1–S7): execution-safety guards at the dispatcher
@@ -44,8 +44,8 @@ teardown() { teardown_sandbox; }
 
 @test "S5: shell syntax in the config file is inert through the dispatcher" {
   make_cleaner 10-alpha.sh 'echo hi'
-  mkdir -p "$XDG_CONFIG_HOME/cleanmymac"
-  cat >"$XDG_CONFIG_HOME/cleanmymac/config" <<EOF
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  cat >"$XDG_CONFIG_HOME/scrubmac/config" <<EOF
 COLOR=\$(touch $SANDBOX/pwned)
 QUIET=0; touch $SANDBOX/pwned2
 COOLDOWN_DAYS=7
@@ -66,13 +66,13 @@ EOF
   git -C "$origin" -c user.email=t@t -c user.name=t add -A
   git -C "$origin" -c user.email=t@t -c user.name=t commit -qm one
   git clone -q "$origin" "$inst"
-  run "$inst/bin/cleanmymac" update
+  run "$inst/bin/scrubmac" update
   [ "$status" -eq 0 ]
   [[ "$output" == *"Already up to date."* ]]
   echo change >"$origin/NEWFILE"
   git -C "$origin" -c user.email=t@t -c user.name=t add -A
   git -C "$origin" -c user.email=t@t -c user.name=t commit -qm two
-  run "$inst/bin/cleanmymac" update
+  run "$inst/bin/scrubmac" update
   [ "$status" -eq 0 ]
   [[ "$output" == *"Changes pulled:"* ]]
   [[ "$output" == *NEWFILE* ]]
@@ -95,7 +95,7 @@ EOF
   echo remote >"$origin/REMOTEFILE"
   git -C "$origin" -c user.email=t@t -c user.name=t add -A
   git -C "$origin" -c user.email=t@t -c user.name=t commit -qm remote
-  run "$inst/bin/cleanmymac" update
+  run "$inst/bin/scrubmac" update
   [ "$status" -eq 1 ]
   [[ "$output" == *diverged* ]]
 }
@@ -117,8 +117,8 @@ EOF
 }
 
 @test "S1: every entry point carries the root-refusal guard" {
-  grep -q 'EUID' "$REPO_ROOT/bin/cleanmymac"
-  grep -q 'must not run as root' "$REPO_ROOT/bin/cleanmymac"
+  grep -q 'EUID' "$REPO_ROOT/bin/scrubmac"
+  grep -q 'must not run as root' "$REPO_ROOT/bin/scrubmac"
   grep -q 'must not run as root' "$REPO_ROOT/install.sh"
   grep -q 'must not run as root' "$REPO_ROOT/uninstall.sh"
 }

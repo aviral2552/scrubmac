@@ -1,6 +1,7 @@
 # Rename execution plan: cleanmymac → scrubmac (v3.0.0) — rev 2
 
-**Status: LOCKED & PLANNED — not yet executed.**
+**Status: EXECUTING — P1 landed 2026-08-09; P2–P5 same day (see git history
+for the record).**
 Decision locked 2026-08-09. GitHub name reserved (private placeholder at
 `aviral2552/scrubmac`; delete it in Phase 2 immediately before the real
 rename). Availability verified 2026-08-09: brew formula 404, cask 404,

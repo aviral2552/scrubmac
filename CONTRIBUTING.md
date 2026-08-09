@@ -7,7 +7,7 @@ Cleaner PRs are the most welcome kind — the plugin contract makes them
 
 ```bash
 brew install shellcheck shfmt bats-core
-git clone https://github.com/aviral2552/cleanmymac.git && cd cleanmymac
+git clone https://github.com/aviral2552/scrubmac.git && cd scrubmac
 make            # lint + test + docs-check
 ```
 

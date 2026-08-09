@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # Dispatcher behavior: continue-on-failure, exit codes, selection, disabling,
@@ -51,8 +51,8 @@ teardown() { teardown_sandbox; }
 @test "naming cleaners runs exactly those, even when disabled" {
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   make_cleaner 20-beta.sh 'echo BETA-RAN'
-  mkdir -p "$XDG_CONFIG_HOME/cleanmymac"
-  echo beta >"$XDG_CONFIG_HOME/cleanmymac/disabled"
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  echo beta >"$XDG_CONFIG_HOME/scrubmac/disabled"
   run "$CMM" beta
   [ "$status" -eq 0 ]
   [[ "$output" != *ALPHA-RAN* ]]
@@ -69,8 +69,8 @@ teardown() { teardown_sandbox; }
 @test "disabled file is respected on full runs" {
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   make_cleaner 20-beta.sh 'echo BETA-RAN'
-  mkdir -p "$XDG_CONFIG_HOME/cleanmymac"
-  echo alpha >"$XDG_CONFIG_HOME/cleanmymac/disabled"
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  echo alpha >"$XDG_CONFIG_HOME/scrubmac/disabled"
   run "$CMM"
   [ "$status" -eq 0 ]
   [[ "$output" != *ALPHA-RAN* ]]
@@ -90,7 +90,7 @@ teardown() { teardown_sandbox; }
 
 @test "user cleaners.d is merged and shadows a same-named builtin" {
   make_cleaner 10-alpha.sh 'echo BUILTIN-ALPHA'
-  local userdir="$XDG_CONFIG_HOME/cleanmymac/cleaners.d"
+  local userdir="$XDG_CONFIG_HOME/scrubmac/cleaners.d"
   mkdir -p "$userdir"
   printf '#!/usr/bin/env bash\necho USER-ALPHA\n' >"$userdir/10-alpha.sh"
   printf '#!/usr/bin/env bash\necho USER-EXTRA\n' >"$userdir/50-extra.sh"
@@ -128,8 +128,8 @@ teardown() { teardown_sandbox; }
 }
 
 @test "second concurrent run is refused while the lock is held" {
-  mkdir -p "$TMPDIR/cleanmymac.$(id -u).lock"
-  echo $$ >"$TMPDIR/cleanmymac.$(id -u).lock/pid" # our own live pid
+  mkdir -p "$TMPDIR/scrubmac.$(id -u).lock"
+  echo $$ >"$TMPDIR/scrubmac.$(id -u).lock/pid" # our own live pid
   make_cleaner 10-alpha.sh 'echo hi'
   run "$CMM"
   [ "$status" -eq 2 ]
@@ -139,8 +139,8 @@ teardown() { teardown_sandbox; }
 @test "stale lock from a dead process is recovered" {
   local deadpid
   deadpid="$(sh -c 'echo $$')" # that shell has already exited
-  mkdir -p "$TMPDIR/cleanmymac.$(id -u).lock"
-  echo "$deadpid" >"$TMPDIR/cleanmymac.$(id -u).lock/pid"
+  mkdir -p "$TMPDIR/scrubmac.$(id -u).lock"
+  echo "$deadpid" >"$TMPDIR/scrubmac.$(id -u).lock/pid"
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   run "$CMM"
   [ "$status" -eq 0 ]
@@ -169,16 +169,16 @@ teardown() { teardown_sandbox; }
 
 @test "cleaner environment receives CMM_DRY_RUN and CMM_COOLDOWN_DAYS" {
   make_cleaner 10-env.sh 'echo "DRY=${CMM_DRY_RUN:-unset} COOL=${CMM_COOLDOWN_DAYS:-unset}"'
-  mkdir -p "$XDG_CONFIG_HOME/cleanmymac"
-  printf 'COOLDOWN_DAYS=7\n' >"$XDG_CONFIG_HOME/cleanmymac/config"
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  printf 'COOLDOWN_DAYS=7\n' >"$XDG_CONFIG_HOME/scrubmac/config"
   run "$CMM" -n
   [[ "$output" == *"DRY=1 COOL=7"* ]]
 }
 
 @test "list shows name, state, and source" {
   make_cleaner 10-alpha.sh '# gate: sometool' 'echo hi'
-  mkdir -p "$XDG_CONFIG_HOME/cleanmymac"
-  echo alpha >"$XDG_CONFIG_HOME/cleanmymac/disabled"
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  echo alpha >"$XDG_CONFIG_HOME/scrubmac/disabled"
   run "$CMM" list
   [ "$status" -eq 0 ]
   [[ "$output" == *alpha* ]]
@@ -191,12 +191,12 @@ teardown() { teardown_sandbox; }
   make_cleaner 60-docker.sh 'echo docker'
   run "$CMM" disable alpha
   [ "$status" -eq 0 ]
-  grep -Fxq alpha "$XDG_CONFIG_HOME/cleanmymac/disabled"
+  grep -Fxq alpha "$XDG_CONFIG_HOME/scrubmac/disabled"
   # materializing preserved the baked default-disabled entries
-  grep -Fxq docker "$XDG_CONFIG_HOME/cleanmymac/disabled"
+  grep -Fxq docker "$XDG_CONFIG_HOME/scrubmac/disabled"
   run "$CMM" enable docker
   [ "$status" -eq 0 ]
-  ! grep -Fxq docker "$XDG_CONFIG_HOME/cleanmymac/disabled"
+  ! grep -Fxq docker "$XDG_CONFIG_HOME/scrubmac/disabled"
   run "$CMM" enable no-such-cleaner
   [ "$status" -eq 2 ]
 }
@@ -215,7 +215,7 @@ make_fake_keg() {
   cp -R "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/VERSION" "$keg/libexec/"
   mkdir -p "$keg/libexec/cleaners"
   [ -n "$tap" ] && printf '{"source":{"spec":"stable","tap":"%s"}}' "$tap" >"$keg/INSTALL_RECEIPT.json"
-  ln -s "$keg/libexec/bin/cleanmymac" "$pfx/bin/$token"
+  ln -s "$keg/libexec/bin/scrubmac" "$pfx/bin/$token"
   cat >"$STUB_BIN/brew" <<EOF
 #!/bin/sh
 [ "\$1" = "--prefix" ] && { echo "$pfx"; exit 0; }
