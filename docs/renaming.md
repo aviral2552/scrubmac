@@ -1,8 +1,13 @@
 # Renaming: decision record & future runbook
 
-**Status (2026-08-03): rename deferred by the maintainer; homebrew-core
-submission skipped.** This document preserves the verified research so a
-future rename is a checklist, not a project.
+**Status (2026-08-09): name LOCKED — `scrubmac`.** The GitHub name is
+reserved (private placeholder at `aviral2552/scrubmac`); the detailed
+execution plan lives in **[rename-plan-scrubmac.md](rename-plan-scrubmac.md)**
+and supersedes the generic checklist and candidate table below. Execution
+timing remains the maintainer's call; homebrew-core submission stays gated on
+the self-submission notability bar.
+
+*(Historical record below — 2026-08-03 research that led here.)*
 
 ## Why a rename may eventually be needed
 
