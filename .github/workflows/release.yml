@@ -31,6 +31,9 @@ jobs:
       - name: Full check
         run: make lint test docs-check
 
+      - name: License files must ship (a release may never carry the README's license claim without the term text)
+        run: git ls-files --error-unmatch LICENSE NOTICE
+
       - name: Build tarball + checksums
         run: |
           VER="$(cat VERSION)"

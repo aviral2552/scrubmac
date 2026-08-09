@@ -1,0 +1,29 @@
+NOTICE — cleanmymac
+
+Copyright (C) 2018-2026 Aviral Sharma <https://github.com/aviral2552>
+
+This program is free software, licensed under the GNU General Public
+License, version 3.0 only (see LICENSE).
+
+ADDITIONAL TERM under GNU GPL version 3, section 7(b)
+-----------------------------------------------------
+
+  Preservation of attribution. Any conveyance of this software, or of a
+  work based on it, in source or object form, must preserve the
+  following author attribution in the material itself (for example, by
+  retaining this NOTICE file) or in the Appropriate Legal Notices
+  displayed by works containing it; where the work has documentation or
+  an "About"/help output, reasonably displaying the attribution there
+  also satisfies this term:
+
+      Based on cleanmymac by Aviral Sharma
+      https://github.com/aviral2552/cleanmymac
+
+As provided by GPLv3 section 7, this supplemental term is part of the
+license of this material and may not be removed from copies or
+derivative works. All other rights and obligations are exactly those of
+the GNU GPL v3.0.
+
+Historical note: this term applies to any copy of this material
+conveyed with this NOTICE file; releases up to and including v2.0.1
+were conveyed under GPL-3.0 without it.

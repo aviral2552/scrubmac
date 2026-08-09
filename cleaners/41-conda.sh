@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Licensed GPL-3.0-only with an additional attribution term under
+# GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # gate: conda
 # Conda: upgrade all packages and clean caches. -y is mandatory — without it
 # conda prompts and a non-interactive run would hang forever (F4).

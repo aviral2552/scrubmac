@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Licensed GPL-3.0-only with an additional attribution term under
+# GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # gate: yarn
 # Yarn: classic (v1) global upgrades + cache clean. Berry (v2+) keeps its
 # caches per-project, so there is nothing global to do.

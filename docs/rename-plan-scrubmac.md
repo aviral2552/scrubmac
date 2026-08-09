@@ -26,6 +26,8 @@ verified against Homebrew 6 source, and 15 more — inline throughout.*
 | Old lock name | 3.x also holds the legacy `cleanmymac.$uid.lock` for the shim's lifetime | a 2.x cron copy and 3.x must still mutually exclude (remove in v4) |
 | Tap migration | **`formula_renames.json` + DELETE old formula** (primary); deprecate!-only is the mutually-exclusive fallback | verified in Homebrew 6 `formulary.rb`: the renames entry shadows the old formula file unconditionally — keeping both makes the deprecation dead code and violates brew's rename docs |
 | History/identity | README keeps: "formerly `cleanmymac` (2018–2026), renamed to end confusion with MacPaw's unrelated products" | honest provenance; MacPaw's *CleanMyMac* product name legitimately remains in docs |
+| Old repo's fate | **kept as a public archived tombstone** (owner decision 2026-08): pinned pre-P1 history + sunset commit + duplicate v2.0.0/v2.0.1 releases, Actions disabled, then archived — **permanent once the NOTICE attribution URL ships** | visible "renamed and moved" note beats a silent redirect; consequences engineered in P2 |
+| License | GPL-3.0-only **+ GPLv3 §7(b) attribution term** (NOTICE file, added pre-rename) | stays free & copyleft; derivatives must credit the original project. Sole copyright holder verified (all git identities = one person). NOTICE's canonical URL flips to scrubmac in P5. SPDX has no id for §7-augmented GPL — formula stanza stays `GPL-3.0-only`; disclose the term if homebrew-core review asks (§7 terms are GPL-sanctioned and DFSG-compatible) |
 | homebrew-core | deferred until ≥225 stars / ≥90 forks / ≥90 watchers | §7; token becomes `scrubmac` |
 
 ## 1. Inventory (ground truth 2026-08-09: 33 files, 306 occurrences)
@@ -185,11 +187,63 @@ uninstall, legacy lock mutual exclusion, `cmm_config_dir` old+new literal
 pins. DoD: `make lint test docs-check` green (~130 tests), two-sided §1 gate
 clean, §6 matrix green. PR → CI → merge. *Rollback: don't merge.*
 
-**P2 — GitHub rename** (minutes). `gh repo delete aviral2552/scrubmac`
-(placeholder) → `gh api -X PATCH repos/aviral2552/cleanmymac -f name=scrubmac`
-→ update local remotes + tap README → verify old URL still answers via
-redirect. **Hard rule forever: never create a new repo named `cleanmymac`
-— it would sever the redirect.** *Rollback: rename back.*
+**P2 — GitHub rename + tombstone** (owner decision 2026-08: keep a visible
+`cleanmymac` repo saying "renamed and moved" rather than relying on the
+silent redirect; this deliberately trades the automatic redirect for a
+signpost). Order is load-bearing; steps 0–2 shrink the asset-404 window to
+~a minute:
+0. **Pre-flight/pre-stage** (before anything irreversible): `gh auth refresh
+   -h github.com -s delete_repo` (the placeholder delete needs the scope;
+   drop it afterwards). Author the sunset commit on a local branch, **based
+   on the parent of the P1 merge commit** (the sunset diff only makes sense
+   on the 2.x tree; pinning the base also keeps every pre-P1 clone
+   fast-forwardable). Download BOTH releases' assets (v2.0.0, v2.0.1) and
+   verify sha256 against the tap's pinned stanzas. Run P2 immediately after
+   P1 merges — any git user who pulls in the gap lands on v3 master, which
+   is NOT in tombstone history; their later `cleanmymac update` hits the
+   ff-only refusal ("diverged") with no hint. Keep the gap near zero and
+   note the cohort in release notes.
+1. `gh repo delete aviral2552/scrubmac` (placeholder) →
+   `gh api -X PATCH repos/aviral2552/cleanmymac -f name=scrubmac` — stars,
+   forks, watchers, issues, releases, history all move with the rename.
+   Update local remotes + tap README; verify the new URL.
+2. Create the **new** `aviral2552/cleanmymac` (public) and IMMEDIATELY
+   **disable Actions** — `gh api -X PUT
+   repos/aviral2552/cleanmymac/actions/permissions -F enabled=false` —
+   BEFORE any push. The workflow files exist at the tag refs and tag-push
+   runs execute the workflow as of the tag's commit: with Actions on, every
+   pushed tag re-runs release.yml (guard passes at each tag), racing the
+   manual asset re-upload with a freshly built tarball whose bytes are not
+   guaranteed to match the tap's pinned sha — a self-inflicted
+   "tampering" signature; ci.yml would likewise leave a permanent red X on
+   the sunset commit. Then push the pinned base + sunset commit as master,
+   and the tags. Sunset commit contents: README tombstone ("**Renamed and
+   moved → github.com/aviral2552/scrubmac**", migration commands,
+   attribution note per NOTICE); a `warn` at `bin/cleanmymac` startup;
+   `cmd_update` rewritten to print the moved-notice instead of pulling.
+   Exit check: `gh run list -R aviral2552/cleanmymac` shows ZERO runs.
+   Set description ("Renamed and moved to aviral2552/scrubmac") + homepage
+   (the scrubmac URL) now — archived repos are read-only.
+   *Corrected redirect model (verified):* GitHub redirects follow the
+   REPOSITORY, not the name-chain — old-username
+   `thelamehacker/cleanmymac` remotes resolve to the renamed repo id and
+   therefore track **scrubmac**, not the tombstone; that cohort's migration
+   signal is the v3 shim. Only `aviral2552/cleanmymac` URLs land on the
+   tombstone. Execution check: `git ls-remote` both URLs and compare HEADs.
+3. Recreate **both releases** (v2.0.0 AND v2.0.1) on the tombstone:
+   `gh release create vX --verify-tag` with the pre-staged byte-identical
+   assets and the original release bodies (`gh release view vX --json body
+   -R aviral2552/scrubmac`). Old asset URLs
+   (`…/cleanmymac/releases/download/…`, referenced by pre-migration tap
+   formulae) must keep resolving. Exit check: `curl -L` each
+   `/releases/download/` URL and re-verify sha256 against the tap stanzas.
+4. **Archive** the tombstone (last step — read-only afterwards). GitHub's
+   "Archived" banner + the README is the "renamed and moved" note.
+*Rollback: before step 2, plain rename-back. After step 2: delete the
+tombstone and rename back — but ONLY until the NOTICE attribution URL has
+shipped in a release; from then on the tombstone is **permanent**
+(deleting it would break downstream attribution compliance).* Hard rule:
+the tombstone is the ONLY thing that may ever occupy the old name.
 
 **P3 — Release 3.0.0.** Tag → workflow publishes `scrubmac-3.0.0.tar.gz` +
 `SHA256SUMS` → verify independently. Release notes = §3.5 table + the honest
@@ -209,6 +263,14 @@ commits.*
 
 **P5 — Comms & bookkeeping.** Repo description/topics; README pins new URLs;
 `docs/renaming.md` → EXECUTED; memory notes; release-notes announcement.
+**Cross-repo links**: update `aviral2552/macOS-toolkit` README — its
+"Clean My macOS" entry links `https://github.com/thelamehacker/cleanmymac`
+(old username; works today via user-level redirect) → point it at
+`https://github.com/aviral2552/scrubmac` with a "(formerly cleanmymac)"
+note. Sweep any other own-account references (`gh search code --owner`).
+**Licensing follow-through**: update the NOTICE attribution block's canonical
+name/URL to `scrubmac … github.com/aviral2552/scrubmac` (keeping "formerly
+cleanmymac"), and mirror the attribution line in the tombstone README.
 Within days: reserve `scrubmac` on npm/PyPI only as functional pointer
 packages (both registries prohibit pure squatting).
 
@@ -262,7 +324,11 @@ install.sh, uninstall.sh, CHANGELOG.md, or docs/ other than cleaners.md.
 |---|---|
 | formula_renames.json misbehaves in third-party taps | P4(a) live verify before announcing; documented fallback **including the 2.0.2 announcement release** (deprecation alone is invisible to existing users — verified in brew's upgrade.rb) |
 | someone claims `scrubmac` elsewhere pre-execution | GitHub reserved; npm/PyPI functional pointers in P5; don't sit on the plan for months |
-| GitHub redirect severed later | never re-create a `cleanmymac` repo |
+| redirect severance (now INTENTIONAL — tombstone) | old asset URLs kept alive by duplicate v2.0.0 + v2.0.1 releases on the tombstone (P2.3, pre-staged to shrink the 404 window to ~a minute); frozen git clones get a loud sunset nag + rewritten `update` notice (P2.2); nothing else may ever occupy the old name |
+| tombstone pushed/archived in wrong order | archive is the LAST P2 step (read-only afterwards); description/homepage set before archiving |
+| Actions auto-fires on tombstone tag pushes | **disable Actions before the first push** (P2.2) — else release.yml re-runs at each tag and can sha-poison the load-bearing asset URLs; exit check: zero runs |
+| `thelamehacker` username owned by a third party (uid 152917500) | un-mitigatable exposure for old-username remotes/links: that account could create `thelamehacker/cleanmymac` at any time and capture them. Own links fixed (macOS-toolkit README, 2026-08-09); release notes must tell old-username remotes to re-point; the redirect they ride today goes to scrubmac (repo-id), NOT the tombstone |
+| users who pulled in the P1→P2 gap | ff-refusal dead end on the tombstone; P2.0 pins the sunset base and mandates running P2 immediately after P1; cohort called out in release notes |
 | sed over/under-reach | explicit include-list from tracked files only (§5); two-sided gate (§1); hunk review |
 | users with both config dirs / symlinked config | §3.1 branches: prefer new, warn, never delete, never silently lose a dotfiles symlink |
 | old name captured by MacPaw's CLI on user machines | by design (name released); §3.2(5b) check + caveat + release notes say it out loud |

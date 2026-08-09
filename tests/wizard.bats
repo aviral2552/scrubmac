@@ -1,4 +1,7 @@
 #!/usr/bin/env bats
+# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Licensed GPL-3.0-only with an additional attribution term under
+# GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # Wizard: stdin-driven full passes, toggling, restart/quit, first-run flows.
 # CMM_WIZARD_ASSUME_TTY=1 lets tests drive the interactive path via stdin.
 

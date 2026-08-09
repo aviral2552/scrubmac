@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- License: still GPL-3.0-only, now with a GPLv3 §7(b) additional term
+  requiring preservation of attribution to the original project in
+  derivative works (new NOTICE file). Releases ≤ 2.0.1 remain plain
+  GPL-3.0 as published.
+
 ### Fixed
 
 - `cleanmymac update` on Homebrew installs now derives its own formula name

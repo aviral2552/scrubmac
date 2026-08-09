@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Licensed GPL-3.0-only with an additional attribution term under
+# GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # docs-check.sh — fail when cleaners/ and docs/cleaners.md drift apart (D9).
 # Every cleaners/NN-name.sh must have a "### name" heading in the reference,
 # and every "### name" heading must correspond to a shipped cleaner.

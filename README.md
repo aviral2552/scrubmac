@@ -1,7 +1,7 @@
 # cleanmymac
 
 [![CI](https://github.com/aviral2552/cleanmymac/actions/workflows/ci.yml/badge.svg)](https://github.com/aviral2552/cleanmymac/actions/workflows/ci.yml)
-[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](#license)
 
 One command that updates and cleans the dev tools on your Mac — Homebrew,
 npm/pnpm/yarn/bun, Python (uv/pipx/conda), Rust, Go, Composer, mise, the Mac
@@ -183,4 +183,6 @@ Keeps your config by default; `--purge` removes that too. Homebrew installs:
 
 ## License
 
-[GPL-3.0](LICENSE)
+[GPL-3.0-only](LICENSE) with one additional term under GPLv3 §7(b): works
+based on this code must preserve attribution to the original project — see
+[NOTICE](NOTICE). Free and open source, copyleft intact; credit required.

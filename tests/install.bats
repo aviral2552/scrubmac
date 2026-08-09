@@ -1,4 +1,7 @@
 #!/usr/bin/env bats
+# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Licensed GPL-3.0-only with an additional attribution term under
+# GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # install.sh: sandboxed installs — layout, symlink, idempotence, legacy
 # purge via --delete, .git preservation, seeded defaults, no sudo ever.
 

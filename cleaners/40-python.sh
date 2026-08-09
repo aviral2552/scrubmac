@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Licensed GPL-3.0-only with an additional attribution term under
+# GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # gate: uv pipx python3
 # Python tooling: uv self-update (standalone only) + tool upgrades + cache
 # prune, pipx package upgrades, and pip cache purge. The uv upgrade honors

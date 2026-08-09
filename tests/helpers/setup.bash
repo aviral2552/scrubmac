@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Part of cleanmymac — Copyright (C) 2018-2026 Aviral Sharma.
+# Licensed GPL-3.0-only with an additional attribution term under
+# GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # shellcheck disable=SC2016  # single-quoted $-expressions here are deliberate: they expand later, in generated scripts
 # tests/helpers/setup.bash — sandbox + stub factory shared by every suite.
 #
