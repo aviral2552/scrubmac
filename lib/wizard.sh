@@ -108,12 +108,12 @@ w_group_members() {
   printf '%s\n' "$CMM_DISCOVERED" | awk -F '\t' -v g="$1" '$6 == g { printf "%s ", $1 }'
 }
 
-# w_tool_mark GATE — "found" / "not found (auto-skips)".
+# w_tool_mark GATE — "found" / "not found — auto-skips".
 w_tool_mark() {
   case "$(cmm_tool_present "$1")" in
     yes) printf 'found\n' ;;
     '?') printf '?\n' ;;
-    *) printf 'not found (auto-skips)\n' ;;
+    *) printf 'not found — auto-skips\n' ;;
   esac
 }
 
@@ -192,10 +192,10 @@ w_cooldown_screen() {
     note 'ecosystem time to catch them. Trade-off: security PATCHES are also'
     note 'delayed by N days.'
     note ''
-    note '  Enforced for npm (scrubmac picks the newest version at least N days'
-    note '  old), uv (--exclude-newer), and pnpm/bun (their native release-age'
-    note '  settings); Yarn classic global upgrades are held. Homebrew is a'
-    note '  curated registry: not applicable. See docs/security.md (S4).'
+    note '  Enforced for npm, pnpm and Bun (scrubmac picks the newest version at'
+    note '  least N days old), uv (--exclude-newer) and pipx (--cooldown); Yarn'
+    note '  classic global upgrades are held. Homebrew is a curated registry:'
+    note '  not applicable. See docs/security.md (S4).'
     note ''
     note '  1) Off'
     note '  2) 3 days'
@@ -221,7 +221,7 @@ w_cooldown_screen() {
 
 w_app_screen() {
   while :; do
-    w_header 'App updates (Homebrew casks, Mac App Store)'
+    w_header 'App updates (Homebrew casks)'
     note 'Upgrading a GUI app can quit it while it is open, or stop to ask'
     note 'for your password — fine when you are watching, surprising in a'
     note 'scheduled run.'
@@ -250,7 +250,8 @@ w_output_screen() {
   while :; do
     w_header 'Output'
     note '  1) Full — stream every command and its output'
-    note '  2) Quiet — banners and summary only; failures still dump their output'
+    note '  2) Quiet — one line per cleaner, then the summary; a failing'
+    note '     cleaner still shows its output'
     note ''
     w_ask "Choice [Enter keeps $([ "$W_QUIET" = 1 ] && echo quiet || echo full)]: "
     [ "$W_RESTART" -eq 1 ] && return 0
@@ -313,16 +314,14 @@ EOF
   note ''
   note "Writes to: $CMM_CONFIG_FILE (other settings there are kept)"
   note ''
-  w_ask 'Write this configuration? (y)es / (r)estart / (q)uit: '
-  [ "$W_RESTART" -eq 1 ] && return 0
-  case "$W_ANSWER" in
-    y | Y) return 0 ;;
-    *)
-      note ''
-      note 'Wizard aborted — nothing was written.'
-      exit 0
-      ;;
-  esac
+  while :; do
+    w_ask 'Write this configuration? [Y]es / (r)estart / (q)uit: '
+    [ "$W_RESTART" -eq 1 ] && return 0
+    case "$W_ANSWER" in
+      '' | [yY] | [yY][eE][sS]) return 0 ;;
+      *) note '  (enter y, r, or q)' ;;
+    esac
+  done
 }
 
 w_write() {
@@ -338,7 +337,7 @@ w_write() {
     fi
     printf 'COOLDOWN_DAYS=%s\nAPP_UPDATES=%s\nQUIET=%s\nCOLOR=%s\n' \
       "$W_COOLDOWN" "$W_APP" "$W_QUIET" "$W_CHOSEN_COLOR"
-  } | cmm_write_file_atomic "$CMM_CONFIG_FILE"
+  } | cmm_write_file_atomic "$CMM_CONFIG_FILE" || exit 2
 
   # state: record choices that differ from a cleaner's default, keep earlier
   # explicit choices that still hold, and keep entries for cleaners that are
@@ -357,14 +356,24 @@ w_write() {
   done <<EOF
 $CMM_DISCOVERED
 EOF
-  for n in $(cat "$CMM_ENABLED_FILE" 2>/dev/null || true); do
-    known_cleaner "$n" || en="$en$n"$'\n'
-  done
-  for n in $(cat "$CMM_DISABLED_FILE" 2>/dev/null || true); do
-    known_cleaner "$n" || dis="$dis$n"$'\n'
-  done
-  printf '%s' "$en" | awk 'NF' | sort -u | cmm_write_file_atomic "$CMM_ENABLED_FILE"
-  printf '%s' "$dis" | awk 'NF' | sort -u | cmm_write_file_atomic "$CMM_DISABLED_FILE"
+  while IFS= read -r n; do
+    if [ -n "$n" ] && ! known_cleaner "$n"; then en="$en$n"$'\n'; fi
+  done <<EOF
+$(cmm_state_names "$CMM_ENABLED_FILE")
+EOF
+  while IFS= read -r n; do
+    if [ -n "$n" ] && ! known_cleaner "$n"; then dis="$dis$n"$'\n'; fi
+  done <<EOF
+$(cmm_state_names "$CMM_DISABLED_FILE")
+EOF
+  {
+    printf '%s\n' "$CMM__HDR_ON"
+    printf '%s' "$en" | awk 'NF' | sort -u
+  } | cmm_write_file_atomic "$CMM_ENABLED_FILE" || exit 2
+  {
+    printf '%s\n' "$CMM__HDR_OFF"
+    printf '%s' "$dis" | awk 'NF' | sort -u
+  } | cmm_write_file_atomic "$CMM_DISABLED_FILE" || exit 2
   note ''
   note "Wrote $CMM_CONFIG_FILE"
   note "Wrote $CMM_ENABLED_FILE and $CMM_DISABLED_FILE"

@@ -67,53 +67,37 @@ choose_bin_dir() {
   return 0
 }
 
-# abs_dir PATH — PATH made absolute without requiring it to exist.
-abs_dir() {
-  local p="$1"
-  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
-  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
-  printf '%s\n' "$p"
-}
-
-# is_install_dir DIR — DIR is empty, or is (or was) a scrubmac/cleanmymac
-# install: safe to mirror into with --delete.
-is_install_dir() {
-  local d="$1" entry
-  [ -d "$d" ] || return 0
-  for entry in "$d"/* "$d"/.[!.]*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    # non-empty: it must carry a scrubmac (or legacy cleanmymac) marker
-    [ -e "$d/bin/scrubmac" ] || [ -e "$d/bin/cleanmymac" ] ||
-      [ -e "$d/cleanmymac.sh" ] || [ -e "$d/scrubmac.sh" ] || [ -e "$d/setup/install.sh" ]
-    return
-  done
-  return 0
-}
-
 # ours LINK — a symlink into this install (or the legacy one), dangling ok.
 ours() { points_into "$1" "$DEST_DIR" || points_into "$1" "$OLD_DEST"; }
 
 # link_ours TARGET LINK LABEL — create LINK -> TARGET unless something that
 # is not ours already sits at LINK.
+FOREIGN_LAUNCHER=''
 link_ours() {
   local target="$1" link="$2" label="$3"
   if [ -e "$link" ] || [ -L "$link" ]; then
     if ! ours "$link"; then
       echo "note: $link already exists and is not from this installer (Homebrew's scrubmac?) — left alone; skipped the $label link"
+      [ "$label" = launcher ] && FOREIGN_LAUNCHER="$link"
       return 1
     fi
   fi
-  ln -fs "$target" "$link"
+  ln -fsn "$target" "$link"
 }
 
-DEST_DIR="$(abs_dir "$DEST_DIR")"
-OLD_DEST="$(abs_dir "$OLD_DEST")"
-case "$DEST_DIR" in
-  / | "$(abs_dir "$HOME")")
-    printf 'error: refusing to install into %s — choose a dedicated directory\n' "$DEST_DIR" >&2
-    exit 2
-    ;;
-esac
+die() {
+  printf 'error: %s\n' "$1" >&2
+  exit 2
+}
+
+# Canonical paths only: "$HOME/." or a symlinked parent must not slip past
+# the guards below (rsync --delete erases whatever is in the way).
+DEST_DIR="$(cmm_canon_path "$DEST_DIR")" || die "unusable install dir '${CMM_PREFIX:-$HOME/.scrubmac}' (no . or .. components, and it must not be a file)"
+OLD_DEST="$(cmm_canon_parent "$OLD_DEST")" || die "unusable legacy dir '${CMM_OLD_PREFIX:-$HOME/.cleanmymac}'"
+SRC_DIR="$(cmm_canon_path "$SRC_DIR")" || die "cannot resolve the source tree"
+if cmm_unsafe_target "$DEST_DIR"; then
+  die "refusing to install into $DEST_DIR — that is /, your home, or a parent of it; choose a dedicated directory"
+fi
 
 echo "Installing scrubmac $(cat "$SRC_DIR/VERSION" 2>/dev/null || echo '') into $DEST_DIR"
 
@@ -148,9 +132,8 @@ else
       ;;
   esac
   # (a dir just moved here from the legacy install path is ours by definition)
-  if [ "$MIGRATED" = 0 ] && ! is_install_dir "$DEST_DIR"; then
-    printf 'error: %s exists and is not a scrubmac install — refusing to mirror into it (that would delete its contents)\n' "$DEST_DIR" >&2
-    exit 2
+  if [ "$MIGRATED" = 0 ] && ! cmm_is_install_dir "$DEST_DIR"; then
+    die "$DEST_DIR exists and is not a scrubmac install — refusing to mirror into it (that would delete its contents)"
   fi
   mkdir -p "$DEST_DIR"
   # --delete keeps the app dir an exact mirror: files removed upstream (and
@@ -233,10 +216,22 @@ if [ -n "$leftover" ]; then
   esac
 fi
 
-# Opt-in cleaners (heavier pruners) are off until enabled; name them so the
-# state is never a surprise.
+# A 2.x install that could not be moved (both dirs existed) is left alone.
+if [ -d "$OLD_DEST" ] && [ ! -L "$OLD_DEST" ] && [ "$OLD_DEST" != "$DEST_DIR" ]; then
+  echo "note: an old cleanmymac install is still at $OLD_DEST (not migrated, because"
+  echo "      $DEST_DIR already existed) — delete it once nothing runs it any more."
+fi
+
+# Opt-in cleaners (heavier pruners) start disabled; name them so the state is
+# never a surprise (an earlier version's choices are kept: 'scrubmac list').
 optin="$({ grep -l '^# default: off' "$DEST_DIR"/cleaners/*.sh 2>/dev/null || true; } | sed 's|.*/||; s/^[0-9]*-//; s/\.sh$//' | tr '\n' ' ')"
 echo
-[ -n "$optin" ] && echo "Opt-in cleaners (off until you enable them): ${optin}— 'scrubmac enable <name>' or the wizard."
+[ -n "$optin" ] && echo "Opt-in cleaners (off unless you turn them on): ${optin}— 'scrubmac enable <name>' or the wizard; 'scrubmac list' shows what is on."
+if [ -n "$FOREIGN_LAUNCHER" ]; then
+  echo "note: two installs now exist — $FOREIGN_LAUNCHER (not from this installer;"
+  echo "      probably Homebrew's) and this copy at $DEST_DIR. 'scrubmac' runs the"
+  echo "      first one on your PATH; keep one: 'brew uninstall scrubmac', or"
+  echo "      '$DEST_DIR/uninstall.sh'."
+fi
 echo "Done. Run 'scrubmac' to start, 'scrubmac help' for the command reference,"
 echo "and 'scrubmac schedule weekly' to keep things tidy automatically."

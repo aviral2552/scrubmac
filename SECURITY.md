@@ -36,5 +36,6 @@ by anyone else (a refusal fails the run), gives cleaners no stdin, parses
 (never sources) its config file, applies a supply-chain cooldown by default,
 self-updates only by fast-forwarding to a release tag (signature-checked
 against keys pinned in your installed copy, once releases are signed) or via
-Homebrew, and makes no network calls of its own. The full threat model,
+Homebrew, installs and uninstalls only into directories that hold a scrubmac
+install, and makes no network calls of its own. The full threat model,
 including accepted residual risks, lives in [docs/security.md](docs/security.md).

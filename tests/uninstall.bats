@@ -35,7 +35,7 @@ install_first() {
   [ ! -e "$CMM_BIN_DIR/scrubmac" ]
   [ -f "$XDG_CONFIG_HOME/scrubmac/disabled" ]
   [ -d "$STATE_DIR/logs" ]
-  [[ "$output" == *"Kept your configuration"* ]]
+  [[ "$output" == *"Kept your configuration"* ]] || false
 }
 
 @test "--purge also removes the configuration and the state dir" {
@@ -83,7 +83,7 @@ EOF
   run "$UNINSTALL"
   [ "$status" -eq 0 ]
   [ -f "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" ]
-  [[ "$output" == *"kept the launchd schedule"* ]]
+  [[ "$output" == *"kept the launchd schedule"* ]] || false
   refute grep -q bootout "$CALL_LOG"
 }
 
@@ -93,14 +93,14 @@ EOF
   export PATH="$CMM_BIN_DIR:$PATH"
   run "$UNINSTALL"
   [ "$status" -eq 0 ]
-  [ ! -e "$CMM_BIN_DIR/scrubmac" ] && [ ! -L "$CMM_BIN_DIR/scrubmac" ]
+  [ ! -e "$CMM_BIN_DIR/scrubmac" ] && [ ! -L "$CMM_BIN_DIR/scrubmac" ] || false
 }
 
 @test "is graceful when nothing is installed" {
   run "$UNINSTALL"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no launcher symlink found"* ]]
-  [[ "$output" == *"nothing to remove"* ]]
+  [[ "$output" == *"no launcher symlink found"* ]] || false
+  [[ "$output" == *"nothing to remove"* ]] || false
 }
 
 @test "a foreign scrubmac binary on PATH is left alone" {
@@ -111,6 +111,90 @@ EOF
   run "$UNINSTALL"
   [ "$status" -eq 0 ]
   [ -x "$CMM_BIN_DIR/scrubmac" ]
+}
+
+@test "refuses \$HOME, / or a parent of home as the install dir — nothing is deleted" {
+  touch "$HOME/keep-me"
+  CMM_PREFIX="$HOME" run "$UNINSTALL"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"refusing to remove $HOME"* ]] || false
+  [ -f "$HOME/keep-me" ]
+  CMM_PREFIX="$SANDBOX" run "$UNINSTALL"
+  [ "$status" -eq 1 ]
+  [ -f "$HOME/keep-me" ]
+  CMM_PREFIX=/ run "$UNINSTALL"
+  [ "$status" -eq 2 ]
+  CMM_PREFIX="$HOME/." run "$UNINSTALL"
+  [ "$status" -eq 2 ]
+  [ -f "$HOME/keep-me" ]
+}
+
+@test "leaves a directory that is not a scrubmac install alone" {
+  mkdir -p "$SANDBOX/notmine"
+  printf 'precious\n' >"$SANDBOX/notmine/thesis.tex"
+  CMM_PREFIX="$SANDBOX/notmine" run "$UNINSTALL"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not look like a scrubmac install"* ]] || false
+  [ -f "$SANDBOX/notmine/thesis.tex" ]
+}
+
+@test "a trailing slash on the install dir still finds and removes it" {
+  install_first
+  CMM_PREFIX="$CMM_PREFIX/" run "$UNINSTALL"
+  [ "$status" -eq 0 ]
+  [ ! -e "$CMM_PREFIX" ]
+}
+
+@test "a legacy-path symlink that points elsewhere is kept" {
+  install_first
+  export CMM_OLD_PREFIX="$SANDBOX/oldapp"
+  mkdir -p "$SANDBOX/someone-else"
+  ln -s "$SANDBOX/someone-else" "$CMM_OLD_PREFIX"
+  run "$UNINSTALL"
+  [ "$status" -eq 0 ]
+  [ -L "$CMM_OLD_PREFIX" ]
+  [[ "$output" == *"left $CMM_OLD_PREFIX alone"* ]] || false
+}
+
+@test "--purge never deletes a state dir override that is not named scrubmac" {
+  install_first
+  export CMM_STATE_DIR="$SANDBOX/mystuff"
+  mkdir -p "$CMM_STATE_DIR"
+  touch "$CMM_STATE_DIR/important"
+  run "$UNINSTALL" --purge
+  [ "$status" -eq 1 ]
+  [ -f "$CMM_STATE_DIR/important" ]
+  [[ "$output" == *"not a scrubmac config or state directory"* ]] || false
+}
+
+@test "--purge removes only the link when the config dir is a dotfiles symlink" {
+  install_first
+  mkdir -p "$SANDBOX/dotfiles/scrubmac" "$XDG_CONFIG_HOME"
+  printf 'QUIET=1\n' >"$SANDBOX/dotfiles/scrubmac/config"
+  ln -s "$SANDBOX/dotfiles/scrubmac" "$XDG_CONFIG_HOME/scrubmac"
+  run "$UNINSTALL" --purge
+  [ "$status" -eq 0 ]
+  [ ! -e "$XDG_CONFIG_HOME/scrubmac" ]
+  [ -f "$SANDBOX/dotfiles/scrubmac/config" ]
+}
+
+@test "the installed copy uninstalling itself does not suggest re-running it" {
+  install_first
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  run "$CMM_PREFIX/uninstall.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$CMM_PREFIX" ]
+  [[ "$output" == *"remove with: rm -rf"* ]] || false
+  [[ "$output" != *"--purge"* ]] || false
+}
+
+@test "warns about a crontab line that still runs scrubmac" {
+  install_first
+  printf '#!/bin/sh\necho "0 9 * * 1 $HOME/.scrubmac/bin/scrubmac -q"\n' >"$STUB_BIN/crontab"
+  chmod 755 "$STUB_BIN/crontab"
+  run "$UNINSTALL"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"your crontab still runs scrubmac"* ]] || false
 }
 
 @test "rejects unknown flags" {

@@ -2,7 +2,7 @@
 # Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
-# gate: xcodebuild
+# gate: xcodebuild ~/Library/Developer/Xcode/DerivedData
 # group: Apple development
 # default: off
 # summary: delete unavailable simulators; purge unused DerivedData and old device-support symbols (age-gated)
@@ -14,7 +14,9 @@
 # (default 90), always keeping the newest per platform. All of it is
 # regenerable; the age gates avoid forcing rebuilds of active projects and
 # re-copying symbols for devices still in use. Nothing is touched while Xcode
-# is running.
+# is running. A project only counts as gone when its folder can be read: a
+# scheduled run may not read ~/Desktop, ~/Documents, ~/Downloads or iCloud
+# Drive (macOS privacy protection), and external volumes come and go.
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 . "${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
@@ -54,16 +56,30 @@ recently_touched() {
   [ -n "$(find "$1" -maxdepth 2 -mtime "-$2" -print -quit 2>/dev/null)" ]
 }
 
+# ws_gone PATH — the recorded project is verifiably gone: an absolute path
+# that is missing while its parent folder exists and can be listed. Folders
+# this run may not read (privacy-protected, or on an unmounted volume) make
+# it unknown — and unknown is never "gone".
+ws_gone() {
+  local parent
+  case "$1" in /?*) ;; *) return 1 ;; esac
+  [ -e "$1" ] && return 1
+  parent="${1%/*}"
+  [ -n "$parent" ] || parent=/
+  [ -d "$parent" ] || return 1
+  ls "$parent" >/dev/null 2>&1
+}
+
+if pgrep -x Xcode >/dev/null 2>&1; then
+  note "- Xcode is running: simulators, DerivedData and device support are left alone this run"
+  summary_note "Xcode was running — simulators, DerivedData and device support untouched"
+  exit 0
+fi
+
 if [ "$full_xcode" = 1 ]; then
   try xcrun simctl delete unavailable
 else
   note "- simulator cleanup needs a full Xcode (the active developer dir is ${CMM__DEVDIR:-not set})"
-fi
-
-if pgrep -x Xcode >/dev/null 2>&1; then
-  note "- Xcode is running: DerivedData and device support are left alone this run"
-  summary_note "Xcode was running — DerivedData and device support untouched"
-  exit 0
 fi
 
 dd_age="${CMM_DERIVEDDATA_AGE_DAYS:-30}"
@@ -78,7 +94,7 @@ if [ -d "$dd_dir" ]; then
     [ -d "$d" ] && [ ! -L "$d" ] || continue
     reason=''
     ws="$(dd_workspace "$d")"
-    if [ -n "$ws" ] && [ "${ws#/}" != "$ws" ] && [ ! -e "$ws" ]; then
+    if [ -n "$ws" ] && ws_gone "$ws"; then
       reason="its project no longer exists ($ws)"
     elif last="$(dd_last_used "$d")"; then
       if [ $((now - last)) -gt $((dd_age * 86400)) ]; then

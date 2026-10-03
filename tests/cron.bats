@@ -2,10 +2,12 @@
 # Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
-# Cron-like environments (env -i: no TMPDIR, no XDG, PATH=/usr/bin:/bin, no
-# TTY): the run still works, its lock is the same one a terminal run takes,
-# a PATH that hides every tool is called out, and doctor flags a crontab
-# without PATH.
+# Cron-like environments (env -i: no XDG, PATH=/usr/bin:/bin, no TTY): the
+# run still works, its lock is the same one a terminal run takes, a PATH that
+# hides every tool is called out, and doctor flags a crontab without PATH.
+# TMPDIR is passed through (the sandbox's): without it the transitional 2.x
+# lock would land in the host's shared /tmp and collide with real runs. A
+# TMPDIR that does not exist is covered in migration.bats.
 
 load helpers/setup
 
@@ -14,7 +16,7 @@ teardown() { teardown_sandbox; }
 
 # cron_run ARGS… — run scrubmac the way cron would (plus the fixture dir).
 cron_run() {
-  env -i HOME="$HOME" LOGNAME=tester SHELL=/bin/sh PATH=/usr/bin:/bin \
+  env -i HOME="$HOME" TMPDIR="$TMPDIR" LOGNAME=tester SHELL=/bin/sh PATH=/usr/bin:/bin \
     CMM_CLEANERS_DIR="$FIXTURES" CMM_NOTIFY=never CMM_OFFLINE=0 \
     "$CMM" "$@"
 }
@@ -25,8 +27,8 @@ cron_run() {
   make_lib_cleaner 30-uvish.sh 'skip_unless third_missing_tool_xyz'
   run cron_run --scheduled --quiet
   [ "$status" -eq 0 ]
-  [[ "$output" == *"every cleaner skipped"* ]]
-  [[ "$output" == *"/usr/bin:/bin"* ]]
+  [[ "$output" == *"every cleaner skipped"* ]] || false
+  [[ "$output" == *"/usr/bin:/bin"* ]] || false
   [ -f "$HOME/.local/state/scrubmac/last-run.json" ]
   ls "$HOME"/.local/state/scrubmac/logs/run-*.log >/dev/null
   [ ! -L "$HOME/.local/state/scrubmac/run.lock" ] # released
@@ -44,7 +46,7 @@ cron_run() {
   done
   run cron_run
   [ "$status" -eq 2 ]
-  [[ "$output" == *"already in progress (pid $pid)"* ]]
+  [[ "$output" == *"already in progress (pid $pid)"* ]] || false
   kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 }
@@ -55,7 +57,7 @@ printf '# m h dom mon dow command\n0 9 * * 1 $HOME/.scrubmac/bin/scrubmac -q\n'
 EOF
   run "$CMM" doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"your crontab sets no PATH"* ]]
+  [[ "$output" == *"your crontab sets no PATH"* ]] || false
 }
 
 @test "doctor flags a crontab PATH without Homebrew's bin, and is quiet when it has it" {
@@ -63,13 +65,13 @@ EOF
 printf 'PATH=/usr/bin:/bin\n0 9 * * 1 scrubmac --scheduled\n'
 EOF
   CMM_BREW_PREFIX=/opt/homebrew run "$CMM" doctor
-  [[ "$output" == *"crontab's PATH lacks /opt/homebrew/bin"* ]]
+  [[ "$output" == *"crontab's PATH lacks /opt/homebrew/bin"* ]] || false
   make_stub_script crontab <<'EOF'
 printf 'PATH=/opt/homebrew/bin:/usr/bin:/bin\n0 9 * * 1 scrubmac --scheduled\n'
 EOF
   CMM_BREW_PREFIX=/opt/homebrew run "$CMM" doctor
-  [[ "$output" != *"crontab's PATH lacks"* ]]
-  [[ "$output" != *"sets no PATH"* ]]
+  [[ "$output" != *"crontab's PATH lacks"* ]] || false
+  [[ "$output" != *"sets no PATH"* ]] || false
 }
 
 @test "doctor reminds about a crontab that still calls cleanmymac" {
@@ -77,14 +79,14 @@ EOF
 printf 'PATH=/opt/homebrew/bin:/usr/bin:/bin\n0 9 * * 1 cleanmymac -q\n'
 EOF
   run "$CMM" doctor
-  [[ "$output" == *"still references 'cleanmymac'"* ]]
+  [[ "$output" == *"still references 'cleanmymac'"* ]] || false
 }
 
 @test "a cron-like run never prompts, even with no config" {
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   run cron_run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"using defaults"* ]]
-  [[ "$output" == *ALPHA-RAN* ]]
+  [[ "$output" == *"using defaults"* ]] || false
+  [[ "$output" == *ALPHA-RAN* ]] || false
   [ ! -f "$HOME/.config/scrubmac/config" ] # nothing written behind your back
 }

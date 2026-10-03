@@ -110,47 +110,32 @@ jobs:
           label=com.github.aviral2552.scrubmac
           scrubmac schedule daily 03:17
           plutil -lint "$HOME/Library/LaunchAgents/$label.plist"
-          launchctl print "gui/$(id -u)/$label" | head -20
+          launchctl print "gui/$(id -u)/$label" | sed -n 1,20p
           scrubmac schedule status | tee status.txt
           grep -q "state:    loaded" status.txt
           scrubmac schedule off
           if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then echo "agent still loaded"; exit 1; fi
-
-      - name: Homebrew formula from a local tap (install, test, audit)
-        run: |
-          set -euxo pipefail
-          ver="$(cat VERSION)"
-          git archive --format=tar.gz --prefix="scrubmac-$ver/" -o "$RUNNER_TEMP/scrubmac-$ver.tar.gz" HEAD
-          sha="$(shasum -a 256 "$RUNNER_TEMP/scrubmac-$ver.tar.gz" | cut -d' ' -f1)"
-          brew tap-new --no-git local/e2e
-          tap="$(brew --repository local/e2e)"
-          sed -e "s|^  url \".*\"|  url \"file://$RUNNER_TEMP/scrubmac-$ver.tar.gz\"|" \
-              -e "s|^  sha256 \".*\"|  sha256 \"$sha\"|" \
-              packaging/homebrew/scrubmac.rb >"$tap/Formula/scrubmac.rb"
-          brew install --build-from-source local/e2e/scrubmac
-          brew test local/e2e/scrubmac
-          "$(brew --prefix)/opt/scrubmac/bin/scrubmac" list --names | grep -qx homebrew
-          test -f "$(brew --prefix)/share/zsh/site-functions/_scrubmac"
-          test -f "$(brew --prefix)/etc/bash_completion.d/scrubmac"
-          test -f "$(brew --prefix)/share/man/man1/scrubmac.1"
-
-      - name: brew audit --strict (the local tap's file:// URL may be flagged)
-        continue-on-error: true
-        run: brew audit --strict local/e2e/scrubmac
-
-      - name: remove the Homebrew copy again
-        if: always()
-        run: brew uninstall local/e2e/scrubmac || true
 
       - name: Real full run (every default cleaner, for real)
         run: |
           set -x
           scrubmac --json >run.json 2>run.log || true
           tail -n 60 run.log
+          # gh is not logged in here: its cleaner must skip, not fail
           python3 tests/e2e-live/assert_run.py run.json --exit 0 --no-fail \
-            --ok homebrew,npm,pnpm,yarn,python,poetry,codex,claude,gh,rustup,mise,pre-commit,cocoapods,swiftpm \
-            --note homebrew=casks
-          scrubmac last | head -40
+            --ok homebrew,npm,pnpm,yarn,python,poetry,codex,claude,rustup,mise,pre-commit,cocoapods,swiftpm \
+            --status gh=skip --note "homebrew=casks,gh=not logged in"
+          scrubmac last | sed -n 1,40p # (sed reads it all: no SIGPIPE under pipefail)
+
+      - name: gh extensions, logged in with the workflow token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -x
+          gh extension install dlvhdr/gh-dash
+          scrubmac gh --json >gh.json 2>gh.log || true
+          tail -n 20 gh.log
+          python3 tests/e2e-live/assert_run.py gh.json --exit 0 --ok gh
 
       - name: Cooldown-off paths (npm update -g, yarn global upgrade, plain uv/pipx/pnpm upgrades)
         run: |
@@ -171,9 +156,49 @@ jobs:
       - name: uninstall.sh --purge
         if: always()
         run: |
+          set -x
           "$HOME/.scrubmac/uninstall.sh" --purge
           test ! -e "$HOME/.scrubmac"
           test ! -e "$HOME/.config/scrubmac"
+          pfx="$(brew --prefix)"
+          for f in bin/scrubmac share/man/man1/scrubmac.1 share/zsh/site-functions/_scrubmac etc/bash_completion.d/scrubmac; do
+            if [ -e "$pfx/$f" ] || [ -L "$pfx/$f" ]; then echo "left behind: $pfx/$f"; exit 1; fi
+          done
+
+      - name: Homebrew formula from a local tap (install, test, audit)
+        run: |
+          set -euxo pipefail
+          ver="$(cat VERSION)"
+          git archive --format=tar.gz --prefix="scrubmac-$ver/" -o "$RUNNER_TEMP/scrubmac-$ver.tar.gz" HEAD
+          sha="$(shasum -a 256 "$RUNNER_TEMP/scrubmac-$ver.tar.gz" | cut -d' ' -f1)"
+          brew tap-new --no-git local/e2e
+          tap="$(brew --repository local/e2e)"
+          sed -e "s|^  url \".*\"|  url \"file://$RUNNER_TEMP/scrubmac-$ver.tar.gz\"|" \
+              -e "s|^  sha256 \".*\"|  sha256 \"$sha\"|" \
+              packaging/homebrew/scrubmac.rb >"$tap/Formula/scrubmac.rb"
+          brew install --build-from-source local/e2e/scrubmac
+          brew test local/e2e/scrubmac
+          "$(brew --prefix)/opt/scrubmac/bin/scrubmac" list --names | grep -qx homebrew
+          # (runs after uninstall.sh: install.sh's own links are gone, so
+          # every link here must be the formula's, resolving into its keg)
+          keg="$(brew --cellar scrubmac)"
+          for f in bin/scrubmac share/zsh/site-functions/_scrubmac etc/bash_completion.d/scrubmac \
+            share/fish/vendor_completions.d/scrubmac.fish share/man/man1/scrubmac.1; do
+            real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$(brew --prefix)/$f")"
+            case "$real" in
+              "$keg"/*) echo "ok: $f -> $real" ;;
+              *) echo "not the formula's: $f -> $real"; exit 1 ;;
+            esac
+          done
+
+      - name: brew audit --strict (the local tap's file:// URL may be flagged)
+        continue-on-error: true
+        run: brew audit --strict local/e2e/scrubmac
+
+      - name: remove the Homebrew copy again
+        if: always()
+        run: brew uninstall local/e2e/scrubmac || true
+
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

@@ -30,7 +30,7 @@ teardown() { teardown_sandbox; }
   run "$INSTALL"
   run "$CMM_BIN_DIR/scrubmac" version
   [ "$status" -eq 0 ]
-  [[ "$output" == *"$(cat "$REPO_ROOT/VERSION")"* ]]
+  [[ "$output" == *"$(cat "$REPO_ROOT/VERSION")"* ]] || false
 }
 
 @test "re-running the installer is idempotent" {
@@ -66,7 +66,7 @@ teardown() { teardown_sandbox; }
   [ "$status" -eq 0 ]
   [ ! -e "$XDG_CONFIG_HOME/scrubmac/disabled" ]
   [ ! -e "$XDG_CONFIG_HOME/scrubmac/enabled" ]
-  [[ "$output" == *"Opt-in cleaners (off until you enable them):"*docker*xcode* ]]
+  [[ "$output" == *"Opt-in cleaners (off unless you turn them on):"*docker*xcode* ]] || false
   # existing choices are never touched
   mkdir -p "$XDG_CONFIG_HOME/scrubmac"
   printf 'npm\n' >"$XDG_CONFIG_HOME/scrubmac/disabled"
@@ -81,16 +81,66 @@ EOF
   printf 'precious\n' >"$CMM_PREFIX/thesis.tex"
   run "$INSTALL"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"not a scrubmac install"* ]]
+  [[ "$output" == *"not a scrubmac install"* ]] || false
   [ -f "$CMM_PREFIX/thesis.tex" ]
 }
 
 @test "refuses \$HOME or / as the install dir" {
   CMM_PREFIX="$HOME" run "$INSTALL"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"refusing to install into"* ]]
+  [[ "$output" == *"refusing to install into"* ]] || false
   CMM_PREFIX=/ run "$INSTALL"
   [ "$status" -eq 2 ]
+}
+
+@test "the guards see through \$HOME/., trailing slashes and symlinked parents" {
+  touch "$HOME/keep-me"
+  CMM_PREFIX="$HOME/." run "$INSTALL"
+  [ "$status" -eq 2 ]
+  CMM_PREFIX="$HOME/" run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to install into"* ]] || false
+  ln -s "$HOME" "$SANDBOX/homelink"
+  CMM_PREFIX="$SANDBOX/homelink" run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to install into"* ]] || false
+  CMM_PREFIX="$SANDBOX/app/../home" run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [ -f "$HOME/keep-me" ]
+}
+
+@test "a directory that merely holds a scrubmac launcher link is not an install (no mirror into ~/.local)" {
+  export CMM_BIN_DIR="$HOME/.local/bin"
+  run "$INSTALL" # first install: links ~/.local/bin/scrubmac
+  [ "$status" -eq 0 ]
+  [ -L "$HOME/.local/bin/scrubmac" ]
+  mkdir -p "$HOME/.local/share/precious"
+  touch "$HOME/.local/share/precious/data"
+  CMM_PREFIX="$HOME/.local" run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not a scrubmac install"* ]] || false
+  [ -f "$HOME/.local/share/precious/data" ]
+}
+
+@test "installs through a symlinked parent dir into the real location" {
+  mkdir -p "$SANDBOX/real"
+  ln -s "$SANDBOX/real" "$SANDBOX/via"
+  CMM_PREFIX="$SANDBOX/via/app" run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -x "$SANDBOX/real/app/bin/scrubmac" ]
+  [ "$(readlink "$CMM_BIN_DIR/scrubmac")" = "$SANDBOX/real/app/bin/scrubmac" ]
+}
+
+@test "an old 2.x install that cannot be moved (both dirs exist) is called out, not touched" {
+  export CMM_OLD_PREFIX="$SANDBOX/oldapp"
+  "$INSTALL" >/dev/null # the new install exists first
+  mkdir -p "$CMM_OLD_PREFIX"
+  rsync -a --exclude=.git "$REPO_ROOT/" "$CMM_OLD_PREFIX/"
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -d "$CMM_OLD_PREFIX" ]
+  [ ! -L "$CMM_OLD_PREFIX" ]
+  [[ "$output" == *"an old cleanmymac install is still at $CMM_OLD_PREFIX"* ]] || false
 }
 
 @test "refuses when the source tree sits inside the install dir (the mirror would delete it)" {
@@ -99,7 +149,7 @@ EOF
   rsync -a --exclude=.git "$REPO_ROOT/" "$CMM_PREFIX/src/"
   run "$CMM_PREFIX/src/install.sh"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"inside the install dir"* ]]
+  [[ "$output" == *"inside the install dir"* ]] || false
   [ -x "$CMM_PREFIX/src/install.sh" ]
 }
 
@@ -110,7 +160,8 @@ EOF
   ln -s "$SANDBOX/Cellar/scrubmac/9/bin/scrubmac" "$CMM_BIN_DIR/scrubmac"
   run "$INSTALL"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"is not from this installer"* ]]
+  [[ "$output" == *"is not from this installer"* ]] || false
+  [[ "$output" == *"two installs now exist — $CMM_BIN_DIR/scrubmac"* ]] || false
   [ "$(readlink "$CMM_BIN_DIR/scrubmac")" = "$SANDBOX/Cellar/scrubmac/9/bin/scrubmac" ]
 }
 
@@ -141,12 +192,19 @@ EOF
 }
 
 @test "a sandboxed install never writes outside its sandbox (man-link leak regression)" {
-  # The man page links into brew's manpath ONLY when the launcher itself went
-  # into brew's bin; with CMM_BIN_DIR overridden, nothing may touch the real
-  # brew tree.
+  # The man page and completions link into brew's tree ONLY when the
+  # launcher itself went into brew's bin; with CMM_BIN_DIR elsewhere, a
+  # writable brew prefix must stay untouched.
+  local pfx="$SANDBOX/brewpfx"
+  mkdir -p "$pfx/bin" "$pfx/share/man/man1" "$pfx/share/zsh/site-functions" \
+    "$pfx/etc/bash_completion.d" "$pfx/share/fish/vendor_completions.d"
+  printf '#!/bin/sh\n[ "$1" = --prefix ] && echo "%s"\nexit 0\n' "$pfx" >"$STUB_BIN/brew"
+  chmod 755 "$STUB_BIN/brew"
   run "$INSTALL"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"Linked man page"* ]]
+  [ -L "$CMM_BIN_DIR/scrubmac" ]
+  [[ "$output" != *"Linked man page"* ]] || false
+  [ -z "$(find "$pfx" -type l)" ]
 }
 
 @test "never invokes sudo, even when no bin dir is writable (S1)" {
@@ -154,7 +212,7 @@ EOF
   export CMM_BIN_DIR="/nonexistent-root-owned/bin"
   run "$INSTALL"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no writable bin directory"* ]]
+  [[ "$output" == *"no writable bin directory"* ]] || false
   refute grep -q sudo "$CALL_LOG"
 }
 
@@ -165,7 +223,7 @@ EOF
   chmod 755 "$fake/install.sh"
   run "$fake/install.sh"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"does not look like a scrubmac source tree"* ]]
+  [[ "$output" == *"does not look like a scrubmac source tree"* ]] || false
 }
 
 @test "installer never self-destructs its source directory (F3)" {

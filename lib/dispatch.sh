@@ -21,16 +21,16 @@ CMM_SETTINGS='COOLDOWN_DAYS|7|int|supply-chain cooldown: skip package versions y
 QUIET|0|bool|1 = hide cleaner output unless the cleaner fails
 COLOR|auto|auto,always,never|colored output
 TIMEOUT|3600|int|per-cleaner time limit in seconds (0 = none)
-APP_UPDATES|interactive|interactive,always,never|GUI app upgrades (Homebrew casks, App Store): interactive = only when you run scrubmac yourself
+APP_UPDATES|interactive|interactive,always,never|GUI app upgrades (Homebrew casks): interactive = only when you run scrubmac yourself
 NOTIFY|failures|failures,always,never|desktop notification after unattended runs
 ON_BATTERY|run|run,skip|scheduled runs while on battery power
 MIN_HOURS_BETWEEN_RUNS|0|int|scheduled runs skip when a full run succeeded within N hours (0 = off)
-LOG_KEEP|20|int|run logs to keep
+LOG_KEEP|20|int|run logs to keep (at least 1 is always kept)
 MEASURE|0|bool|1 = measure the space each cleaner frees (slower: du before/after)
 UPDATE_CHANNEL|release|release,branch|what scrubmac update follows on git installs (release tags, or the branch)
 DERIVEDDATA_AGE_DAYS|30|int|xcode: purge DerivedData not used for N days
 DEVICESUPPORT_AGE_DAYS|90|int|xcode: purge device-support folders older than N days (the newest per platform is kept)
-HOMEBREW_DOCTOR|1|bool|homebrew: run the advisory brew doctor
+HOMEBREW_DOCTOR|1|bool|homebrew: run the advisory brew doctor and brew missing
 DOCKER_KEEP_HOURS|168|int|docker: keep build cache used within N hours
 MISE_PRUNE|0|bool|mise: also remove tool versions no config file uses'
 
@@ -63,23 +63,35 @@ EOF
 
 # cmm_setting_valid TYPE VALUE
 cmm_setting_valid() {
+  local v
   case "$1" in
     int)
       case "$2" in '' | *[!0-9]*) return 1 ;; esac
-      [ "${#2}" -le 9 ]
+      v="${2#"${2%%[!0]*}"}" # leading zeros don't count toward the length
+      [ "${#v}" -le 9 ]
       ;;
     bool)
       case "$2" in 0 | 1) return 0 ;; esac
       return 1
       ;;
     *)
-      [ -n "$2" ] || return 1
+      case "$2" in '' | *,*) return 1 ;; esac
       case ",$1," in
         *",$2,"*) return 0 ;;
       esac
       return 1
       ;;
   esac
+}
+
+# cmm_setting_norm TYPE VALUE — print a valid VALUE in canonical form (ints
+# lose leading zeros, so "08" never reaches shell arithmetic as octal).
+cmm_setting_norm() {
+  if [ "$1" = int ]; then
+    printf '%s\n' "$((10#$2))"
+  else
+    printf '%s\n' "$2"
+  fi
 }
 
 cmm_type_hint() {
@@ -126,7 +138,7 @@ cmm_setting_resolve() {
   v="${!ev:-}"
   if [ -n "$v" ]; then
     if cmm_setting_valid "$CMM__S_TYPE" "$v"; then
-      CMM__S_VAL="$v"
+      CMM__S_VAL="$(cmm_setting_norm "$CMM__S_TYPE" "$v")"
       CMM__S_SRC='env'
       return 0
     fi
@@ -135,7 +147,7 @@ cmm_setting_resolve() {
   v="$(config_get "$key" "")"
   if [ -n "$v" ]; then
     if cmm_setting_valid "$CMM__S_TYPE" "$v"; then
-      CMM__S_VAL="$v"
+      CMM__S_VAL="$(cmm_setting_norm "$CMM__S_TYPE" "$v")"
       CMM__S_SRC='config'
       return 0
     fi
@@ -157,17 +169,57 @@ cmm_settings_export() {
   done
 }
 
+# cmm_config_lint — warn about config lines the strict KEY=value grammar
+# ignores (a typo there would otherwise be silently dropped), and about a
+# config file that cannot be read. Once per process.
+cmm_config_lint() {
+  [ -n "${CMM__LINTED:-}" ] && return 0
+  CMM__LINTED=1
+  local f="$CMM_CONFIG_FILE" line n=0 bad
+  [ -e "$f" ] || return 0
+  if [ ! -r "$f" ] || [ -d "$f" ]; then
+    warn "cannot read $f — using the default settings"
+    return 0
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    case "${line#"${line%%[![:space:]]*}"}" in
+      '' | '#'*) continue ;;
+    esac
+    bad=0
+    case "$line" in
+      *=*)
+        case "${line%%=*}" in '' | [!A-Z]* | *[!A-Z0-9_]*) bad=1 ;; esac
+        case "${line#*=}" in *[!A-Za-z0-9._/-]*) bad=1 ;; esac
+        ;;
+      *) bad=1 ;;
+    esac
+    [ "$bad" = 1 ] &&
+      warn "ignoring line $n of $f: '${line//$'\r'/}' (expected KEY=value; values may use only A-Z a-z 0-9 . _ / -)"
+  done <"$f"
+  return 0
+}
+
 # ---------- paths ----------
+# cmm__abs PATH — PATH made absolute against the starting directory (runs
+# change into $HOME before starting cleaners).
+cmm__abs() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$PWD" "$1" ;;
+  esac
+}
+
 cmm_init_paths() {
-  CMM_CONFIG_DIR="$(cmm_config_dir)"
+  CMM_CONFIG_DIR="$(cmm__abs "$(cmm_config_dir)")"
   CMM_CONFIG_FILE="$CMM_CONFIG_DIR/config"
   CMM_DISABLED_FILE="$CMM_CONFIG_DIR/disabled"
   CMM_ENABLED_FILE="$CMM_CONFIG_DIR/enabled"
   CMM_USER_CLEANERS_DIR="$CMM_CONFIG_DIR/cleaners.d"
-  CMM_BUILTIN_CLEANERS_DIR="${CMM_CLEANERS_DIR:-$CMM_ROOT/cleaners}"
+  CMM_BUILTIN_CLEANERS_DIR="$(cmm__abs "${CMM_CLEANERS_DIR:-$CMM_ROOT/cleaners}")"
   # State (logs, last run, the run lock) lives under XDG_STATE_HOME — never
   # under TMPDIR, which differs between cron, launchd and terminal sessions.
-  CMM_STATE_DIR="${CMM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/scrubmac}"
+  CMM_STATE_DIR="$(cmm__abs "${CMM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/scrubmac}")"
   CMM_LOG_DIR="$CMM_STATE_DIR/logs"
   CMM_LAST_RUN_FILE="$CMM_STATE_DIR/last-run.json"
   CMM_LAST_SUCCESS_FILE="$CMM_STATE_DIR/last-success"
@@ -216,13 +268,37 @@ cmm_stable_launcher() {
   printf '%s\n' "$CMM_ROOT/bin/scrubmac"
 }
 
-# cmm_write_file_atomic FILE — write stdin to FILE via a temp file + rename.
+# cmm_write_file_atomic FILE — write stdin to FILE via a temp file + rename,
+# so readers never see a half-written file. A symlinked FILE (a dotfiles
+# manager's) is written through: its target is replaced and the link kept.
+# Fails with an error message when the directory is not writable.
 cmm_write_file_atomic() {
-  local f="$1" tmp
-  mkdir -p "$(dirname "$f")"
+  local f="$1" t tmp hops=0
+  while [ -L "$f" ] && [ "$hops" -lt 20 ]; do
+    t="$(readlink "$f")" || break
+    case "$t" in
+      /*) f="$t" ;;
+      *) f="$(dirname "$f")/$t" ;;
+    esac
+    hops=$((hops + 1))
+  done
   tmp="$f.tmp.$$"
-  cat >"$tmp"
-  mv -f "$tmp" "$f"
+  if mkdir -p "$(dirname "$f")" 2>/dev/null && { cat >"$tmp"; } 2>/dev/null && mv -f "$tmp" "$f" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  err "cannot write $f — check that $(dirname "$f") is writable"
+  return 1
+}
+
+# cmm_require_readable FILE — refuse (exit 2) to rewrite a file that exists
+# but cannot be read: rewriting it would silently drop its contents.
+cmm_require_readable() {
+  if [ -e "$1" ] && { [ ! -r "$1" ] || [ -d "$1" ]; }; then
+    err "cannot read $1 — fix its permissions first (nothing was changed)"
+    exit 2
+  fi
+  return 0
 }
 
 # ---------- cleaner discovery ----------
@@ -314,21 +390,45 @@ cmm_cleaner_names() {
   printf '%s\n' "$CMM_DISCOVERED" | awk -F '\t' '{ print $1 }'
 }
 
-# cmm_tool_present GATE — "yes" when any gate command is installed, "-" when
-# none is, "?" for cleaners without a gate header.
+# cmm_tool_present GATE — "yes" when any gate entry is present, "-" when
+# none is, "?" for cleaners without a gate header. Entries are commands, or
+# paths ("~/…" or "/…") that count when they exist.
 cmm_tool_present() {
-  local g
+  local g gates=()
   [ "$1" = - ] && {
     printf '?\n'
     return 0
   }
-  for g in $1; do
-    if have "$g"; then
-      printf 'yes\n'
-      return 0
-    fi
+  read -r -a gates <<EOF
+$1
+EOF
+  for g in ${gates[@]+"${gates[@]}"}; do
+    # shellcheck disable=SC2088  # a literal "~/" prefix in the header
+    case "$g" in
+      '~/'*) [ -e "$HOME/${g#\~/}" ] || continue ;;
+      /*) [ -e "$g" ] || continue ;;
+      *) have "$g" || continue ;;
+    esac
+    printf 'yes\n'
+    return 0
   done
   printf -- '-\n'
+}
+
+# cmm__split_names ARG… — the names in ARGs split on commas and whitespace,
+# one per line, duplicates dropped; never glob-expanded ("--skip '*'" is the
+# name "*", which then fails as unknown).
+cmm__split_names() {
+  local a n seen=' ' IFS=$', \t\n'
+  set -f
+  for a in "$@"; do
+    for n in $a; do
+      case "$seen" in *" $n "*) continue ;; esac
+      seen="$seen$n "
+      printf '%s\n' "$n"
+    done
+  done
+  set +f
 }
 
 # ---------- did-you-mean ----------
@@ -362,15 +462,21 @@ cmm_suggest() {
     }'
 }
 
+CMM_COMMANDS='list doctor status configure enable disable config schedule last update version help run'
+
 # cmm_unknown_cleaner NAME — the standard "unknown cleaner" error (exit 2).
+# Commands are offered first, so a tie goes to the command.
 cmm_unknown_cleaner() {
-  local hint
-  # shellcheck disable=SC2046  # cleaner names never contain whitespace
-  hint="$(cmm_suggest "$1" $(cmm_cleaner_names) list doctor status configure enable disable config schedule last update version help)"
+  local hint extra=''
+  # shellcheck disable=SC2046,SC2086  # names and commands never contain whitespace
+  hint="$(cmm_suggest "$1" $CMM_COMMANDS $(cmm_cleaner_names))"
+  if [ -f "$CMM_USER_CLEANERS_DIR/$1.sh" ] || ls "$CMM_USER_CLEANERS_DIR"/[0-9]*-"$1".sh >/dev/null 2>&1; then
+    extra=" ($CMM_USER_CLEANERS_DIR has a file for it — is it executable? chmod +x it)"
+  fi
   if [ -n "$hint" ]; then
-    err "unknown cleaner or command '$1' — did you mean '$hint'? (see 'scrubmac list')"
+    err "unknown cleaner or command '$1' — did you mean '$hint'?$extra (see 'scrubmac list')"
   else
-    err "unknown cleaner or command '$1' — see 'scrubmac list' and 'scrubmac help'"
+    err "unknown cleaner or command '$1'$extra — see 'scrubmac list' and 'scrubmac help'"
   fi
   exit 2
 }
@@ -380,27 +486,52 @@ cmm_unknown_cleaner() {
 # turned on; anything unlisted follows its header default. Explicit choices
 # survive future default changes; new opt-in cleaners stay off.
 
+# Both files start with a "# scrubmac:" header line; names are read with
+# comments and surrounding whitespace ignored, so hand edits keep working.
+CMM__HDR_OFF="# scrubmac: cleaners you turned off, one per line ('scrubmac enable NAME' removes a line)"
+CMM__HDR_ON="# scrubmac: cleaners you turned on, one per line ('scrubmac disable NAME' removes a line)"
+
 # One-time migration from ≤3.0 state, where every cleaner without a line in
 # `disabled` ran: docker and xcode absent from it had been opted into, and go
-# was on by default — keep all three running for those installs.
+# was on by default — keep all three running for those installs. Only a
+# headerless `disabled` (3.0 never wrote the header) with no `enabled` beside
+# it is converted, so a lost state dir can't re-run it on 3.1 choices.
 cmm_state_migrate() {
   [ -e "$CMM_ENABLED_FILE" ] && return 0
   local marker="$CMM_STATE_DIR/state-v2"
   [ -e "$marker" ] && return 0
-  if [ -f "$CMM_DISABLED_FILE" ]; then
+  if [ -f "$CMM_DISABLED_FILE" ] && [ -r "$CMM_DISABLED_FILE" ] &&
+    ! grep -q '^# scrubmac:' "$CMM_DISABLED_FILE" 2>/dev/null; then
     local n kept=''
     for n in docker xcode go; do
-      grep -Fxq "$n" "$CMM_DISABLED_FILE" 2>/dev/null || kept="$kept$n"$'\n'
+      known_cleaner "$n" || continue
+      cmm_listed "$CMM_DISABLED_FILE" "$n" || kept="$kept$n"$'\n'
     done
-    printf '%s' "$kept" | cmm_write_file_atomic "$CMM_ENABLED_FILE"
+    {
+      printf '%s\n' "$CMM__HDR_ON"
+      printf '%s' "$kept"
+    } | cmm_write_file_atomic "$CMM_ENABLED_FILE" || return 0
     if [ -n "$kept" ]; then
-      note "(kept your earlier choices enabled: $(printf '%s' "$kept" | tr '\n' ' ')— see 'scrubmac list')"
+      printf '%s\n' "(kept your earlier choices enabled: $(printf '%s' "$kept" | tr '\n' ' ')— see 'scrubmac list')" >&2
     fi
   fi
-  mkdir -p "$CMM_STATE_DIR" 2>/dev/null && : >"$marker" 2>/dev/null || true
+  if mkdir -p "$CMM_STATE_DIR" 2>/dev/null; then
+    { : >"$marker"; } 2>/dev/null || true
+  fi
+  return 0
 }
 
-cmm_listed() { [ -f "$1" ] && grep -Fxq -- "$2" "$1" 2>/dev/null; }
+# cmm_state_names FILE — the names listed in a state file, one per line.
+cmm_state_names() {
+  [ -f "$1" ] || return 0
+  awk '{ sub(/#.*/, ""); gsub(/^[ \t]+|[ \t\r]+$/, "") } $0 != "" { print }' "$1" 2>/dev/null || true
+}
+
+# cmm_listed FILE NAME — NAME has a line of its own in FILE.
+cmm_listed() {
+  [ -f "$1" ] || return 1
+  awk -v n="$2" '{ sub(/#.*/, ""); gsub(/^[ \t]+|[ \t\r]+$/, "") } $0 == n { f = 1; exit } END { exit !f }' "$1" 2>/dev/null
+}
 
 # cmm_is_enabled NAME DEFAULT
 cmm_is_enabled() {
@@ -409,23 +540,38 @@ cmm_is_enabled() {
   [ "$2" != off ]
 }
 
-cmm__drop_line() { # cmm__drop_line FILE NAME
-  [ -f "$1" ] || return 0
-  { grep -Fvx -- "$2" "$1" || true; } | cmm_write_file_atomic "$1"
+# cmm__state_rewrite FILE HEADER DROP [ADD] — rewrite a state file with its
+# header, without DROP, with ADD appended; other comments are kept and
+# duplicate names collapse.
+cmm__state_rewrite() {
+  local f="$1" hdr="$2" drop="$3" add="${4:-}"
+  cmm_require_readable "$f"
+  {
+    printf '%s\n' "$hdr"
+    if [ -f "$f" ]; then
+      awk -v d="$drop" -v a="$add" '
+        /^# scrubmac:/ { next }
+        /^[ \t]*#/ { print; next }
+        { n = $0; sub(/#.*/, "", n); gsub(/^[ \t]+|[ \t\r]+$/, "", n) }
+        n == "" || n == d || n == a || seen[n]++ { next }
+        { print n }' "$f"
+    fi
+    if [ -n "$add" ]; then
+      printf '%s\n' "$add"
+    fi
+  } | cmm_write_file_atomic "$f"
 }
 
-# cmm_set_state NAME on|off — record an explicit choice.
+# cmm_set_state NAME on|off — record an explicit choice (exit 2 when the
+# state files cannot be written).
 cmm_set_state() {
-  mkdir -p "$CMM_CONFIG_DIR"
-  cmm__drop_line "$CMM_DISABLED_FILE" "$1"
-  cmm__drop_line "$CMM_ENABLED_FILE" "$1"
   if [ "$2" = on ]; then
-    printf '%s\n' "$1" >>"$CMM_ENABLED_FILE"
+    cmm__state_rewrite "$CMM_DISABLED_FILE" "$CMM__HDR_OFF" "$1" &&
+      cmm__state_rewrite "$CMM_ENABLED_FILE" "$CMM__HDR_ON" "$1" "$1"
   else
-    printf '%s\n' "$1" >>"$CMM_DISABLED_FILE"
-  fi
-  [ -e "$CMM_ENABLED_FILE" ] || : >"$CMM_ENABLED_FILE"
-  [ -e "$CMM_DISABLED_FILE" ] || : >"$CMM_DISABLED_FILE"
+    cmm__state_rewrite "$CMM_ENABLED_FILE" "$CMM__HDR_ON" "$1" &&
+      cmm__state_rewrite "$CMM_DISABLED_FILE" "$CMM__HDR_OFF" "$1" "$1"
+  fi || exit 2
 }
 
 # ---------- locking ----------
@@ -444,93 +590,199 @@ cmm_pid_is_ours() {
   return 1
 }
 
-# The run lock is a symlink whose target is the holder's pid: creating it is
-# a single atomic syscall that fails when the lock exists, and the content
-# arrives with it. A stale lock is broken by an atomic rename, and the
-# renamed link is checked so a racing run's fresh lock is never stolen.
+# cmm_proc_start PID — the process's start time as one word ("Sat_Oct_4_
+# 09:00:01_2026"), or nothing when it cannot be read. With the pid it
+# identifies a process across pid reuse.
+cmm_proc_start() {
+  local s
+  s="$(ps -o lstart= -p "$1" 2>/dev/null)" || s=''
+  s="$(printf '%s' "$s" | tr -s ' \t\n' '___')"
+  s="${s#_}"
+  printf '%s\n' "${s%_}"
+}
+
+# cmm_lock_holder_alive TARGET — the run lock's target ("PID:START") names a
+# live process: same pid, same start time. A holder whose start time cannot
+# be read counts as alive (never break a lock on a guess).
+cmm_lock_holder_alive() {
+  local pid="${1%%:*}" start now
+  case "$1" in
+    *:*) start="${1#*:}" ;;
+    *)
+      cmm_pid_is_ours "$1" # pre-release locks held a bare pid
+      return
+      ;;
+  esac
+  case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$pid" != "$$" ] || return 1 # our own pid in a lock we never took: a previous boot's
+  kill -0 "$pid" 2>/dev/null || return 1
+  [ -n "$start" ] || return 0
+  now="$(cmm_proc_start "$pid")"
+  [ -z "$now" ] || [ "$now" = "$start" ]
+}
+
+# The run lock is a symlink whose target identifies the holder ("PID:START"):
+# creating it is a single atomic syscall that fails when the lock exists, and
+# the content arrives with it. A stale lock is broken by an atomic rename,
+# and the renamed link is checked so a racing run's fresh lock is never
+# stolen.
 cmm_lock_acquire() {
-  local pid moved
-  mkdir -p "$CMM_STATE_DIR"
-  if ln -s "$$" "$CMM_LOCK" 2>/dev/null; then
-    CMM__LOCK_HELD=1
+  local held moved me
+  if ! mkdir -p "$CMM_STATE_DIR" 2>/dev/null || [ ! -w "$CMM_STATE_DIR" ]; then
+    err "cannot write to $CMM_STATE_DIR (the run lock and logs live there) — check its ownership and permissions"
+    exit 2
+  fi
+  me="$$:$(cmm_proc_start "$$")"
+  # (ln -s into an existing directory would create the link INSIDE it and
+  # report success; -n keeps a symlink to a directory from being followed)
+  if [ -d "$CMM_LOCK" ] && [ ! -L "$CMM_LOCK" ]; then
+    err "$CMM_LOCK is not a scrubmac lock (expected a symlink) — remove it"
+    exit 2
+  fi
+  if ln -sn "$me" "$CMM_LOCK" 2>/dev/null; then
+    CMM__LOCK_HELD="$me"
     return 0
   fi
-  pid="$(readlink "$CMM_LOCK" 2>/dev/null || true)"
-  if cmm_pid_is_ours "$pid"; then
-    err "another scrubmac run is already in progress (pid $pid)"
+  if [ ! -L "$CMM_LOCK" ]; then
+    if [ -e "$CMM_LOCK" ]; then
+      err "$CMM_LOCK is not a scrubmac lock (expected a symlink) — remove it"
+    else
+      err "cannot create the run lock $CMM_LOCK"
+    fi
+    exit 2
+  fi
+  held="$(readlink "$CMM_LOCK" 2>/dev/null || true)"
+  if cmm_lock_holder_alive "$held"; then
+    err "another scrubmac run is already in progress (pid ${held%%:*})"
     exit 2
   fi
   if mv "$CMM_LOCK" "$CMM_LOCK.stale.$$" 2>/dev/null; then
     moved="$(readlink "$CMM_LOCK.stale.$$" 2>/dev/null || true)"
-    if [ "$moved" != "$pid" ]; then
+    if [ "$moved" != "$held" ]; then
       # we grabbed a racing run's fresh lock: hand it back and stand down
-      ln -s "$moved" "$CMM_LOCK" 2>/dev/null || true
-      rm -rf "$CMM_LOCK.stale.$$"
-      err "another scrubmac run is already in progress (pid ${moved:-unknown})"
+      ln -sn "$moved" "$CMM_LOCK" 2>/dev/null || true
+      rm -f "$CMM_LOCK.stale.$$"
+      err "another scrubmac run is already in progress (pid ${moved%%:*})"
       exit 2
     fi
-    rm -rf "$CMM_LOCK.stale.$$"
-    warn "removed a stale lock left by pid ${pid:-unknown}"
+    rm -f "$CMM_LOCK.stale.$$"
+    warn "removed a stale lock left by pid ${held%%:*}"
   fi
-  if ln -s "$$" "$CMM_LOCK" 2>/dev/null; then
-    CMM__LOCK_HELD=1
+  if ln -sn "$me" "$CMM_LOCK" 2>/dev/null; then
+    CMM__LOCK_HELD="$me"
     return 0
   fi
-  pid="$(readlink "$CMM_LOCK" 2>/dev/null || true)"
-  err "another scrubmac run is already in progress (pid ${pid:-unknown})"
+  held="$(readlink "$CMM_LOCK" 2>/dev/null || true)"
+  err "another scrubmac run is already in progress (pid ${held%%:*})"
   exit 2
 }
 
 # Transitional (remove in v4 with the cleanmymac shim): also hold the
 # pre-rename lock — a mkdir lock in TMPDIR, exactly as 2.x takes it — so a
 # not-yet-migrated cleanmymac 2.x copy (e.g. an untouched cron install) and
-# scrubmac still exclude each other.
+# scrubmac still exclude each other. Best effort: a lock dir we don't own
+# (someone else's, in a shared /tmp) is ignored, never fatal — the scrubmac
+# lock above already protects this run.
 cmm_legacy_lock_acquire() {
-  local base="${TMPDIR:-/tmp}" pid
-  CMM__LEGACY_LOCK="${base%/}/cleanmymac.$(id -u).lock"
-  if mkdir "$CMM__LEGACY_LOCK" 2>/dev/null; then
-    printf '%s\n' "$$" >"$CMM__LEGACY_LOCK/pid"
-    return 0
+  local base="${TMPDIR:-/tmp}" lock pid
+  base="${base%/}"
+  CMM__LEGACY_LOCK=''
+  [ -d "$base" ] && [ -w "$base" ] || return 0
+  lock="$base/cleanmymac.$(id -u).lock"
+  if ! mkdir "$lock" 2>/dev/null; then
+    [ -d "$lock" ] && [ ! -L "$lock" ] && [ -O "$lock" ] || return 0
+    pid="$(cat "$lock/pid" 2>/dev/null || true)"
+    if cmm_pid_is_ours "$pid"; then
+      err "a pre-rename cleanmymac run is in progress (pid $pid)"
+      exit 2
+    fi
+    warn "removing a stale legacy lock left by pid ${pid:-unknown}"
+    rm -rf "$lock" 2>/dev/null || true
+    mkdir "$lock" 2>/dev/null || return 0
   fi
-  pid="$(cat "$CMM__LEGACY_LOCK/pid" 2>/dev/null || true)"
-  if cmm_pid_is_ours "$pid"; then
-    err "a pre-rename cleanmymac run is in progress (pid $pid)"
-    CMM__LEGACY_LOCK='' # not ours — don't remove it on exit
-    exit 2
-  fi
-  warn "removing stale legacy lock left by pid ${pid:-unknown}"
-  rm -rf "$CMM__LEGACY_LOCK"
-  if ! mkdir "$CMM__LEGACY_LOCK" 2>/dev/null; then
-    err "cannot acquire legacy lock at $CMM__LEGACY_LOCK"
-    CMM__LEGACY_LOCK=''
-    exit 2
-  fi
-  printf '%s\n' "$$" >"$CMM__LEGACY_LOCK/pid"
+  CMM__LEGACY_LOCK="$lock"
+  { printf '%s\n' "$$" >"$lock/pid"; } 2>/dev/null || true
+  return 0
 }
 
 cmm_locks_release() {
   if [ -n "${CMM__LOCK_HELD:-}" ]; then
-    if [ "$(readlink "$CMM_LOCK" 2>/dev/null || true)" = "$$" ]; then
-      rm -f "$CMM_LOCK"
+    if [ "$(readlink "$CMM_LOCK" 2>/dev/null || true)" = "$CMM__LOCK_HELD" ]; then
+      rm -f "$CMM_LOCK" 2>/dev/null || true
     fi
     CMM__LOCK_HELD=''
   fi
   if [ -n "${CMM__LEGACY_LOCK:-}" ]; then
-    rm -rf "$CMM__LEGACY_LOCK"
+    rm -rf "$CMM__LEGACY_LOCK" 2>/dev/null || true
     CMM__LEGACY_LOCK=''
   fi
+  return 0
 }
 
 # ---------- processes ----------
-# cmm_kill_tree PID [SIGNAL] — signal PID and all its descendants (children
-# first), so a timed-out cleaner cannot leave a hung tool behind.
-cmm_kill_tree() {
-  local pid="$1" sig="${2:-TERM}" kid kids
-  kids="$(pgrep -P "$pid" 2>/dev/null || true)"
-  for kid in $kids; do
-    cmm_kill_tree "$kid" "$sig"
+# A cleaner that times out, or is running when the run is interrupted, is
+# stopped with TERM, given a grace period, then KILLed — together with every
+# process it started. Unattended runs without a terminal start each cleaner
+# in a process group of its own (bash's monitor mode), so even descendants
+# that were orphaned or daemonized are reached with one signal to the group.
+# Runs attached to a terminal keep the cleaner in the terminal's foreground
+# group (a sudo or git prompt must still be able to read the terminal), and
+# fall back to signalling a snapshot of the process tree.
+CMM_KILL_GRACE="${CMM__KILL_GRACE:-5}"
+
+# cmm_tree_pids PID — PID and all its descendants, parents first.
+cmm_tree_pids() {
+  local kid
+  printf '%s\n' "$1"
+  for kid in $(pgrep -P "$1" 2>/dev/null || true); do
+    cmm_tree_pids "$kid"
   done
-  kill "-$sig" "$pid" 2>/dev/null || true
+}
+
+# cmm__alive PGID|- PID… — true while any process in group PGID ("-" for
+# none) or any listed PID is still running (zombies count as gone).
+cmm__alive() {
+  local g="$1" p st
+  shift
+  if [ "$g" != - ]; then
+    ps -A -o pgid=,stat= 2>/dev/null | awk -v g="$g" '$1 == g && $2 !~ /^Z/ { f = 1 } END { exit !f }' && return 0
+  fi
+  for p in "$@"; do
+    st="$(ps -o stat= -p "$p" 2>/dev/null)" || continue
+    case "$st" in '' | *Z*) ;; *) return 0 ;; esac
+  done
+  return 1
+}
+
+# cmm_stop_cleaner PID GROUP(0|1) — TERM (and CONT, so stopped processes see
+# it), wait up to CMM_KILL_GRACE seconds, then KILL whatever is left.
+cmm_stop_cleaner() {
+  local pid="$1" group="$2" pids ticks=0 g=-
+  if [ "$group" = 1 ]; then
+    g="$pid"
+    pids=''
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    kill -CONT -- "-$pid" 2>/dev/null || true
+  else
+    pids="$(cmm_tree_pids "$pid")"
+    # shellcheck disable=SC2086  # a list of pids
+    kill -TERM $pids 2>/dev/null || true
+    # shellcheck disable=SC2086
+    kill -CONT $pids 2>/dev/null || true
+  fi
+  # shellcheck disable=SC2086
+  while cmm__alive "$g" $pids; do
+    [ "$ticks" -lt $((CMM_KILL_GRACE * 10)) ] || break
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  if [ "$group" = 1 ]; then
+    kill -KILL -- "-$pid" 2>/dev/null || true
+  else
+    # shellcheck disable=SC2086,SC2046  # pids, plus any started during the grace
+    kill -KILL $pids $(cmm_tree_pids "$pid" | sed 1d) 2>/dev/null || true
+  fi
+  return 0
 }
 
 # ---------- environment probes ----------
@@ -641,57 +893,118 @@ CMM__CUR_NAME=''
 CMM__CUR_SRC=''
 CMM__CUR_START=0
 CMM__RUN_STARTED=''
+CMM__RUN_START_EPOCH=0
 CMM__RUN_START_SECS=0
 CMM__INTERRUPTED=0
+CMM__GROUP=0
+CMM__SNAP=''
 
 cmm_log() {
   [ -n "$CMM_LOG_FILE" ] || return 0
-  printf '%s\n' "$*" >>"$CMM_LOG_FILE" 2>/dev/null || true
+  { printf '%s\n' "$*" >>"$CMM_LOG_FILE"; } 2>/dev/null || true
+}
+
+# cmm__mk_tmp — the per-run scratch dir: $TMPDIR, else /tmp, else the state
+# dir (a TMPDIR that does not exist must not abort an unattended run).
+cmm__mk_tmp() {
+  local d
+  for d in "${TMPDIR:-}" /tmp "$CMM_STATE_DIR"; do
+    [ -n "$d" ] && [ -d "$d" ] && [ -w "$d" ] || continue
+    CMM_TMP="$(mktemp -d "${d%/}/scrubmac.run.XXXXXX" 2>/dev/null)" && [ -n "$CMM_TMP" ] &&
+      CMM_TMP="$(cd "$CMM_TMP" && pwd -P)" && return 0
+  done
+  CMM_TMP=''
+  err "cannot create a temporary directory (tried \$TMPDIR, /tmp and $CMM_STATE_DIR)"
+  return 1
+}
+
+# cmm__snapshot_lib — copy lib/ into the run's scratch dir and point CMM_LIB
+# at the copy. Built-in cleaners are copied there too (cmm__snapshot_cleaner)
+# and run from the copies: the homebrew cleaner can upgrade scrubmac itself
+# mid-run, and Homebrew then deletes the old keg — files a later cleaner
+# would still need.
+cmm__snapshot_lib() {
+  CMM__SNAP=''
+  if mkdir -p "$CMM_TMP/snapshot/cleaners" 2>/dev/null &&
+    cp -pR "$CMM_ROOT/lib" "$CMM_TMP/snapshot/lib" 2>/dev/null; then
+    CMM__SNAP="$CMM_TMP/snapshot"
+    CMM_LIB="$CMM__SNAP/lib/common.sh"
+    export CMM_LIB
+  else
+    warn "could not copy scrubmac's own files for this run — running them in place"
+  fi
+  return 0
+}
+
+# cmm__snapshot_cleaner PATH — print the path to run PATH from: a private
+# copy (made after the safety check), or PATH itself when there is no
+# snapshot. Prints nothing when PATH is missing or refused.
+cmm__snapshot_cleaner() {
+  local path="$1" copy
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  assert_safe_to_execute "$path" || return 0
+  if [ -z "$CMM__SNAP" ]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
+  copy="$CMM__SNAP/cleaners/${path##*/}"
+  if cp -p "$path" "$copy" 2>/dev/null; then
+    printf '%s\n' "$copy"
+  else
+    printf '%s\n' "$path"
+  fi
 }
 
 # cmm__exec_cleaner PATH NAME — run one cleaner as a child process with stdin
 # from /dev/null (a cleaner must never read the dispatcher's input or wait for
-# a prompt answer), output routed per CMM__OUTMODE, and the TIMEOUT watchdog.
-# Sets CMM__RC and CMM__TIMED_OUT.
+# a prompt answer), fd 3 closed (it carries --json output, and a daemon that
+# inherited it would hold a consumer's pipe open), output routed per
+# CMM__OUTMODE, and the TIMEOUT watchdog. Sets CMM__RC and CMM__TIMED_OUT.
 cmm__exec_cleaner() {
-  local path="$1" name="$2"
+  local path="$1" name="$2" i=0
   local out="$CMM_TMP/$name.out" tomark="$CMM_TMP/$name.timeout"
-  rm -f "$out" "$tomark"
+  rm -f "${out:?}" "${out:?}.done" "${tomark:?}"
+  [ "$CMM__GROUP" = 1 ] && set -m # its own process group (see cmm_stop_cleaner)
   case "$CMM__OUTMODE" in
-    direct) "$path" </dev/null & ;;
-    capture) "$path" </dev/null >"$out" 2>&1 & ;;
-    *) (
-      "$path" </dev/null 2>&1 | tee "$out"
-      exit "${PIPESTATUS[0]}"
-    ) & ;;
+    direct) "$path" </dev/null 3>&- & ;;
+    capture) "$path" </dev/null >"$out" 2>&1 3>&- & ;;
+    *) "$path" </dev/null 3>&- > >(
+      exec 3>&-
+      tee "$out"
+      : >"$out.done"
+    ) 2>&1 & ;;
   esac
   CMM__CUR_PID=$!
+  set +m
   CMM__WD_PID=''
   if [ "${CMM_TIMEOUT:-0}" -gt 0 ]; then
     # The watchdog sleeps in the background and waits on it, so a TERM from
     # the dispatcher (cleaner done) interrupts the wait at once and the trap
-    # takes its sleep down with it — no process-table walk on the happy path.
+    # takes its sleep down with it. Once the time is up it writes the marker
+    # and then ignores TERM: the stop must run through to the KILL stage.
     (
-      wd_sleep=''
-      trap 'kill "$wd_sleep" 2>/dev/null; exit 0' TERM
-      trap - INT
+      trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM
       sleep "$CMM_TIMEOUT" &
-      wd_sleep=$!
-      wait "$wd_sleep"
+      wait $!
       : >"$tomark"
-      cmm_kill_tree "$CMM__CUR_PID" TERM
-      sleep 5 &
-      wd_sleep=$!
-      wait "$wd_sleep"
-      cmm_kill_tree "$CMM__CUR_PID" KILL
-    ) </dev/null >/dev/null 2>&1 &
+      trap '' TERM
+      cmm_stop_cleaner "$CMM__CUR_PID" "$CMM__GROUP"
+    ) </dev/null >/dev/null 2>&1 3>&- &
     CMM__WD_PID=$!
   fi
   CMM__RC=0
-  wait "$CMM__CUR_PID" || CMM__RC=$?
+  wait "$CMM__CUR_PID" 2>/dev/null || CMM__RC=$?
   if [ -n "$CMM__WD_PID" ]; then
-    kill -TERM "$CMM__WD_PID" 2>/dev/null || true
+    # timed out: let the watchdog finish the stop instead of cutting it short
+    [ -e "$tomark" ] || kill -TERM "$CMM__WD_PID" 2>/dev/null || true
     wait "$CMM__WD_PID" 2>/dev/null || true
+  fi
+  if [ "$CMM__OUTMODE" = tee ]; then
+    # tee exits once every writer is gone; give it a moment to flush
+    while [ ! -e "$out.done" ] && [ "$i" -lt 20 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
   fi
   CMM__CUR_PID=''
   CMM__WD_PID=''
@@ -769,32 +1082,38 @@ cmm__counts() { # sets CMM__N_OK, CMM__N_SKIP, CMM__N_FAIL, CMM__N_FREED_SUM
   done
 }
 
+# cmm__label STATUS — sets CMM__LABEL and CMM__COLOR for a result status.
+cmm__label() {
+  case "$1" in
+    ok) CMM__LABEL=ok CMM__COLOR="$CMM_GREEN" ;;
+    skip) CMM__LABEL=skip CMM__COLOR="$CMM_DIM" ;;
+    timeout) CMM__LABEL=TIMEOUT CMM__COLOR="$CMM_RED" ;;
+    refused) CMM__LABEL=REFUSED CMM__COLOR="$CMM_RED" ;;
+    stopped) CMM__LABEL=STOPPED CMM__COLOR="$CMM_YELLOW" ;;
+    *) CMM__LABEL=FAIL CMM__COLOR="$CMM_RED" ;;
+  esac
+}
+
 # print_summary [plain] — the per-cleaner table. "plain" drops colors (logs).
 print_summary() {
   [ "${#R_NAMES[@]}" -eq 0 ] && return 0
-  local plain="${1:-}" i=0 label color reset freed note notes
-  local c_ok="$CMM_GREEN" c_dim="$CMM_DIM" c_red="$CMM_RED" c_yel="$CMM_YELLOW" c_rst="$CMM_RESET"
+  local plain="${1:-}" i=0 color reset freed note notes c_dim="$CMM_DIM" c_rst="$CMM_RESET"
   if [ -n "$plain" ]; then
-    c_ok='' c_dim='' c_red='' c_yel='' c_rst=''
+    c_dim='' c_rst=''
     printf '\nSummary\n=======\n'
   else
     banner "Summary"
   fi
   while [ "$i" -lt "${#R_NAMES[@]}" ]; do
-    case "${R_STATUS[$i]}" in
-      ok) label=ok color="$c_ok" ;;
-      skip) label=skip color="$c_dim" ;;
-      timeout) label=TIMEOUT color="$c_red" ;;
-      refused) label=REFUSED color="$c_red" ;;
-      stopped) label=STOPPED color="$c_yel" ;;
-      *) label=FAIL color="$c_red" ;;
-    esac
-    reset="$c_rst"
+    cmm__label "${R_STATUS[$i]}"
+    color="$CMM__COLOR"
+    reset="$CMM_RESET"
+    [ -n "$plain" ] && color='' reset=''
     freed=''
     if [ -n "${R_FREED[$i]}" ]; then
       freed="  freed $(cmm_human_kb "${R_FREED[$i]}")"
     fi
-    printf '  %s%-7s%s %-16s %6s%s\n' "$color" "$label" "$reset" "${R_NAMES[$i]}" "$(cmm_human_secs "${R_SECS[$i]}")" "$freed"
+    printf '  %s%-7s%s %-16s %6s%s\n' "$color" "$CMM__LABEL" "$reset" "${R_NAMES[$i]}" "$(cmm_human_secs "${R_SECS[$i]}")" "$freed"
     if [ "${R_STATUS[$i]}" != skip ] && [ -n "${R_NOTES[$i]}" ]; then
       notes="${R_NOTES[$i]}"
       while [ -n "$notes" ]; do
@@ -868,30 +1187,52 @@ cmm__log_files() {
   done | sort -r
 }
 
+# cmm__rotate_logs — keep the newest LOG_KEEP logs (at least one: the run
+# that just finished points at its own log).
 cmm__rotate_logs() {
   local keep="${CMM_LOG_KEEP:-20}" f n=0
+  [ "$keep" -ge 1 ] 2>/dev/null || keep=1
   for f in $(cmm__log_files); do
     n=$((n + 1))
-    [ "$n" -gt "$keep" ] && rm -f "$CMM_LOG_DIR/$f"
+    [ "$n" -gt "$keep" ] && rm -f "${CMM_LOG_DIR:?}/${f:?}"
   done
+  return 0
+}
+
+# cmm__df_free — free KB on $HOME's filesystem, or nothing. -P: one line per
+# filesystem even when the device name is long (GNU df wraps otherwise).
+cmm__df_free() {
+  local kb
+  kb="$(df -Pk "$HOME" 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
+  case "$kb" in '' | *[!0-9]*) ;; *) printf '%s\n' "$kb" ;; esac
   return 0
 }
 
 cmm__open_log() {
   CMM_LOG_FILE=''
-  mkdir -p "$CMM_LOG_DIR" 2>/dev/null || return 0
-  CMM_LOG_FILE="$CMM_LOG_DIR/run-$(date -u '+%Y%m%dT%H%M%SZ')-$$.log"
-  : >"$CMM_LOG_FILE" 2>/dev/null || CMM_LOG_FILE=''
+  if mkdir -p "$CMM_LOG_DIR" 2>/dev/null; then
+    CMM_LOG_FILE="$CMM_LOG_DIR/run-$(date -u '+%Y%m%dT%H%M%SZ')-$$.log"
+    if { : >"$CMM_LOG_FILE"; } 2>/dev/null; then
+      return 0
+    fi
+  fi
+  CMM_LOG_FILE=''
+  warn "cannot write run logs to $CMM_LOG_DIR — this run is not logged"
+  return 0
 }
 
 # cmm__finish_run EXIT_CODE — summary, disk delta, logs, JSON, notification.
 cmm__finish_run() {
   local rc="$1" freed='' df_after
   cmm__counts
+  if [ "${#R_NAMES[@]}" -eq 0 ] && [ "$CMM__INTERRUPTED" != 1 ]; then
+    note "nothing to run — every cleaner is disabled or left out ('scrubmac list' shows them)"
+  fi
   print_summary
   if [ -n "${CMM__DF_BEFORE:-}" ] && [ "$CMM_DRY_RUN" != 1 ] && [ "$CMM_MODE" != status ]; then
-    df_after="$(df -k "$HOME" 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
-    if [ -n "$df_after" ] && [ "$df_after" -gt "$CMM__DF_BEFORE" ] 2>/dev/null; then
+    df_after="$(cmm__df_free)"
+    # other processes move free space too: below 1 MB the delta is noise
+    if [ -n "$df_after" ] && [ "$df_after" -ge $((CMM__DF_BEFORE + 1024)) ]; then
       freed=$((df_after - CMM__DF_BEFORE))
       note "approx. disk space freed: $(cmm_human_kb "$freed")"
     fi
@@ -903,15 +1244,18 @@ cmm__finish_run() {
     warn "every cleaner skipped — if this was a scheduled run, its PATH may be missing your tools (cron's default PATH is /usr/bin:/bin); run 'scrubmac doctor'"
   fi
   if [ -n "$CMM_LOG_FILE" ]; then
-    print_summary plain >>"$CMM_LOG_FILE" 2>/dev/null || true
+    { print_summary plain >>"$CMM_LOG_FILE"; } 2>/dev/null || true
     [ -n "$freed" ] && cmm_log "approx. disk space freed: $(cmm_human_kb "$freed")"
     cmm_log "exit $rc"
     note "log: $CMM_LOG_FILE"
   fi
   if [ "$CMM_DRY_RUN" != 1 ] && [ "$CMM_MODE" != status ]; then
-    cmm__json_run "$rc" "$freed" | cmm_write_file_atomic "$CMM_LAST_RUN_FILE" 2>/dev/null || true
-    if [ "$rc" -eq 0 ] && [ "$CMM__FULL_RUN" = 1 ] && [ "$CMM_MODE" = run ]; then
-      date '+%s' | cmm_write_file_atomic "$CMM_LAST_SUCCESS_FILE" 2>/dev/null || true
+    cmm__json_run "$rc" "$freed" | cmm_write_file_atomic "$CMM_LAST_RUN_FILE" || true
+    # MIN_HOURS_BETWEEN_RUNS counts from the start of the last clean, full,
+    # online run in which something actually ran.
+    if [ "$rc" -eq 0 ] && [ "$CMM__FULL_RUN" = 1 ] && [ "$CMM_MODE" = run ] &&
+      [ "${CMM_OFFLINE:-0}" != 1 ] && [ "$CMM__N_OK" -gt 0 ]; then
+      printf '%s\n' "$CMM__RUN_START_EPOCH" | cmm_write_file_atomic "$CMM_LAST_SUCCESS_FILE" || true
     fi
     cmm__rotate_logs
   fi
@@ -940,22 +1284,33 @@ cmm__finish_run() {
 }
 
 cmm__on_int() {
-  trap - INT TERM
+  trap - INT TERM HUP
   CMM__INTERRUPTED=1
-  if [ -n "$CMM__CUR_PID" ]; then
-    cmm_kill_tree "$CMM__CUR_PID" TERM
-  fi
+  # stop the watchdog first, so it cannot fire while we stop the cleaner
   if [ -n "$CMM__WD_PID" ]; then
-    cmm_kill_tree "$CMM__WD_PID" TERM
+    kill -TERM "$CMM__WD_PID" 2>/dev/null || true
+  fi
+  if [ -n "$CMM__CUR_PID" ]; then
+    cmm_stop_cleaner "$CMM__CUR_PID" "$CMM__GROUP"
   fi
   echo
   warn "interrupted — partial summary follows"
   if [ -n "$CMM__CUR_NAME" ]; then
     cmm__record "$CMM__CUR_NAME" stopped $((SECONDS - CMM__CUR_START)) 130 "$CMM__CUR_SRC" '' '' ''
     cmm_log "== $CMM__CUR_NAME: STOPPED (interrupted)"
+    if [ -n "$CMM_LOG_FILE" ] && [ -s "$CMM_TMP/$CMM__CUR_NAME.out" ]; then
+      { cat "$CMM_TMP/$CMM__CUR_NAME.out" >>"$CMM_LOG_FILE"; } 2>/dev/null || true
+    fi
   fi
   cmm__finish_run 130
   exit 130
+}
+
+# cmm__quiet_line STATUS NAME SECS [DETAIL] — the one line quiet mode prints
+# per cleaner, instead of a banner over output it hides.
+cmm__quiet_line() {
+  cmm__label "$1"
+  printf '%s%-7s%s %s (%s)%s\n' "$CMM__COLOR" "$CMM__LABEL" "$CMM_RESET" "$2" "$(cmm_human_secs "$3")" "${4:+ — $4}"
 }
 
 # cmm_run_cleaners NAME… — the run loop shared by `scrubmac` (run, update,
@@ -963,40 +1318,50 @@ cmm__on_int() {
 # (even disabled ones); without, every enabled cleaner. CMM_SKIP_NAMES drops
 # cleaners either way.
 cmm_run_cleaners() {
-  local sel=" $* " name path src def
-  local status secs label
+  local sel=" $* " name path src def run_path i=0 n
+  local status secs sel_names=() sel_paths=() sel_srcs=() sel_runs=()
 
-  CMM_TMP="$(mktemp -d "${TMPDIR:-/tmp}/scrubmac.run.XXXXXX")"
+  cmm__mk_tmp || exit 2
   CMM__RUN_STARTED="$(cmm_now_iso)"
+  CMM__RUN_START_EPOCH="$(date '+%s')"
   CMM__RUN_START_SECS=$SECONDS
   local skips="${CMM_SKIP_NAMES:-}"
   CMM__FULL_RUN=0
   if [ "$#" -eq 0 ] && [ -z "${skips// /}" ]; then
     CMM__FULL_RUN=1
   fi
-
   # Output routing: stream straight to a terminal (tools keep their TTY
   # behavior); otherwise capture each cleaner's output for the log — and
-  # stream it too unless quiet.
-  if [ "$CMM_QUIET" = 1 ]; then
+  # stream it too unless quiet. `status` is a report: it always shows output.
+  if [ "$CMM_QUIET" = 1 ] && [ "$CMM_MODE" != status ]; then
     CMM__OUTMODE=capture
   elif [ "${CMM__TTY_OUT:-0}" = 1 ] && [ "$CMM_JSON" != 1 ]; then
     CMM__OUTMODE=direct
   else
     CMM__OUTMODE='tee'
   fi
+  # Process groups (see cmm_stop_cleaner): only for runs no terminal can
+  # interact with. CMM__PGRP=0|1 forces the choice (tests).
+  CMM__GROUP=0
+  case "${CMM__PGRP:-auto}" in
+    0 | 1) CMM__GROUP="$CMM__PGRP" ;;
+    *)
+      if [ "${CMM_INTERACTIVE:-0}" != 1 ] && ! (: </dev/tty) 2>/dev/null; then
+        CMM__GROUP=1
+      fi
+      ;;
+  esac
 
   if [ "$CMM_DRY_RUN" != 1 ] && [ "$CMM_MODE" != status ]; then
     cmm__open_log
-    CMM__DF_BEFORE="$(df -k "$HOME" 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
+    CMM__DF_BEFORE="$(cmm__df_free)"
   else
     CMM__DF_BEFORE=''
   fi
   cmm_log "scrubmac $CMM_VERSION — $CMM__RUN_STARTED — mode=$CMM_MODE scheduled=${CMM_SCHEDULED:-0} interactive=${CMM_INTERACTIVE:-0} offline=${CMM_OFFLINE:-0} quiet=$CMM_QUIET"
   cmm_log "PATH=$PATH"
 
-  trap cmm__on_int INT TERM
-
+  # Select, then snapshot the built-ins (see cmm__snapshot_lib).
   cmm_discover
   while IFS="$TAB" read -r name _ path src _ _ def _; do
     [ -n "$name" ] || continue
@@ -1009,21 +1374,65 @@ cmm_run_cleaners() {
     else
       cmm_is_enabled "$name" "$def" || continue
     fi
+    sel_names+=("$name")
+    sel_paths+=("$path")
+    sel_srcs+=("$src")
+  done <<EOF
+$CMM_DISCOVERED
+EOF
+  n="${#sel_names[@]}"
+  cmm__snapshot_lib
+  while [ "$i" -lt "$n" ]; do
+    run_path=''
+    if [ "${sel_srcs[$i]}" = builtin ]; then
+      run_path="$(cmm__snapshot_cleaner "${sel_paths[$i]}")"
+    fi
+    sel_runs+=("${run_path:--}")
+    i=$((i + 1))
+  done
 
-    if ! assert_safe_to_execute "$path"; then
-      cmm__record "$name" refused 0 '' "$src" "refused by the execution-safety guard (see 'scrubmac doctor')$CMM_US" '' ''
-      cmm_log "== $name: REFUSED (execution-safety guard: $path)"
+  # Cleaners start in $HOME whatever directory scrubmac was started from
+  # (launchd starts jobs in /, where tools like pnpm try to write). Every
+  # path from here on is absolute.
+  cd "$HOME" 2>/dev/null || cd /
+
+  trap cmm__on_int INT TERM HUP
+
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    name="${sel_names[$i]}"
+    path="${sel_paths[$i]}"
+    src="${sel_srcs[$i]}"
+    run_path="${sel_runs[$i]}"
+    i=$((i + 1))
+    if [ "$src" != builtin ]; then # your own cleaners run in place
+      run_path=-
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        assert_safe_to_execute "$path" && run_path="$path"
+      fi
+    fi
+    if [ "$run_path" = - ]; then
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        cmm__record "$name" refused 0 '' "$src" "refused by the execution-safety guard (see 'scrubmac doctor')$CMM_US" '' ''
+        cmm_log "== $name: REFUSED (execution-safety guard: $path)"
+      else
+        warn "$name: $path disappeared during the run"
+        cmm__record "$name" fail 0 '' "$src" "the cleaner file disappeared during the run$CMM_US" '' ''
+        cmm_log "== $name: FAIL ($path disappeared)"
+      fi
       continue
     fi
 
-    banner "$name"
+    [ "$CMM__OUTMODE" != capture ] && banner "$name"
     CMM__CUR_NAME="$name"
     CMM__CUR_SRC="$src"
     CMM__CUR_START=$SECONDS
     export CMM_REPORT_FILE="$CMM_TMP/$name.report"
     export CMM_CLEANER_NAME="$name"
+    export CMM_SCRATCH_DIR="$CMM_TMP/scratch-$name"
     : >"$CMM_REPORT_FILE"
-    cmm__exec_cleaner "$path" "$name"
+    mkdir -p "$CMM_SCRATCH_DIR" 2>/dev/null || unset CMM_SCRATCH_DIR
+    cmm__exec_cleaner "$run_path" "$name"
     secs=$((SECONDS - CMM__CUR_START))
     cmm__read_report "$CMM_REPORT_FILE"
 
@@ -1041,14 +1450,18 @@ cmm_run_cleaners() {
 
     if [ "$CMM__OUTMODE" = capture ]; then
       case "$status" in
-        fail | timeout) cat "$CMM_TMP/$name.out" 2>/dev/null || true ;;
-        skip)
-          if [ -n "$CMM__SKIPMSG" ]; then
-            note "- $CMM__SKIPMSG"
-          else
-            tail -n 1 "$CMM_TMP/$name.out" 2>/dev/null || true # surface the skip note
-          fi
+        fail | timeout)
+          cmm__quiet_line "$status" "$name" "$secs"
+          cat "$CMM_TMP/$name.out" 2>/dev/null || true
           ;;
+        skip)
+          if [ -z "$CMM__SKIPMSG" ]; then # surface the cleaner's own last line
+            CMM__SKIPMSG="$(tail -n 1 "$CMM_TMP/$name.out" 2>/dev/null || true)"
+            CMM__SKIPMSG="${CMM__SKIPMSG#- }"
+          fi
+          cmm__quiet_line skip "$name" "$secs" "$CMM__SKIPMSG"
+          ;;
+        *) cmm__quiet_line "$status" "$name" "$secs" ;;
       esac
     fi
     case "$status" in
@@ -1058,19 +1471,15 @@ cmm_run_cleaners() {
 
     cmm__record "$name" "$status" "$secs" "$CMM__RC" "$src" "$CMM__NOTES" "$CMM__FREED" "$CMM__CACHE"
     CMM__CUR_NAME=''
-    case "$status" in
-      ok) label=ok ;; skip) label=skip ;; timeout) label=TIMEOUT ;; *) label=FAIL ;;
-    esac
-    cmm_log "== $name: $label (${secs}s, exit $CMM__RC)"
+    cmm__label "$status"
+    cmm_log "== $name: $CMM__LABEL (${secs}s, exit $CMM__RC)"
     if [ -n "$CMM_LOG_FILE" ] && [ -s "$CMM_TMP/$name.out" ]; then
-      cat "$CMM_TMP/$name.out" >>"$CMM_LOG_FILE" 2>/dev/null || true
+      { cat "$CMM_TMP/$name.out" >>"$CMM_LOG_FILE"; } 2>/dev/null || true
     fi
-  done <<EOF
-$CMM_DISCOVERED
-EOF
+  done
 
-  trap - INT TERM
-  unset CMM_REPORT_FILE CMM_CLEANER_NAME
+  trap - INT TERM HUP
+  unset CMM_REPORT_FILE CMM_CLEANER_NAME CMM_SCRATCH_DIR
   cmm__counts
   local rc=0
   [ "$CMM__N_FAIL" -gt 0 ] && rc=1

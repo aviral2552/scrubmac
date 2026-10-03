@@ -23,7 +23,12 @@ stub() {
 stub brew 'case "$1" in
   --prefix) echo /opt/homebrew ;;
   update) sleep 2; echo "Updated 2 taps (homebrew/core and homebrew/cask)." ;;
-  upgrade) sleep 3; echo "==> Upgrading 3 outdated packages:"; echo "git 2.55.0 -> 2.56.0"; echo "node 24.19.0 -> 24.20.0"; echo "uv 0.12.21 -> 0.12.22" ;;
+  upgrade)
+    if [ "$2" = --cask ]; then
+      sleep 1; echo "==> Upgrading 1 outdated package:"; echo "visual-studio-code 1.105.0 -> 1.105.1"
+    else
+      sleep 3; echo "==> Upgrading 3 outdated packages:"; echo "git 2.55.0 -> 2.56.0"; echo "node 24.19.0 -> 24.20.0"; echo "uv 0.12.21 -> 0.12.22"
+    fi ;;
   cleanup) echo "Removing: ~/Library/Caches/Homebrew/node--24.19.0.tar.gz... (21.4MB)" ;;
   doctor) echo "Your system is ready to brew." ;;
 esac
@@ -41,14 +46,29 @@ stub uv 'case "$1 $2" in
   "cache prune") echo "Removed 1,284 files (412.3MiB)" ;;
 esac
 exit 0'
-stub pipx 'echo "No packages upgraded after running '"'"'pipx upgrade-all'"'"'"; exit 0'
+stub pipx 'case "$*" in
+  *--help*) echo "usage: pipx upgrade-all [--cooldown DAYS] [--skip SKIP]" ;;
+  *) echo "No packages upgraded after running '"'"'pipx upgrade-all'"'"'" ;;
+esac
+exit 0'
 stub claude 'sleep 1; echo "Successfully updated from 2.1.287 to version 2.1.288"; exit 0'
-stub gh 'exit 0'
+stub gh 'case "$1 $2" in
+  "auth status") echo "github.com: Logged in" ;;
+  "extension list") printf "gh dash\tdlvhdr/gh-dash\tv4.12.0\n" ;;
+  "extension upgrade") echo "[dash]: already up to date" ;;
+esac
+exit 0'
+stub python3 'case "$*" in
+  "-m pip --version") echo "pip 25.2" ;;
+  "-m pip cache purge") echo "Files removed: 214" ;;
+esac
+exit 0'
 stub rustup 'sleep 2; echo "  stable-aarch64-apple-darwin unchanged - rustc 1.98.1"; exit 0'
 
 export HOME="$SB/home" XDG_CONFIG_HOME="$SB/home/.config" TMPDIR="$SB/tmp"
 export PATH="$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" NO_COLOR=1 CMM_OFFLINE=0 CMM_NOTIFY=never
-export CMM_COOLDOWN_DAYS=0 CMM_BREW_PREFIX=/opt/homebrew CMM_ASSUME_INTERACTIVE=0
+# a person at the terminal, default settings (7-day cooldown included)
+export CMM_BREW_PREFIX=/opt/homebrew CMM_ASSUME_INTERACTIVE=1
 mkdir -p "$XDG_CONFIG_HOME/scrubmac"
 printf 'QUIET=1\n' >"$XDG_CONFIG_HOME/scrubmac/config"
 

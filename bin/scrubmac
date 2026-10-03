@@ -37,7 +37,6 @@ if [ "${EUID:-$(id -u)}" -eq 0 ]; then
 fi
 
 # ---------- configuration ----------
-cmm_migrate_config_dir # 2026 rename: adopt ~/.config/cleanmymac if present
 cmm_init_paths
 cmm_settings_snapshot_env
 CMM__USER_OFFLINE="${CMM_OFFLINE:-}"
@@ -52,6 +51,8 @@ USAGE
   scrubmac <command> [args]
 
 COMMANDS
+  run [cleaner ...]        run cleaners (the default: 'scrubmac' alone runs
+                           every enabled cleaner)
   list [--names]           show all cleaners and their status
   status [cleaner ...]     read-only report: cache sizes and outdated packages
   doctor                   environment, configuration, and security report
@@ -76,15 +77,19 @@ OPTIONS
       --measure            report the space each cleaner frees (slower)
       --json               machine-readable summary on stdout (output -> stderr)
       --scheduled          unattended run (set by 'scrubmac schedule')
+  -h, --help               show this page
+  -V, --version            print the version
 
 Without arguments, every enabled cleaner runs. Naming cleaners runs exactly
-those (even if disabled). Cleaners live in:
+those (even if disabled); --skip takes a name or a comma-separated list.
+Cleaners live in:
   $CMM_BUILTIN_CLEANERS_DIR
   $CMM_USER_CLEANERS_DIR   (yours; a same-named cleaner overrides the built-in)
 
 EXIT STATUS
   0 all cleaners succeeded or were skipped; 1 at least one cleaner failed,
-  timed out, or was refused; 2 usage or environment error; 130 interrupted.
+  timed out, or was refused (also: 'config get' of an unknown key, 'last
+  --json' with no run yet); 2 usage or environment error; 130 interrupted.
 
 PROJECT
   https://github.com/aviral2552/scrubmac
@@ -115,9 +120,31 @@ set_mode() {
 add_skip() {
   local n
   [ -n "$1" ] || usage_err "--skip needs a cleaner name"
-  for n in ${1//,/ }; do
-    CMM_SKIP_NAMES="$CMM_SKIP_NAMES $n"
+  while IFS= read -r n; do
+    [ -n "$n" ] && CMM_SKIP_NAMES="$CMM_SKIP_NAMES $n"
+  done <<EOF
+$(cmm__split_names "$1")
+EOF
+}
+
+# cmm__check_names NAME… — every name is a known cleaner (exit 2 otherwise).
+cmm__check_names() {
+  local n
+  for n in "$@"; do
+    known_cleaner "$n" || cmm_unknown_cleaner "$n"
   done
+}
+
+# cmm__check_list LIST — the same for a space/comma/newline-separated list
+# (split without globbing).
+cmm__check_list() {
+  local n
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    known_cleaner "$n" || cmm_unknown_cleaner "$n"
+  done <<EOF
+$(cmm__split_names "$1")
+EOF
 }
 
 # shellcheck disable=SC2034  # CMM__FLAG_* are read indirectly by cmm_setting_resolve
@@ -151,7 +178,13 @@ while [ $# -gt 0 ]; do
     *)
       if [ -z "$CMD" ]; then
         case "$1" in
-          list | doctor | status | configure | enable | disable | config | schedule | last | update | version | help) CMD="$1" ;;
+          config)
+            # KEY/VALUE words pass through as given (a value may start with -)
+            CMD=config
+            shift
+            break
+            ;;
+          list | doctor | status | configure | enable | disable | schedule | last | update | version | help) CMD="$1" ;;
           u | U) CMD=update ;; # legacy 1.x shorthands
           h | H) CMD=help ;;
           run) CMD=run ;;
@@ -170,11 +203,39 @@ done
 [ $# -gt 0 ] && ARGS+=("$@")
 : "${CMD:=run}"
 
-if [ "$CMM_MODE" != run ] && [ "$CMD" != run ]; then
-  usage_err "--update-only/--clean-only apply to runs only"
+# Options that would be silently ignored are errors instead.
+cmm__not_for() { usage_err "$1 does not apply to 'scrubmac $CMD'${2:+ — $2}"; }
+if [ "$CMM_JSON" = 1 ]; then
+  case "$CMD" in run | status | last) ;; *) cmm__not_for --json ;; esac
+fi
+if [ "$CMM_DRY_RUN" = 1 ]; then
+  case "$CMD" in
+    update) cmm__not_for --dry-run "'scrubmac update --check' shows what would change" ;;
+    schedule | enable | disable | configure) cmm__not_for --dry-run ;;
+  esac
+fi
+if [ "$CMD" != run ]; then
+  if [ "$CMM_MODE" != run ]; then
+    usage_err "--update-only/--clean-only apply to runs only"
+  fi
+  if [ "$CMM_SCHEDULED" = 1 ]; then cmm__not_for --scheduled; fi
+  if [ -n "${CMM__FLAG_MEASURE:-}" ]; then cmm__not_for --measure; fi
+  if [ "$CMD" != status ] && [ -n "${CMM_SKIP_NAMES// /}" ]; then cmm__not_for --skip; fi
 fi
 
 # ---------- resolve settings (flag > env > config > default) ----------
+# --json: the JSON document owns stdout (fd 3 keeps it); everything else,
+# cleaner output included, goes to stderr.
+if [ "$CMM_JSON" = 1 ]; then
+  exec 3>&1 1>&2
+fi
+case "$CMD:${ARGS[*]:-}" in
+  list:--names) ;;             # shell completion: no side effects
+  *) cmm_migrate_config_dir ;; # 2026 rename: adopt ~/.config/cleanmymac if present
+esac
+case "$CMD" in
+  run | status | config | doctor | configure) cmm_config_lint ;;
+esac
 cmm_settings_export
 cmm_init_colors
 
@@ -185,11 +246,6 @@ if [ "$CMM_SCHEDULED" != 1 ]; then
   if [ "${CMM_ASSUME_INTERACTIVE:-0}" = 1 ] || { [ -t 0 ] && [ -t 1 ]; }; then
     CMM_INTERACTIVE=1
   fi
-fi
-# --json: the JSON document owns stdout (fd 3 keeps it); everything else,
-# cleaner output included, goes to stderr.
-if [ "$CMM_JSON" = 1 ]; then
-  exec 3>&1 1>&2
 fi
 export CMM_DRY_RUN CMM_MODE CMM_INTERACTIVE CMM_SCHEDULED CMM_OS
 
@@ -204,6 +260,21 @@ cmm_load_brew_prefix() {
     fi
   fi
   export CMM_BREW_PREFIX
+}
+
+# cmm_warn_brew_off_path — Homebrew is installed in a standard place but not
+# on this run's PATH (a crontab without PATH, a hand-made launchd job): the
+# tools it installed would all skip, quietly.
+cmm_warn_brew_off_path() {
+  local b
+  have brew && return 0
+  for b in ${CMM_BREW_LOCATIONS:-/opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew}; do
+    if [ -x "$b" ]; then
+      warn "Homebrew is installed (${b%/brew}) but not on this run's PATH — the tools it installed will be skipped; 'scrubmac doctor' shows how to fix the PATH"
+      return 0
+    fi
+  done
+  return 0
 }
 
 # ---------- cleanup ----------
@@ -241,9 +312,12 @@ first_run_offer() {
     local a=""
     IFS= read -r a || a=n
     case "$a" in
-      n | N | no | NO)
-        write_default_config
-        note "Wrote defaults to $CMM_CONFIG_FILE — run 'scrubmac configure' anytime."
+      [nN]*)
+        if write_default_config; then
+          note "Wrote defaults to $CMM_CONFIG_FILE — run 'scrubmac configure' anytime."
+        else
+          warn "could not save the defaults — using them for this run"
+        fi
         ;;
       *)
         # shellcheck source=lib/wizard.sh
@@ -269,13 +343,9 @@ cmm__skipped_run() {
 }
 
 cmd_run() {
-  local n last now
-  for n in "$@"; do
-    known_cleaner "$n" || cmm_unknown_cleaner "$n"
-  done
-  for n in $CMM_SKIP_NAMES; do
-    known_cleaner "$n" || cmm_unknown_cleaner "$n"
-  done
+  local last now
+  cmm__check_names "$@"
+  cmm__check_list "$CMM_SKIP_NAMES"
   cmm_state_migrate
   if [ "$#" -eq 0 ] && [ "$CMM_SCHEDULED" != 1 ]; then
     first_run_offer
@@ -292,7 +362,7 @@ cmd_run() {
       case "$last" in
         '' | *[!0-9]*) ;;
         *)
-          if [ $((now - last)) -lt $((CMM_MIN_HOURS_BETWEEN_RUNS * 3600)) ]; then
+          if [ "$last" -le "$now" ] && [ $((now - last)) -lt $((CMM_MIN_HOURS_BETWEEN_RUNS * 3600)) ]; then
             cmm__skipped_run "a full run succeeded $(((now - last) / 3600))h ago (MIN_HOURS_BETWEEN_RUNS=$CMM_MIN_HOURS_BETWEEN_RUNS)"
             exit 0
           fi
@@ -306,6 +376,7 @@ cmd_run() {
   cmm_detect_offline
   cmm_load_brew_prefix
   export CMM_OFFLINE
+  cmm_warn_brew_off_path
 
   note "${CMM_BOLD}scrubmac $CMM_VERSION${CMM_RESET} — starting up the cleaning engines"
   [ "$CMM_DRY_RUN" = "1" ] && note "(dry run: commands are printed; nothing that changes state is executed)"
@@ -321,13 +392,8 @@ cmd_run() {
 }
 
 cmd_status() {
-  local n
-  for n in "$@"; do
-    known_cleaner "$n" || cmm_unknown_cleaner "$n"
-  done
-  for n in $CMM_SKIP_NAMES; do
-    known_cleaner "$n" || cmm_unknown_cleaner "$n"
-  done
+  cmm__check_names "$@"
+  cmm__check_list "$CMM_SKIP_NAMES"
   cmm_state_migrate
   cmm_detect_offline
   cmm_load_brew_prefix
@@ -341,11 +407,11 @@ cmd_status() {
 
 cmd_list() {
   local name base path src gate group def summary state
-  cmm_state_migrate
   if [ "${1:-}" = --names ]; then
     cmm_cleaner_names
     return 0
   fi
+  cmm_state_migrate
   cmm_discover
   printf '%-16s %-9s %-7s %-5s %-8s %s\n' NAME STATE DEFAULT TOOL SOURCE SUMMARY
   while IFS="$TAB" read -r name base path src gate group def summary; do
@@ -360,14 +426,13 @@ EOF
 }
 
 cmd_enable_disable() {
-  local want="$1" n gate
+  local want="$1" n gate names
   shift
-  [ "$#" -gt 0 ] || usage_err "usage: scrubmac $CMD <cleaner ...>"
-  for n in "$@"; do
-    known_cleaner "$n" || cmm_unknown_cleaner "$n"
-  done
+  names="$(cmm__split_names "$@")"
+  [ -n "$names" ] || usage_err "usage: scrubmac $CMD <cleaner ...> (names may be comma-separated)"
+  cmm__check_list "$names"
   cmm_state_migrate
-  for n in "$@"; do
+  while IFS= read -r n; do
     cmm_set_state "$n" "$want"
     if [ "$want" = on ]; then
       gate="$(cmm_cleaner_field "$n" 5)"
@@ -379,7 +444,9 @@ cmd_enable_disable() {
     else
       note "disabled: $n"
     fi
-  done
+  done <<EOF
+$names
+EOF
 }
 
 # cmm_config_put KEY [VALUE] — rewrite the config file without KEY (any line
@@ -387,7 +454,7 @@ cmd_enable_disable() {
 # Comments and every other line are preserved.
 cmm_config_put() {
   local key="$1" nargs="$#" val="${2:-}"
-  mkdir -p "$CMM_CONFIG_DIR"
+  cmm_require_readable "$CMM_CONFIG_FILE"
   {
     if [ -f "$CMM_CONFIG_FILE" ]; then
       grep -v -E "^[[:space:]]*${key}[[:space:]]*=" "$CMM_CONFIG_FILE" || true
@@ -405,10 +472,30 @@ cmm__valid_key() {
   return 0
 }
 
+# cmm__config_key_hint KEY — " — did you mean 'X'?" for a near-miss of a
+# built-in key, or nothing.
+cmm__config_key_hint() {
+  local hint
+  # shellcheck disable=SC2046  # keys never contain whitespace
+  hint="$(cmm_suggest "$1" $(cmm_setting_keys))"
+  [ -n "$hint" ] && printf " — did you mean '%s'?" "$hint"
+  return 0
+}
+
 cmd_config() {
-  local sub="${1:-list}" key line custom=''
+  local sub="${1:-list}" key line custom='' hint
   [ "$#" -gt 0 ] && shift
   case "$sub" in
+    set | unset)
+      if [ "$CMM_DRY_RUN" = 1 ]; then
+        usage_err "--dry-run does not apply to 'scrubmac config $sub'"
+      fi
+      ;;
+  esac
+  case "$sub" in
+    -h | --help | help)
+      note "usage: scrubmac config [list | get KEY | set KEY VALUE | unset KEY | path]"
+      ;;
     list)
       printf '%-24s %-12s %-8s %s\n' KEY VALUE SOURCE DESCRIPTION
       for key in $(cmm_setting_keys); do
@@ -432,8 +519,12 @@ EOF
     get)
       [ "$#" -eq 1 ] || usage_err "usage: scrubmac config get KEY"
       cmm__valid_key "$1" || usage_err "invalid key '$1' (expected A-Z, 0-9, _)"
-      cmm_setting_resolve "$1" || true
-      note "$CMM__S_VAL"
+      if cmm_setting_resolve "$1" || grep -Eq "^$1=[A-Za-z0-9._/-]*\$" "$CMM_CONFIG_FILE" 2>/dev/null; then
+        note "$CMM__S_VAL"
+      else
+        err "$1 is not set and is not a built-in setting$(cmm__config_key_hint "$1")"
+        exit 1
+      fi
       ;;
     set)
       [ "$#" -eq 2 ] || usage_err "usage: scrubmac config set KEY VALUE"
@@ -441,19 +532,24 @@ EOF
       case "$2" in
         *[!A-Za-z0-9._/-]*) usage_err "invalid value '$2' (allowed: A-Z a-z 0-9 . _ / -)" ;;
       esac
+      local val="$2"
       if cmm_setting_info "$1"; then
         cmm_setting_valid "$CMM__S_TYPE" "$2" ||
           usage_err "invalid value for $1: '$2' (expected $(cmm_type_hint "$CMM__S_TYPE"))"
+        val="$(cmm_setting_norm "$CMM__S_TYPE" "$2")"
       else
+        hint="$(cmm__config_key_hint "$1")"
+        # a near-miss of a built-in key is a typo, not a custom setting
+        [ -z "$hint" ] || usage_err "unknown setting '$1'$hint (custom keys can't be one typo away from a built-in)"
         warn "$1 is not a built-in setting — stored for custom cleaners"
       fi
-      cmm_config_put "$1" "$2"
-      note "$1=$2"
+      cmm_config_put "$1" "$val" || exit 2
+      note "$1=$val"
       ;;
     unset)
       [ "$#" -eq 1 ] || usage_err "usage: scrubmac config unset KEY"
       cmm__valid_key "$1" || usage_err "invalid key '$1' (expected A-Z, 0-9, _)"
-      cmm_config_put "$1"
+      cmm_config_put "$1" || exit 2
       note "unset $1"
       ;;
     path) note "$CMM_CONFIG_FILE" ;;

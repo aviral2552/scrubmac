@@ -19,6 +19,11 @@ lint:
 	@perl -ne 'if (/\$$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]/) { print "unbraced expansion before non-ASCII (bash 3.2 hazard): $$ARGV:$$.: $$_"; $$found = 1 } END { exit($$found ? 1 : 0) }' $(SH_FILES) $(BASH_HELPERS)
 	@# Bats ignores `! cmd`: errexit never fires on a negated command (SC2314).
 	@! grep -nE '^[[:space:]]*! ' $(BATS_FILES) || { echo "use refute instead of '! cmd' in tests (see tests/helpers/setup.bash)"; exit 1; }
+	@# bash < 4.1 (macOS) ignores a failing [[ ]] under errexit unless it is a
+	@# test's last command, and errexit ignores every member of an && list but
+	@# the last: such assertions must end in "|| false".
+	@perl -ne 'if (/^\s*\[\[.*\]\]\s*(#.*)?$$/ || /^\s*\[\[? .*\]\]? && \[\[? .*\]\]?\s*(#.*)?$$/) { print "$$ARGV:$$.: end this assertion with || false: $$_"; $$found = 1 } close ARGV if eof; END { exit($$found ? 1 : 0) }' $(BATS_FILES)
+	node --check lib/registry.js
 
 fmt:
 	shfmt -w -i 2 -ci $(SH_FILES) $(BASH_HELPERS)

@@ -38,10 +38,10 @@ seed_old_config() {
   make_cleaner 10-env.sh 'echo "COOL=${CMM_COOLDOWN_DAYS:-unset}"'
   run "$CMM"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"migrated config"* ]]
-  [ -d "$NEWCFG" ] && [ ! -L "$NEWCFG" ]
+  [[ "$output" == *"migrated config"* ]] || false
+  [ -d "$NEWCFG" ] && [ ! -L "$NEWCFG" ] || false
   [ -L "$OLDCFG" ] # compat symlink
-  [[ "$output" == *"COOL=7"* ]]
+  [[ "$output" == *"COOL=7"* ]] || false
   grep -Fxq npm "$NEWCFG/disabled"
 }
 
@@ -50,7 +50,7 @@ seed_old_config() {
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   run "$CMM"
   [ "$status" -eq 0 ]
-  [[ "$output" == *CUSTOM-RAN* ]]
+  [[ "$output" == *CUSTOM-RAN* ]] || false
 }
 
 @test "config migration: both dirs existing warns and prefers the new one" {
@@ -60,8 +60,8 @@ seed_old_config() {
   make_cleaner 10-env.sh 'echo "COOL=${CMM_COOLDOWN_DAYS:-unset}"'
   run "$CMM"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"both"*"exist"* ]]
-  [[ "$output" == *"COOL=3"* ]]
+  [[ "$output" == *"both"*"exist"* ]] || false
+  [[ "$output" == *"COOL=3"* ]] || false
   [ -d "$OLDCFG" ] # never deleted
 }
 
@@ -72,7 +72,7 @@ seed_old_config() {
   make_cleaner 10-alpha.sh 'echo hi'
   run "$CMM"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"repoint your dotfiles symlink"* ]]
+  [[ "$output" == *"repoint your dotfiles symlink"* ]] || false
   [ -L "$OLDCFG" ] # untouched
   [ -f "$SANDBOX/dotfiles/cleanmymac/config" ]
 }
@@ -82,15 +82,24 @@ seed_old_config() {
   run "$CMM" list
   run "$CMM" list
   [ "$status" -eq 0 ]
-  [[ "$output" != *"migrated config"* ]]
-  [[ "$output" != *warning* ]]
+  [[ "$output" != *"migrated config"* ]] || false
+  [[ "$output" != *warning* ]] || false
 }
 
 @test "config migration is concurrency-tolerant (racing loser survives)" {
   seed_old_config
   run lib "cmm_migrate_config_dir; cmm_migrate_config_dir; echo SURVIVED"
   [ "$status" -eq 0 ]
-  [[ "$output" == *SURVIVED* ]]
+  [[ "$output" == *SURVIVED* ]] || false
+}
+
+@test "losing the config-migration race (mv fails) never aborts the caller" {
+  seed_old_config
+  printf '#!/bin/sh\nexit 1\n' >"$STUB_BIN/mv" # the other run moved it first
+  chmod 755 "$STUB_BIN/mv"
+  run lib "set -e; cmm_migrate_config_dir; echo SURVIVED"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *SURVIVED* ]] || false
 }
 
 # ---------- install-dir migration (§3.2) ----------
@@ -106,7 +115,7 @@ seed_old_config() {
   [ -L "$CMM_OLD_PREFIX" ]              # compat symlink
   [ -L "$CMM_BIN_DIR/scrubmac" ]
   [ ! -e "$SANDBOX/bindir/cleanmymac" ] # old-name link retired
-  [[ "$output" == *"the command is now 'scrubmac'"* ]]
+  [[ "$output" == *"the command is now 'scrubmac'"* ]] || false
 }
 
 @test "install.sh self-hosted re-run from inside the old dir completes (no rsync self-destruct)" {
@@ -115,7 +124,7 @@ seed_old_config() {
   rsync -a --exclude=.git "$REPO_ROOT/" "$CMM_OLD_PREFIX/"
   run "$CMM_OLD_PREFIX/install.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"refreshing links only"* ]]
+  [[ "$output" == *"refreshing links only"* ]] || false
   [ -x "$CMM_PREFIX/bin/scrubmac" ]
   [ -L "$CMM_OLD_PREFIX" ]
   [ -L "$CMM_BIN_DIR/scrubmac" ]
@@ -136,7 +145,7 @@ seed_old_config() {
 @test "shim: direct invocation nags on stderr and execs scrubmac with argv intact" {
   run bash -c "\"$REPO_ROOT/bin/cleanmymac\" version 2>\"$SANDBOX/err\""
   [ "$status" -eq 0 ]
-  [[ "$output" == *"scrubmac 3"* ]]
+  [[ "$output" == *"scrubmac 3"* ]] || false
   grep -q "cleanmymac is now scrubmac" "$SANDBOX/err"
 }
 
@@ -145,7 +154,21 @@ seed_old_config() {
   ln -s "$REPO_ROOT/bin/cleanmymac" "$SANDBOX/foreignbin/cleanmymac"
   run bash -c "\"$SANDBOX/foreignbin/cleanmymac\" version 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"scrubmac 3"* ]]
+  [[ "$output" == *"scrubmac 3"* ]] || false
+}
+
+@test "shim: from a migrated install it says to call scrubmac; from an unmigrated dir, which install.sh to run" {
+  mkdir -p "$SANDBOX/x/.scrubmac" "$SANDBOX/y/.cleanmymac"
+  rsync -a --exclude=.git "$REPO_ROOT/" "$SANDBOX/x/.scrubmac/"
+  rsync -a --exclude=.git "$REPO_ROOT/" "$SANDBOX/y/.cleanmymac/"
+  ln -s "$SANDBOX/x/.scrubmac" "$SANDBOX/x/.cleanmymac" # the compat link
+  run bash -c "\"$SANDBOX/x/.cleanmymac/bin/cleanmymac\" version 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"call 'scrubmac' instead"* ]] || false
+  [[ "$output" != *"install.sh"* ]] || false
+  run bash -c "\"$SANDBOX/y/.cleanmymac/bin/cleanmymac\" version 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"finish migrating: run $SANDBOX/y/.cleanmymac/install.sh"* ]] || false
 }
 
 @test "shim: exit code passes through" {
@@ -162,7 +185,7 @@ seed_old_config() {
   make_cleaner 10-alpha.sh 'echo hi'
   run "$CMM"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"pre-rename cleanmymac run is in progress"* ]]
+  [[ "$output" == *"pre-rename cleanmymac run is in progress"* ]] || false
 }
 
 @test "a stale legacy lock is recovered and both locks are released after the run" {
@@ -173,9 +196,29 @@ seed_old_config() {
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   run "$CMM"
   [ "$status" -eq 0 ]
-  [[ "$output" == *ALPHA-RAN* ]]
+  [[ "$output" == *ALPHA-RAN* ]] || false
   [ ! -d "$TMPDIR/cleanmymac.$(id -u).lock" ]
   [ ! -L "$LOCK" ] # the run lock (in the state dir) is released too
+}
+
+@test "a legacy lock path that is not ours (a planted symlink) is ignored, never followed" {
+  mkdir -p "$SANDBOX/elsewhere"
+  ln -s "$SANDBOX/elsewhere" "$TMPDIR/cleanmymac.$(id -u).lock"
+  make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
+  run "$CMM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *ALPHA-RAN* ]] || false
+  [ -L "$TMPDIR/cleanmymac.$(id -u).lock" ] # left alone
+  [ -d "$SANDBOX/elsewhere" ]
+  [ ! -e "$SANDBOX/elsewhere/pid" ]
+}
+
+@test "no legacy lock is taken when TMPDIR points nowhere (and the run still works)" {
+  make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
+  TMPDIR="$SANDBOX/does-not-exist" run "$CMM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *ALPHA-RAN* ]] || false
+  [ ! -e "$SANDBOX/does-not-exist" ]
 }
 
 # ---------- uninstall (both names) ----------
@@ -188,7 +231,7 @@ seed_old_config() {
   run "$CMM_PREFIX/uninstall.sh"
   [ "$status" -eq 0 ]
   [ ! -e "$CMM_PREFIX" ]
-  [ ! -e "$CMM_OLD_PREFIX" ] && [ ! -L "$CMM_OLD_PREFIX" ]
+  [ ! -e "$CMM_OLD_PREFIX" ] && [ ! -L "$CMM_OLD_PREFIX" ] || false
   [ ! -L "$CMM_BIN_DIR/scrubmac" ]
   [ ! -L "$CMM_BIN_DIR/cleanmymac" ]
 }

@@ -159,10 +159,12 @@ cleaning() {
 }
 
 # skip_unless_updating — for cleaners that only update (nothing to clean).
+# In `scrubmac status` the cleaner ends here successfully: put its report
+# commands before this call.
 skip_unless_updating() {
   case "${CMM_MODE:-run}" in
     clean) skip "skipping: nothing to clean (update-only cleaner)" ;;
-    status) skip "skipping: nothing to report" ;;
+    status) exit 0 ;;
   esac
   if [ "${CMM_OFFLINE:-0}" = 1 ]; then
     skip "skipping: offline (updates need the network)"
@@ -200,22 +202,47 @@ cmm__report_line() {
   local v="$2"
   v="${v//$'\t'/ }"
   v="${v//$'\n'/ }"
-  printf '%s\t%s\n' "$1" "$v" >>"$CMM_REPORT_FILE" 2>/dev/null || true
+  { printf '%s\t%s\n' "$1" "$v" >>"$CMM_REPORT_FILE"; } 2>/dev/null || true
 }
 
 # summary_note TEXT — shown under this cleaner in the run summary and JSON.
 summary_note() { cmm__report_line note "$*"; }
 
 # ---------- command execution ----------
+# cmm__exec CMD ARGS… — announce and execute (the core of run/step/try).
+# Returns the command's status, except that 75 (the "skipped" exit code)
+# becomes 1: a tool that happens to exit 75 has failed, not skipped.
+cmm__exec() {
+  [ "${CMM_MODE:-run}" = status ] && return 0
+  printf '%s+ %s%s\n' "$CMM_DIM" "$*" "$CMM_RESET"
+  [ "${CMM_DRY_RUN:-0}" = "1" ] && return 0
+  local rc=0
+  "$@" || rc=$?
+  [ "$rc" -eq "$CMM_EXIT_SKIP" ] && rc=1
+  return "$rc"
+}
+
+# cmm__failed_note RC CMD ARGS… — name the failing command in the summary.
+cmm__failed_note() {
+  local rc="$1" cmd
+  shift
+  cmd="$*"
+  [ "${#cmd}" -le 80 ] || cmd="${cmd:0:77}..."
+  summary_note "failed: $cmd (exit $rc)"
+}
+
 # run CMD ARGS… — announce and execute a mutating command. Honors dry-run.
 # Failures propagate (cleaners run under `set -e`, so a failed `run` fails the
 # cleaner). Takes an argument vector only — no strings, no eval, no pipelines.
 # `scrubmac status` never mutates: run/step/try are silent no-ops there.
 run() {
-  [ "${CMM_MODE:-run}" = status ] && return 0
-  printf '%s+ %s%s\n' "$CMM_DIM" "$*" "$CMM_RESET"
-  [ "${CMM_DRY_RUN:-0}" = "1" ] && return 0
-  "$@"
+  local rc=0
+  cmm__exec "$@" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cmm__failed_note "$rc" "$@"
+    return "$rc"
+  fi
+  return 0
 }
 
 # try CMD ARGS… — like run, but a non-zero exit is reported and tolerated.
@@ -223,7 +250,7 @@ run() {
 # informational, not failures.
 try() {
   local rc=0
-  run "$@" || rc=$?
+  cmm__exec "$@" || rc=$?
   [ "$rc" -ne 0 ] && warn "'$1' exited $rc (continuing)"
   return 0
 }
@@ -234,9 +261,10 @@ try() {
 # not happen after a failure.
 step() {
   local rc=0
-  run "$@" || rc=$?
+  cmm__exec "$@" || rc=$?
   if [ "$rc" -ne 0 ]; then
     warn "'$1' exited $rc — continuing with the remaining steps"
+    cmm__failed_note "$rc" "$@"
     cmm_fail_later
   fi
   return 0
@@ -282,6 +310,18 @@ report() {
   printf '%s~ %s%s\n' "$CMM_DIM" "$*" "$CMM_RESET"
   "$@" || warn "report '$1' exited $? (continuing)"
   return 0
+}
+
+# cmm_scratch_dir — a private directory for this cleaner's temporary files:
+# one the dispatcher creates per cleaner and removes after the run (even when
+# the cleaner is stopped by TIMEOUT), or a fresh mktemp dir when the cleaner
+# runs standalone. Prints nothing and fails when none can be made.
+cmm_scratch_dir() {
+  if [ -n "${CMM_SCRATCH_DIR:-}" ] && [ -d "$CMM_SCRATCH_DIR" ]; then
+    printf '%s\n' "$CMM_SCRATCH_DIR"
+    return 0
+  fi
+  mktemp -d "${TMPDIR:-/tmp}/scrubmac-${CMM_CLEANER_NAME:-cleaner}.XXXXXX" 2>/dev/null
 }
 
 # ---------- cache accounting ----------
@@ -364,6 +404,86 @@ resolve_self() {
   printf '%s/%s\n' "$dir" "$(basename "$target")"
 }
 
+# cmm_canon_path PATH — PATH made absolute with symlinks resolved, for
+# comparisons that must not be fooled by "$HOME/." or a symlinked parent.
+# Components that do not exist yet are appended as given. Fails (prints
+# nothing) for paths with "." or ".." components, or whose existing prefix
+# ends in a dangling symlink or a non-directory.
+cmm_canon_path() {
+  local p="$1" rest='' out
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  case "$p/" in
+    */./* | */../*) return 1 ;;
+  esac
+  while [ "$p" != "/" ] && [ ! -d "$p" ]; do
+    if [ -L "$p" ] || [ -e "$p" ]; then
+      return 1
+    fi
+    rest="/${p##*/}$rest"
+    p="${p%/*}"
+    [ -n "$p" ] || p="/"
+  done
+  p="$(cd -P "$p" 2>/dev/null && pwd -P)" || return 1
+  [ "$p" = "/" ] && p=''
+  out="$p$rest"
+  printf '%s\n' "${out:-/}"
+}
+
+# cmm_canon_parent PATH — like cmm_canon_path, but the last component is kept
+# as given (not resolved), so "is this path itself a symlink?" still works.
+cmm_canon_parent() {
+  local p="$1" dir base
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  base="${p##*/}"
+  dir="${p%/*}"
+  [ -n "$dir" ] || dir=/
+  case "$base" in '' | . | ..) return 1 ;; esac
+  dir="$(cmm_canon_path "$dir")" || return 1
+  [ "$dir" = / ] && dir=''
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+cmm__regular_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
+
+# cmm_is_install_dir DIR — DIR is absent or empty, or carries the files of a
+# scrubmac/cleanmymac install (3.x/2.x: regular lib/common.sh + VERSION +
+# bin/scrubmac or bin/cleanmymac; 1.x: setup/install.sh + the old script).
+# Symlinks never count: an installer-made launcher link is not an install.
+cmm_is_install_dir() {
+  local d="$1" entry
+  [ -e "$d" ] || [ -L "$d" ] || return 0
+  [ -d "$d" ] && [ ! -L "$d" ] || return 1
+  for entry in "$d"/* "$d"/.[!.]* "$d"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    if cmm__regular_file "$d/lib/common.sh" && cmm__regular_file "$d/VERSION" &&
+      { cmm__regular_file "$d/bin/scrubmac" || cmm__regular_file "$d/bin/cleanmymac"; }; then
+      return 0
+    fi
+    if cmm__regular_file "$d/setup/install.sh" &&
+      { cmm__regular_file "$d/cleanmymac.sh" || cmm__regular_file "$d/scrubmac.sh"; }; then
+      return 0
+    fi
+    return 1
+  done
+  return 0 # empty
+}
+
+# cmm_unsafe_target DIR — DIR (canonical) is "/", $HOME, or an ancestor of
+# $HOME: never a place to install into or remove.
+cmm_unsafe_target() {
+  local d="$1" home
+  home="$(cmm_canon_path "$HOME")" || home="$HOME"
+  case "$d" in
+    '' | / | "$home") return 0 ;;
+  esac
+  case "$home/" in
+    "$d"/*) return 0 ;;
+  esac
+  return 1
+}
+
 # points_into LINK DIR — LINK is a symlink whose target lives under DIR
 # (including dangling links left by older layouts).
 points_into() {
@@ -428,7 +548,7 @@ cmm_migrate_config_dir() {
   if [ -d "$old" ]; then
     if [ ! -e "$new" ] && mv "$old" "$new" 2>/dev/null; then
       ln -s "$new" "$old" 2>/dev/null || true
-      note "(migrated config to $new; a symlink covers the old path)"
+      printf '%s\n' "(migrated config to $new; a symlink covers the old path)" >&2
       return 0
     fi
     if [ -e "$new" ] && [ -d "$old" ] && [ ! -L "$old" ]; then
@@ -469,17 +589,42 @@ setting() {
 }
 
 # ---------- install-kind classification (D4) ----------
-# install_kind CMD — print npm | pipx | uv | brew | standalone | none.
-# The node_modules test must precede the brew-prefix test: npm globals on a
-# brew-managed node live under the brew prefix but inside node_modules/.
-install_kind() {
+# cmm__version_manager PATH — print the version manager (mise, asdf, volta,
+# nodenv, rbenv, pyenv) whose shims or installs PATH lives in.
+cmm__version_manager() {
+  case "$1" in
+    */mise/shims/* | */mise/installs/*) printf 'mise\n' ;;
+    */.asdf/shims/* | */.asdf/installs/* | */asdf/shims/* | */asdf/installs/*) printf 'asdf\n' ;;
+    */.volta/*) printf 'volta\n' ;;
+    */.nodenv/shims/* | */.nodenv/versions/*) printf 'nodenv\n' ;;
+    */.rbenv/shims/* | */.rbenv/versions/*) printf 'rbenv\n' ;;
+    */.pyenv/shims/* | */.pyenv/versions/*) printf 'pyenv\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# cmm_version_manager CMD — the version manager CMD runs through ('' if none).
+cmm_version_manager() {
   local path
+  path="$(command -v "$1" 2>/dev/null)" || return 0
+  cmm__version_manager "$path" || cmm__version_manager "$(resolve_self "$path")" || true
+}
+
+# install_kind CMD — print npm | pipx | uv | manager | brew | standalone |
+# none. The node_modules test comes first: npm globals on a brew- or
+# mise-managed node live under that prefix but inside node_modules/. A
+# version manager's shim resolves to the manager's own binary, so the PATH
+# entry itself is classified before symlinks are followed. Homebrew owns
+# what resolves into its Cellar, Caskroom or opt/ links — not everything
+# under its prefix (on Intel Macs that is all of /usr/local).
+install_kind() {
+  local path real
   path="$(command -v "$1" 2>/dev/null)" || {
     printf 'none\n'
     return 0
   }
-  path="$(resolve_self "$path")"
-  case "$path" in
+  real="$(resolve_self "$path")"
+  case "$real" in
     */node_modules/*)
       printf 'npm\n'
       return 0
@@ -493,23 +638,27 @@ install_kind() {
       return 0
       ;;
   esac
-  if [ -z "${CMM_BREW_PREFIX+x}" ]; then
-    CMM_BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
+  if cmm__version_manager "$path" >/dev/null || cmm__version_manager "$real" >/dev/null; then
+    printf 'manager\n'
+    return 0
   fi
-  if [ -n "$CMM_BREW_PREFIX" ]; then
-    case "$path" in
-      "$CMM_BREW_PREFIX"/*)
-        printf 'brew\n'
-        return 0
-        ;;
-    esac
-  fi
-  case "$path" in
+  case "$real" in
     */Cellar/* | */Caskroom/*)
       printf 'brew\n'
       return 0
       ;;
   esac
+  if [ -z "${CMM_BREW_PREFIX+x}" ]; then
+    CMM_BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
+  fi
+  if [ -n "$CMM_BREW_PREFIX" ]; then
+    case "$real" in
+      "$CMM_BREW_PREFIX"/opt/*)
+        printf 'brew\n'
+        return 0
+        ;;
+    esac
+  fi
   printf 'standalone\n'
 }
 
@@ -525,6 +674,7 @@ ai_self_update() {
     pipx) note "- $tool is pipx-managed; the python cleaner keeps it updated" ;;
     uv) note "- $tool is a uv tool; the python cleaner keeps it updated" ;;
     brew) note "- $tool is Homebrew-managed; the homebrew cleaner keeps it updated" ;;
+    manager) note "- $tool runs through $(cmm_version_manager "$tool"); update it with that tool (not self-updated)" ;;
     none) note "- $tool not found" ;;
     *)
       if [ "$#" -gt 0 ]; then

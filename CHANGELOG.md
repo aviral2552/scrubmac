@@ -12,6 +12,12 @@ enforced, ten new cleaners, and a pile of correctness fixes — each with a
 regression test, and every external command checked against its tool's
 official documentation.
 
+**Upgrading from 3.0:** 3.0's installer wrote `COOLDOWN_DAYS=0` into your
+config file, so the new 7-day default does not apply to you until you change
+it — `scrubmac config set COOLDOWN_DAYS 7`, or `scrubmac configure`. Options
+that a command would ignore are now errors (for example `scrubmac -n update`
+— use `scrubmac update --check`); check scripts that pass extra flags.
+
 ### Fixed
 
 - A cleaner that read stdin silently consumed the rest of the run: the run
@@ -28,7 +34,16 @@ official documentation.
 - Cron and terminal runs did not exclude each other: the lock lived in
   `$TMPDIR`, which cron does not set. The lock now lives in
   `~/.local/state/scrubmac`, is created atomically (a symlink naming the
-  holder), survives pid reuse, and cannot be stolen by a racing run.
+  holder's pid and start time, so pid reuse cannot fake a live holder), and
+  cannot be stolen by a racing run.
+- `uninstall.sh` deleted whatever `CMM_PREFIX`/`CMM_OLD_PREFIX` named — even
+  `$HOME`. It now removes only directories that hold a scrubmac install
+  (compared as canonical paths, never `/`, your home or a parent of it), a
+  compat symlink only when it points at the install, and with `--purge`
+  only config/state dirs named `scrubmac`/`cleanmymac`; a refusal exits 1.
+- A Homebrew upgrade of scrubmac itself during a run (by the homebrew
+  cleaner) deleted the files later cleaners were about to run. Built-in
+  cleaners now run from a private copy made at the start of the run.
 - The documented crontab line skipped nearly every cleaner (cron's PATH is
   `/usr/bin:/bin`) and still reported success. scrubmac now warns when every
   cleaner skipped, `doctor` flags a crontab without `PATH`, and
@@ -41,16 +56,32 @@ official documentation.
 - The xcode cleaner judged DerivedData age by the folder's own mtime, which
   does not change during builds, so it could delete caches of projects in
   active use. It now reads Xcode's own `LastAccessedDate` (and purges folders
-  whose project is gone), and leaves everything alone while Xcode runs.
+  whose project is gone — but never treats a project it merely cannot see,
+  in a privacy-protected folder or on an unmounted volume, as gone), and
+  leaves everything alone while Xcode runs.
 - On a Mac without the Command Line Tools, probing `/usr/bin/python3` (or
   git, swift, …) popped the "install developer tools" dialog — even from a
   scheduled run. Apple's inert developer-tool shims now count as absent, and
   `xcodebuild` requires a full Xcode.
 - `install.sh` could overwrite a Homebrew-installed `scrubmac` link, and its
   `rsync --delete` would mirror into any `CMM_PREFIX` (even `$HOME`). It now
-  mirrors only into an empty directory or an existing scrubmac install,
-  refuses `$HOME`, `/`, and source/destination nesting, and replaces only
-  links that are its own.
+  mirrors only into an empty directory or an existing scrubmac install (real
+  files, not just a launcher link — so not `~/.local`), compares canonical
+  paths (`$HOME/.` and symlinked parents cannot slip past), refuses `$HOME`,
+  `/`, a parent of your home, and source/destination nesting, replaces only
+  links that are its own, and says when two installs now exist.
+- Self-updaters ran on copies a version manager owns: tools reached through
+  mise/asdf/volta/nodenv/rbenv/pyenv shims were "standalone", so `deno
+  upgrade`/`bun upgrade` overwrote the manager's copy and `uv self update`
+  failed every run; on Intel Macs any standalone binary in `/usr/local` was
+  taken for Homebrew's. Version-manager copies are now left to their
+  manager, and only Homebrew's own Cellar/Caskroom/opt links count as
+  Homebrew-managed.
+- `uv self update` failed every run for a uv not installed by uv's own
+  installer (pip, cargo, conda…); it now runs only for that installer's copy.
+- The `cleanmymac` compat shim told every user to re-run install.sh, even on
+  an already-migrated install; it now says which install.sh to run only when
+  migration is unfinished, and otherwise just to call `scrubmac`.
 - `uv cache prune` could still wait up to uv's 5-minute lock timeout on a
   cache held by uvx-served tools; it now gives up after 15 s and says so.
 - `conda update --all -y` churned every package in the base environment; the
@@ -60,10 +91,13 @@ official documentation.
 ### Added
 
 - **Timeouts:** every cleaner runs under a watchdog (`TIMEOUT`, default 3600 s)
-  that stops it and its child processes; the summary says `TIMEOUT`.
-- **`scrubmac schedule daily|weekly [DAY] [HH:MM] | status | off`** — a
-  per-user launchd agent (runs missed schedules after sleep), with
-  `--scheduled` guards: `ON_BATTERY`, `MIN_HOURS_BETWEEN_RUNS`.
+  that stops it and every process it started (`TERM`, then `KILL`; in runs
+  without a terminal, via the cleaner's own process group, which also
+  reaches orphaned descendants); the summary says `TIMEOUT`.
+- **`scrubmac schedule daily [HH:MM] | weekly [DAY] [HH:MM] | status | off`**
+  — a per-user launchd agent (runs missed schedules after sleep), with
+  `--scheduled` guards: `ON_BATTERY`, `MIN_HOURS_BETWEEN_RUNS`. Status and
+  `doctor` print the exact command that recreates a broken schedule.
 - **Run logs** (`~/.local/state/scrubmac/logs`, rotated to `LOG_KEEP`),
   **`scrubmac last [--json]`**, a `last-run.json` record, and **`--json`**
   output for monitoring.
@@ -73,19 +107,27 @@ official documentation.
   **`--measure`** (space freed per cleaner).
 - **Offline detection** from the routing table: updates are skipped, cleanup
   still runs.
-- **`scrubmac config [get|set|unset|path]`**, did-you-mean suggestions for
-  mistyped cleaners and commands, total run time and per-cleaner notes in the
-  summary, and a much richer `doctor` (settings, install kinds, schedule,
-  crontab, last run, network and power).
+- **`scrubmac config [get|set|unset|path]`** (a near-miss of a built-in key
+  is refused as a typo), did-you-mean suggestions for mistyped cleaners and
+  commands, total run time and per-cleaner notes in the summary (a failing
+  step names its command), warnings for config lines the parser ignores and
+  for a Homebrew that is installed but not on the run's PATH, and a much
+  richer `doctor` (settings, install kinds, schedule, crontab PATH and
+  double scheduling, refusal reasons, unwritable dirs, last run, network and
+  power, dangling launcher links).
 - **`scrubmac update --check`**; git installs follow **release tags** by
-  default (`UPDATE_CHANNEL=release|branch`), and verify **SSH tag
-  signatures** against keys pinned in the installed copy once releases ship
-  `share/allowed_signers`.
+  default (`UPDATE_CHANNEL=release|branch`) — the newest `vX.Y.Z` that is a
+  fast-forward — and verify **SSH tag signatures** against keys pinned in
+  the installed copy once releases ship `share/allowed_signers`, skipping a
+  newer release that fails either check.
 - **New cleaners:** deno, poetry, copilot (the new standalone GitHub Copilot
   CLI), cargo (cargo-update), krew, vscode (extensions), pre-commit,
   cocoapods, swiftpm, micromamba (in the conda cleaner), and opt-in rubygems.
 - **Shell completions** for bash, zsh, and fish (installed by the formula and
-  linked by `install.sh` into a writable Homebrew prefix).
+  linked by `install.sh` into a writable Homebrew prefix): days only after
+  `schedule weekly`, setting keys only after `config get|set|unset`.
+- **`scrubmac run [cleaner …]`** as an explicit spelling of the default
+  command; `--skip` and `enable`/`disable` take comma-separated lists.
 - Cleaner **metadata headers** (`# group:`, `# default:`, `# summary:`) drive
   `list`, the wizard's screens, and defaults; cleaners report notes, cache
   sizes, and freed space back to the dispatcher.
@@ -96,10 +138,13 @@ official documentation.
 ### Changed
 
 - **The supply-chain cooldown is on by default (7 days)** and enforced for
-  npm (a resolver that installs the newest release old enough, never
-  downgrading), uv (a relative `--exclude-newer` span), pipx (`--cooldown`),
-  pnpm (`minimumReleaseAge`), and Bun (`--minimum-release-age`); Yarn classic
-  global upgrades are held. `COOLDOWN_DAYS=0` opts out.
+  npm, pnpm and Bun (a shared resolver that installs the newest release old
+  enough — within the saved range for pnpm and Bun — never downgrading, and
+  stepping over deprecated releases and ones that need a newer Node; `bun
+  upgrade` itself is held, since it cannot be pinned), uv (a relative
+  `--exclude-newer` span) and pipx (`--cooldown`); Yarn classic global
+  upgrades are held. `COOLDOWN_DAYS=0` opts out — and also clears the
+  cutoffs earlier runs left in uv receipts and pipx metadata.
 - **Homebrew casks are upgraded only when a person is watching**
   (`APP_UPDATES=interactive`; Homebrew 6 quits running apps and pkg casks ask
   for a password). `brew upgrade` is split into `--formula` and `--cask`, a
@@ -109,15 +154,25 @@ official documentation.
   sudo, which scrubmac never triggers.
 - **The go cleaner is opt-in** (Go already trims its build cache); existing
   installs keep it enabled. New cleaner state model: `enabled` + `disabled`
-  lists of explicit choices, header defaults otherwise — converted once from
-  the ≤ 3.0 format.
+  lists of explicit choices (with a header line; comments allowed), header
+  defaults otherwise — converted once from the ≤ 3.0 format.
+- **The npm cleaner leaves the npm (and corepack) bundled with Node alone**
+  — they update with your Node install (Homebrew re-pins npm on every node
+  upgrade, and a newer npm major can refuse an older Node) — and never
+  replaces a global you installed with `npm link` or from a local path.
+- `--quiet` prints one line per cleaner instead of a banner over hidden
+  output; `status` always shows output; the wizard's summary screen takes
+  Enter as yes and asks again on anything it does not understand.
+- Cleaners start in your home directory, whatever directory scrubmac was
+  started from (launchd starts its jobs in `/`).
 - AI CLIs: `codex update` runs only when the installed Codex has it (older
   releases would take "update" as a prompt); binary-only casks (Claude Code,
   Codex, Copilot, Cursor) are upgraded by name, so they update in scheduled
   runs too; `gemini` is never invoked (it has no updater).
 - docker prunes build cache older than `DOCKER_KEEP_HOURS` (default a week)
   instead of all of it; `gh extension upgrade --all` failures now fail the
-  cleaner (it exits 0 when there is nothing to do); `mise prune` is
+  cleaner (it exits 0 when there is nothing to do), and a gh that is not
+  logged in, or has no extensions, is skipped; `mise prune` is
   available behind `MISE_PRUNE=1`; xcode also prunes old device-support
   symbols (`DEVICESUPPORT_AGE_DAYS`, newest kept).
 - `install.sh` no longer seeds a `disabled` file and no longer suggests a
@@ -126,9 +181,11 @@ official documentation.
 
 ### Security
 
-- Release workflow: build-provenance attestations for the tarball; CI
-  actions pinned to commit SHAs (Dependabot keeps them current), read-only
-  tokens by default, checksum-verified linters, OpenSSF Scorecard.
+- Release workflow: build-provenance attestations for the tarball, and the
+  same gates as CI — pinned, checksum-verified linters and the full test
+  suite on macOS and Linux — before anything is published; CI actions
+  pinned to commit SHAs (Dependabot keeps them current), read-only tokens by
+  default, OpenSSF Scorecard.
 - Notifications pass text to `osascript` as arguments; cleaner names are
   restricted to a safe character set; the launchd agent's PATH drops `.`
   and relative entries.

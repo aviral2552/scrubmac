@@ -19,5 +19,16 @@ while [ -L "$SELF" ]; do
   esac
 done
 
-printf 'cleanmymac is now scrubmac; this alias will be removed in v4 — re-run install.sh to finish migrating\n' >&2
-exec "$(cd "$(dirname "$SELF")" && pwd)/scrubmac" "$@"
+# Physical path: the compat link ~/.cleanmymac -> ~/.scrubmac resolves to
+# the migrated install; a real ~/.cleanmymac dir has not been migrated yet.
+ROOT="$(cd -P "$(dirname "$SELF")/.." && pwd -P)"
+case "$ROOT" in
+  */.cleanmymac | */cleanmymac)
+    hint="finish migrating: run $ROOT/install.sh"
+    ;;
+  *)
+    hint="call 'scrubmac' instead (update crontabs, aliases and scripts)"
+    ;;
+esac
+printf 'cleanmymac is now scrubmac; this alias will be removed in v4 — %s\n' "$hint" >&2
+exec "$ROOT/bin/scrubmac" "$@"

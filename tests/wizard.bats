@@ -31,33 +31,35 @@ KEEP_ALL=$'\n\n\n\n\n\n\n\ny\n'
   grep -Fxq 'APP_UPDATES=interactive' "$CFG"
   grep -Fxq 'QUIET=0' "$CFG"
   grep -Fxq 'COLOR=auto' "$CFG"
-  [ -f "$EN" ] && [ ! -s "$EN" ] # nothing differs from the defaults
-  [ -f "$DIS" ] && [ ! -s "$DIS" ]
+  [ -f "$EN" ] # nothing differs from the defaults
+  [ -z "$(state_names "$EN")" ]
+  [ -f "$DIS" ]
+  [ -z "$(state_names "$DIS")" ]
   run "$CMM"
-  [[ "$output" == *ALPHA-RAN* ]] && [[ "$output" != *HEAVY-RAN* ]]
+  [[ "$output" == *ALPHA-RAN* ]] && [[ "$output" != *HEAVY-RAN* ]] || false
 }
 
 @test "configure: screens come from metadata, with summaries, tool marks and opt-in flags" {
   run "$CMM" configure <<<"$KEEP_ALL"
-  [[ "$output" == *"Package managers"* ]]
-  [[ "$output" == *"JavaScript"* ]]
-  [[ "$output" == *"Developer tools"* ]]
-  [[ "$output" == *"alpha does package things"* ]]
-  [[ "$output" == *"alpha        (found)"* ]]
-  [[ "$output" == *"beta         (not found (auto-skips))"* ]]
-  [[ "$output" == *"[ ] heavy"*"opt-in"* ]]
-  [[ "$output" == *"security PATCHES are also"* ]]
-  [[ "$output" == *"quit it while it is open"* ]]
+  [[ "$output" == *"Package managers"* ]] || false
+  [[ "$output" == *"JavaScript"* ]] || false
+  [[ "$output" == *"Developer tools"* ]] || false
+  [[ "$output" == *"alpha does package things"* ]] || false
+  [[ "$output" == *"alpha        (found)"* ]] || false
+  [[ "$output" == *"beta         (not found — auto-skips)"* ]] || false
+  [[ "$output" == *"[ ] heavy"*"opt-in"* ]] || false
+  [[ "$output" == *"security PATCHES are also"* ]] || false
+  [[ "$output" == *"quit it while it is open"* ]] || false
 }
 
 @test "configure: toggles are recorded relative to each cleaner's default" {
   # welcome, alpha screen: toggle 1 (off), beta screen: keep, heavy: toggle 1 (on)
   run "$CMM" configure <<<$'\n1\n\n\n1\n\n\n\n\n\ny\n'
   [ "$status" -eq 0 ]
-  diff "$DIS" - <<<'alpha'
-  diff "$EN" - <<<'heavy'
+  [ "$(state_names "$DIS")" = alpha ]
+  [ "$(state_names "$EN")" = heavy ]
   run "$CMM"
-  [[ "$output" != *ALPHA-RAN* ]] && [[ "$output" == *BETA-RAN* ]] && [[ "$output" == *HEAVY-RAN* ]]
+  [[ "$output" != *ALPHA-RAN* ]] && [[ "$output" == *BETA-RAN* ]] && [[ "$output" == *HEAVY-RAN* ]] || false
 }
 
 @test "configure: answers change cooldown, app updates, output and color" {
@@ -76,7 +78,7 @@ KEEP_ALL=$'\n\n\n\n\n\n\n\ny\n'
   printf 'heavy\n' >"$EN"
   run "$CMM" configure <<<"$KEEP_ALL"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Enter keeps 14 day(s)"* ]]
+  [[ "$output" == *"Enter keeps 14 day(s)"* ]] || false
   grep -Fxq 'COOLDOWN_DAYS=14' "$CFG"
   grep -Fxq 'QUIET=1' "$CFG"
   grep -Fxq 'COLOR=never' "$CFG"
@@ -85,8 +87,8 @@ KEEP_ALL=$'\n\n\n\n\n\n\n\ny\n'
   grep -Fxq 'MY_CUSTOM_KEY=hello' "$CFG"
   grep -Fxq '# hand-written note' "$CFG"
   [ "$(grep -c '^COOLDOWN_DAYS=' "$CFG")" -eq 1 ]
-  diff "$DIS" - <<<'beta'
-  diff "$EN" - <<<'heavy'
+  [ "$(state_names "$DIS")" = beta ]
+  [ "$(state_names "$EN")" = heavy ]
 }
 
 @test "configure: state for cleaners that are not installed right now is kept" {
@@ -102,8 +104,8 @@ KEEP_ALL=$'\n\n\n\n\n\n\n\ny\n'
 @test "configure: quitting mid-way writes nothing" {
   run "$CMM" configure <<<$'\n\n\nq\n'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"nothing was written"* ]]
-  [ ! -f "$CFG" ] && [ ! -f "$DIS" ] && [ ! -f "$EN" ]
+  [[ "$output" == *"nothing was written"* ]] || false
+  [ ! -f "$CFG" ] && [ ! -f "$DIS" ] && [ ! -f "$EN" ] || false
 }
 
 @test "configure: running out of input aborts without writing (EOF = quit)" {
@@ -116,29 +118,38 @@ KEEP_ALL=$'\n\n\n\n\n\n\n\ny\n'
   # toggle heavy on, restart at the cooldown screen, then keep everything
   run "$CMM" configure <<<$'\n\n\n1\n\nr\n'"$KEEP_ALL"
   [ "$status" -eq 0 ]
-  [ ! -s "$EN" ] # the toggle did not survive the restart
+  [ -z "$(state_names "$EN")" ] # the toggle did not survive the restart
   grep -Fxq 'COOLDOWN_DAYS=7' "$CFG"
 }
 
-@test "configure: answering anything but y at the summary aborts without writing" {
-  run "$CMM" configure <<<$'\n\n\n\n\n\n\n\nx\n'
+@test "configure: an unknown answer at the summary asks again; q aborts without writing" {
+  run "$CMM" configure <<<$'\n\n\n\n\n\n\n\nx\nq'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"nothing was written"* ]]
+  [[ "$output" == *"(enter y, r, or q)"* ]] || false
+  [[ "$output" == *"nothing was written"* ]] || false
   [ ! -f "$CFG" ]
+}
+
+@test "configure: Enter at the summary writes (the prompt's default is yes)" {
+  run "$CMM" configure <<<$'\n\n\n\n\n\n\n\n'
+  [ "$status" -eq 0 ]
+  [ -f "$CFG" ]
+  head -n 1 "$EN" | grep -q '^# scrubmac:'
+  head -n 1 "$DIS" | grep -q '^# scrubmac:'
 }
 
 @test "configure: refuses without a TTY" {
   unset CMM_WIZARD_ASSUME_TTY
   run "$CMM" configure </dev/null
   [ "$status" -eq 2 ]
-  [[ "$output" == *"interactive terminal"* ]]
+  [[ "$output" == *"interactive terminal"* ]] || false
 }
 
 @test "configure: cleaners without a group get their own 'Other' screen, last" {
   make_cleaner 90-mine.sh 'echo MINE'
   run "$CMM" configure <<<$'\n\n\n\n\n\n\n\n\ny\n'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Other (your cleaners)"* ]]
+  [[ "$output" == *"Other (your cleaners)"* ]] || false
 }
 
 @test "configure with the real cleaners: one screen per group, then the policy screens" {
@@ -150,17 +161,18 @@ KEEP_ALL=$'\n\n\n\n\n\n\n\ny\n'
   input="$input"$'\n\n\n\ny\n'
   run "$CMM" configure <<<"$input"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"All set."* ]]
+  [[ "$output" == *"All set."* ]] || false
   grep -Fxq 'COOLDOWN_DAYS=7' "$CFG"
-  [ ! -s "$EN" ] && [ ! -s "$DIS" ]
+  [ -z "$(state_names "$EN")" ]
+  [ -z "$(state_names "$DIS")" ]
 }
 
 @test "first run: accepting the offer runs the wizard, then the run continues with the new config" {
   run "$CMM" <<<$'y\n'"$KEEP_ALL"
   [ "$status" -eq 0 ]
   [ -f "$CFG" ]
-  [[ "$output" == *"continuing with this run"* ]]
-  [[ "$output" == *ALPHA-RAN* ]]
+  [[ "$output" == *"continuing with this run"* ]] || false
+  [[ "$output" == *ALPHA-RAN* ]] || false
 }
 
 @test "first run: declining the offer writes defaults (7-day cooldown) and continues" {
@@ -168,12 +180,12 @@ KEEP_ALL=$'\n\n\n\n\n\n\n\ny\n'
   [ "$status" -eq 0 ]
   [ -f "$CFG" ]
   grep -Fxq 'COOLDOWN_DAYS=7' "$CFG"
-  [[ "$output" == *ALPHA-RAN* ]]
+  [[ "$output" == *ALPHA-RAN* ]] || false
 }
 
 @test "wizard-written settings reach the cleaners on the continued run" {
   make_cleaner 30-env.sh '# group: JavaScript' 'echo "COOL=${CMM_COOLDOWN_DAYS:-unset} APPS=${CMM_APP_UPDATES:-unset}"'
   run "$CMM" <<<$'y\n\n\n\n\n2\n2\n\n\ny\n'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"COOL=3 APPS=always"* ]]
+  [[ "$output" == *"COOL=3 APPS=always"* ]] || false
 }

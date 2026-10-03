@@ -16,14 +16,14 @@ lib() { bash -c ". '$CMM_LIB_PATH'; $1"; }
   run lib "run touch '$SANDBOX/made'"
   [ "$status" -eq 0 ]
   [ -e "$SANDBOX/made" ]
-  [[ "$output" == *"+ touch"* ]]
+  [[ "$output" == *"+ touch"* ]] || false
 }
 
 @test "run does not execute under CMM_DRY_RUN=1" {
   run lib "CMM_DRY_RUN=1 run touch '$SANDBOX/made'"
   [ "$status" -eq 0 ]
   [ ! -e "$SANDBOX/made" ]
-  [[ "$output" == *"+ touch"* ]]
+  [[ "$output" == *"+ touch"* ]] || false
 }
 
 @test "run propagates failure; try tolerates it" {
@@ -31,17 +31,17 @@ lib() { bash -c ". '$CMM_LIB_PATH'; $1"; }
   [ "$status" -ne 0 ]
   run lib "try false && echo SURVIVED"
   [ "$status" -eq 0 ]
-  [[ "$output" == *SURVIVED* ]]
-  [[ "$output" == *"exited 1"* ]]
+  [[ "$output" == *SURVIVED* ]] || false
+  [[ "$output" == *"exited 1"* ]] || false
 }
 
 @test "skip_unless exits 75 for a missing tool and 0-continues for a present one" {
   run lib "skip_unless definitely_not_a_real_tool_xyz"
   [ "$status" -eq 75 ]
-  [[ "$output" == *"not found"* ]]
+  [[ "$output" == *"not found"* ]] || false
   run lib "skip_unless sh; echo CONTINUED"
   [ "$status" -eq 0 ]
-  [[ "$output" == *CONTINUED* ]]
+  [[ "$output" == *CONTINUED* ]] || false
 }
 
 @test "config_get returns value, default, and last occurrence" {
@@ -71,7 +71,7 @@ EOF
 @test "date_days_ago emits RFC 3339 UTC on both BSD and GNU date" {
   local out
   out="$(lib 'date_days_ago 7')"
-  [[ "$out" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+  [[ "$out" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || false
 }
 
 @test "install_kind: node_modules wins over brew prefix (D4 ordering)" {
@@ -84,13 +84,59 @@ EOF
   [ "$(lib 'install_kind claude')" = "npm" ]
 }
 
-@test "install_kind: plain binary under brew prefix is brew" {
+@test "install_kind: a link into the Cellar, Caskroom or opt/ is brew" {
   local pfx="$SANDBOX/brewpfx"
+  mkdir -p "$pfx/bin" "$pfx/Cellar/codex/1.0/bin" "$pfx/Caskroom/claude-code/2.0" "$pfx/opt/gh/bin"
+  printf '#!/bin/sh\n' >"$pfx/Cellar/codex/1.0/bin/codex"
+  printf '#!/bin/sh\n' >"$pfx/Caskroom/claude-code/2.0/claude"
+  printf '#!/bin/sh\n' >"$pfx/opt/gh/bin/gh"
+  chmod 755 "$pfx/Cellar/codex/1.0/bin/codex" "$pfx/Caskroom/claude-code/2.0/claude" "$pfx/opt/gh/bin/gh"
+  ln -s ../Cellar/codex/1.0/bin/codex "$pfx/bin/codex"
+  ln -s ../Caskroom/claude-code/2.0/claude "$pfx/bin/claude"
+  export PATH="$pfx/bin:$pfx/opt/gh/bin:$PATH" CMM_BREW_PREFIX="$pfx"
+  [ "$(lib 'install_kind codex')" = "brew" ]
+  [ "$(lib 'install_kind claude')" = "brew" ]
+  [ "$(lib 'install_kind gh')" = "brew" ]
+}
+
+@test "install_kind: a plain binary under the brew prefix is not brew's (Intel /usr/local)" {
+  local pfx="$SANDBOX/usrlocal"
   mkdir -p "$pfx/bin"
   printf '#!/bin/sh\n' >"$pfx/bin/codex"
   chmod 755 "$pfx/bin/codex"
   export PATH="$pfx/bin:$PATH" CMM_BREW_PREFIX="$pfx"
-  [ "$(lib 'install_kind codex')" = "brew" ]
+  [ "$(lib 'install_kind codex')" = "standalone" ]
+}
+
+@test "install_kind: version-manager shims and installs are 'manager', never self-updated" {
+  local mise="$HOME/.local/share/mise" asdf="$HOME/.asdf" volta="$HOME/.volta"
+  mkdir -p "$HOME/.local/bin" "$mise/shims" "$mise/installs/deno/2.5/bin" "$asdf/shims" "$volta/bin"
+  printf '#!/bin/sh\n' >"$HOME/.local/bin/mise"
+  printf '#!/bin/sh\n' >"$mise/installs/deno/2.5/bin/deno"
+  printf '#!/bin/sh\n' >"$asdf/shims/uv"
+  printf '#!/bin/sh\n' >"$volta/bin/claude"
+  chmod 755 "$HOME/.local/bin/mise" "$mise/installs/deno/2.5/bin/deno" "$asdf/shims/uv" "$volta/bin/claude"
+  ln -s "$HOME/.local/bin/mise" "$mise/shims/bun" # mise shims are links to mise itself
+  export PATH="$mise/shims:$mise/installs/deno/2.5/bin:$asdf/shims:$volta/bin:$PATH"
+  [ "$(lib 'install_kind bun')" = "manager" ]
+  [ "$(lib 'install_kind deno')" = "manager" ]
+  [ "$(lib 'install_kind uv')" = "manager" ]
+  [ "$(lib 'install_kind claude')" = "manager" ]
+  make_stub bun-updater
+  run lib "ai_self_update bun bun-updater upgrade"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"bun runs through mise"* ]] || false
+  refute grep -q bun-updater "$CALL_LOG"
+}
+
+@test "install_kind: an npm global inside a mise-managed node is npm's" {
+  local inst="$HOME/.local/share/mise/installs/node/22/bin"
+  mkdir -p "$inst" "$inst/../lib/node_modules/@anthropic-ai/claude-code"
+  printf '#!/bin/sh\n' >"$inst/../lib/node_modules/@anthropic-ai/claude-code/cli.js"
+  chmod 755 "$inst/../lib/node_modules/@anthropic-ai/claude-code/cli.js"
+  ln -s ../lib/node_modules/@anthropic-ai/claude-code/cli.js "$inst/claude"
+  export PATH="$inst:$PATH"
+  [ "$(lib 'install_kind claude')" = "npm" ]
 }
 
 @test "install_kind: standalone and none" {
@@ -107,14 +153,44 @@ EOF
   grep -q '^sometool-updater update$' "$CALL_LOG"
   : >"$CALL_LOG"
   local pfx="$SANDBOX/brewpfx"
-  mkdir -p "$pfx/bin"
-  printf '#!/bin/sh\n' >"$pfx/bin/brewtool"
-  chmod 755 "$pfx/bin/brewtool"
+  mkdir -p "$pfx/bin" "$pfx/Cellar/brewtool/1.0/bin"
+  printf '#!/bin/sh\n' >"$pfx/Cellar/brewtool/1.0/bin/brewtool"
+  chmod 755 "$pfx/Cellar/brewtool/1.0/bin/brewtool"
+  ln -s ../Cellar/brewtool/1.0/bin/brewtool "$pfx/bin/brewtool"
   export PATH="$pfx/bin:$PATH" CMM_BREW_PREFIX="$pfx"
   run lib "ai_self_update brewtool sometool-updater update"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Homebrew-managed"* ]]
+  [[ "$output" == *"Homebrew-managed"* ]] || false
   refute grep -q sometool-updater "$CALL_LOG"
+}
+
+@test "cmm_scratch_dir: the dispatcher's per-cleaner dir, or a fresh one when standalone" {
+  mkdir -p "$SANDBOX/given"
+  run lib "CMM_SCRATCH_DIR='$SANDBOX/given' cmm_scratch_dir"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$SANDBOX/given" ]
+  run lib "unset CMM_SCRATCH_DIR; cmm_scratch_dir"
+  [ "$status" -eq 0 ]
+  [ -d "$output" ]
+  [[ "$output" == "$TMPDIR"/scrubmac-* ]] || false
+}
+
+@test "S2: a cleaner owned by another user is refused" {
+  local f="$SANDBOX/cleaner.sh"
+  printf '#!/bin/sh\n' >"$f"
+  chmod 755 "$f"
+  # stat reports the file as someone else's, in both the GNU and BSD forms
+  make_stub_script stat <<'EOF'
+case "$*" in
+  *"%a %u"* | *"%Lp %u"*) echo "755 99999" ;;
+  *) exec /usr/bin/stat "$@" ;;
+esac
+EOF
+  run lib "cmm_path_is_safe '$f'"
+  [ "$status" -ne 0 ]
+  run lib "assert_safe_to_execute '$f'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be owned by you"* ]] || false
 }
 
 @test "cmm_path_is_safe rejects group/world-writable and foreign-owned paths" {
@@ -138,18 +214,18 @@ EOF
   ln -s "$d/real.sh" "$d/link.sh"
   run lib "assert_safe_to_execute '$d/link.sh'"
   [ "$status" -ne 0 ]
-  [[ "$output" == *symlink* ]]
+  [[ "$output" == *symlink* ]] || false
   chmod 775 "$d"
   run lib "assert_safe_to_execute '$d/real.sh'"
   [ "$status" -ne 0 ]
-  [[ "$output" == *directory* ]]
+  [[ "$output" == *directory* ]] || false
 }
 
 @test "colors: CMM_COLOR=always emits escapes, never does not" {
   run bash -c "CMM_COLOR=always . '$CMM_LIB_PATH'; banner hello"
-  [[ "$output" == *$'\033['* ]]
+  [[ "$output" == *$'\033['* ]] || false
   run bash -c "CMM_COLOR=never . '$CMM_LIB_PATH'; banner hello"
-  [[ "$output" != *$'\033['* ]]
+  [[ "$output" != *$'\033['* ]] || false
 }
 
 @test "resolve_self follows relative symlink chains" {
@@ -165,9 +241,9 @@ EOF
 @test "step records a failure, keeps going, and the cleaner exits 1 at the end" {
   run lib "step false; step echo SECOND; echo END"
   [ "$status" -eq 1 ]
-  [[ "$output" == *SECOND* ]]
-  [[ "$output" == *END* ]]
-  [[ "$output" == *"continuing with the remaining steps"* ]]
+  [[ "$output" == *SECOND* ]] || false
+  [[ "$output" == *END* ]] || false
+  [[ "$output" == *"continuing with the remaining steps"* ]] || false
 }
 
 @test "a failed step also overrides a later skip (exit 75 becomes 1)" {
@@ -186,21 +262,21 @@ EOF
 @test "status mode: run/try/step are silent no-ops; report runs" {
   run lib "export CMM_MODE=status; run touch '$SANDBOX/a'; try touch '$SANDBOX/b'; step touch '$SANDBOX/c'; report echo REPORTED"
   [ "$status" -eq 0 ]
-  [ ! -e "$SANDBOX/a" ] && [ ! -e "$SANDBOX/b" ] && [ ! -e "$SANDBOX/c" ]
-  [[ "$output" == *REPORTED* ]]
-  [[ "$output" != *"+ touch"* ]]
+  [ ! -e "$SANDBOX/a" ] && [ ! -e "$SANDBOX/b" ] && [ ! -e "$SANDBOX/c" ] || false
+  [[ "$output" == *REPORTED* ]] || false
+  [[ "$output" != *"+ touch"* ]] || false
 }
 
 @test "preview runs only under dry-run; report runs only in status mode" {
   run lib "preview echo PREVIEW-RAN; report echo REPORT-RAN"
-  [[ "$output" != *PREVIEW-RAN* ]] && [[ "$output" != *REPORT-RAN* ]]
+  [[ "$output" != *PREVIEW-RAN* ]] && [[ "$output" != *REPORT-RAN* ]] || false
   run lib "export CMM_DRY_RUN=1; preview echo PREVIEW-RAN; report echo REPORT-RAN"
-  [[ "$output" == *PREVIEW-RAN* ]] && [[ "$output" != *REPORT-RAN* ]]
+  [[ "$output" == *PREVIEW-RAN* ]] && [[ "$output" != *REPORT-RAN* ]] || false
   run lib "export CMM_MODE=status; preview echo PREVIEW-RAN; report echo REPORT-RAN"
-  [[ "$output" != *PREVIEW-RAN* ]] && [[ "$output" == *REPORT-RAN* ]]
+  [[ "$output" != *PREVIEW-RAN* ]] && [[ "$output" == *REPORT-RAN* ]] || false
   run lib "export CMM_DRY_RUN=1; preview false; echo SURVIVED"
   [ "$status" -eq 0 ]
-  [[ "$output" == *SURVIVED* ]]
+  [[ "$output" == *SURVIVED* ]] || false
 }
 
 @test "updating/cleaning follow CMM_MODE; offline explains itself once" {
@@ -210,7 +286,7 @@ EOF
   [ "$(lib 'export CMM_MODE=status; updating && echo U; cleaning && echo C; echo .' | tr '\n' ' ')" = ". " ]
   run lib "export CMM_OFFLINE=1; updating || true; updating || echo NOT-UPDATING"
   [ "$(printf '%s\n' "$output" | grep -c 'offline')" -eq 1 ]
-  [[ "$output" == *NOT-UPDATING* ]]
+  [[ "$output" == *NOT-UPDATING* ]] || false
 }
 
 @test "skip_unless_updating / skip_unless_cleaning exit 75 in the other modes" {
@@ -263,7 +339,7 @@ EOF
   [ ! -s "$CALL_LOG" ]
   run lib "export CMM_MODE=status; cache_dir_cmd cachetool dir"
   grep -q '^cachetool dir$' "$CALL_LOG"
-  [[ "$output" == *"cache $SANDBOX:"* ]]
+  [[ "$output" == *"cache $SANDBOX:"* ]] || false
 }
 
 # ---------- detection ----------
@@ -276,12 +352,12 @@ EOF
   printf '#!/bin/sh\necho "xcode-select: error: Unable to get active developer directory" >&2\nexit 2\n' >"$STUB_BIN/xcode-select"
   chmod 755 "$STUB_BIN/xcode-select"
   run lib "have python3 && echo PRESENT || echo ABSENT"
-  [[ "$output" == *ABSENT* ]]
-  [[ "$output" != *SHIM-RAN* ]] # never executed while probing
+  [[ "$output" == *ABSENT* ]] || false
+  [[ "$output" != *SHIM-RAN* ]] || false # never executed while probing
   mkdir -p "$SANDBOX/CLT"
   make_stub xcode-select 0 "$SANDBOX/CLT"
   run lib "have python3 && echo PRESENT || echo ABSENT"
-  [[ "$output" == *PRESENT* ]]
+  [[ "$output" == *PRESENT* ]] || false
 }
 
 @test "have: a bogus developer dir (xcode-select -p echoes DEVELOPER_DIR unchecked) counts as none" {
@@ -291,7 +367,7 @@ EOF
   export PATH="$CMM_APPLE_STUB_DIR:$PATH"
   make_stub xcode-select 0 "/nonexistent/Developer"
   run lib "have git && echo PRESENT || echo ABSENT"
-  [[ "$output" == *ABSENT* ]]
+  [[ "$output" == *ABSENT* ]] || false
 }
 
 @test "have xcodebuild needs a full Xcode, not just the Command Line Tools" {
@@ -301,16 +377,16 @@ EOF
   export PATH="$CMM_APPLE_STUB_DIR:$PATH"
   make_stub xcode-select 0 "$SANDBOX/CommandLineTools"
   run lib "have xcodebuild && echo PRESENT || echo ABSENT"
-  [[ "$output" == *ABSENT* ]]
+  [[ "$output" == *ABSENT* ]] || false
   make_stub xcode-select 0 "$SANDBOX/Xcode.app/Contents/Developer"
   run lib "have xcodebuild && echo PRESENT || echo ABSENT"
-  [[ "$output" == *PRESENT* ]]
+  [[ "$output" == *PRESENT* ]] || false
 }
 
 @test "have: real installs elsewhere on PATH are never second-guessed" {
   make_stub python3
   run lib "have python3 && echo PRESENT"
-  [[ "$output" == *PRESENT* ]]
+  [[ "$output" == *PRESENT* ]] || false
 }
 
 @test "install_kind recognizes pipx and uv tool installs" {
@@ -324,7 +400,7 @@ EOF
   [ "$(lib 'install_kind poetry')" = "pipx" ]
   [ "$(lib 'install_kind ruff')" = "uv" ]
   run lib "ai_self_update poetry poetry self update"
-  [[ "$output" == *pipx-managed* ]]
+  [[ "$output" == *pipx-managed* ]] || false
 }
 
 @test "brew_cask_token finds the cask a CLI came from" {
@@ -343,9 +419,9 @@ EOF
   printf '#!/bin/sh\nprintf "%%s %%s\\n" tool "$*" >>"$CALL_LOG"\n[ "$1" = --help ] && printf "Usage: tool [OPTIONS]\\nCommands:\\n  update    Update the tool\\n  exec      Run\\n"\nexit 0\n' >"$STUB_BIN/tool"
   chmod 755 "$STUB_BIN/tool"
   run lib "has_subcommand tool update && echo YES"
-  [[ "$output" == *YES* ]]
+  [[ "$output" == *YES* ]] || false
   run lib "has_subcommand tool upgrade || echo NO"
-  [[ "$output" == *NO* ]]
+  [[ "$output" == *NO* ]] || false
   refute grep -q '^tool update' "$CALL_LOG"
 }
 
@@ -392,7 +468,7 @@ EOF
   touch -t 202001020304 "$SANDBOX/old"
   local m
   m="$(lib "cmm_mtime '$SANDBOX/old'")"
-  [[ "$m" =~ ^[0-9]+$ ]]
+  [[ "$m" =~ ^[0-9]+$ ]] || false
   [ "$m" -lt 1600000000 ]
   [ "$(lib "cmm_du_kb '$SANDBOX/missing'")" = 0 ]
 }
@@ -439,5 +515,5 @@ dlib() { bash -c ". '$CMM_LIB_PATH'; . '$REPO_ROOT/lib/dispatch.sh'; $1"; }
 @test "every built-in setting has a valid default" {
   run dlib 'for k in $(cmm_setting_keys); do cmm_setting_info "$k"; cmm_setting_valid "$CMM__S_TYPE" "$CMM__S_DEF" || echo "BAD $k"; done'
   [ "$status" -eq 0 ]
-  [[ "$output" != *BAD* ]]
+  [[ "$output" != *BAD* ]] || false
 }

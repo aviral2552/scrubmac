@@ -20,8 +20,12 @@ something new, fix it anyway.
 
 - bash 3.2 compatible (`/bin/bash` on macOS): no associative arrays,
   `mapfile`, `${var,,}`; CI smokes every script under `/bin/bash`
-- `set -euo pipefail`; no `eval`; no `sudo` (all CI tripwires); no
-  `cmd | head` where the exit status matters
+- `set -euo pipefail`; no `eval` and no `sudo` in any command position
+  (CI tripwires catch them at a line start, after `;`/`|`/`&`/`(`/`{`/`!`,
+  in `$( )` or backticks, after `if`/`then`/`do`…, and as the argument of
+  `run`/`step`/`try`/`preview`/`report`/`exec`/`command`/`env`/`xargs`…;
+  mentions in comments and messages are fine); no `cmd | head` where the
+  exit status matters
 - every mutating command goes through `run`/`step`, advisory ones through
   `try`, read-only previews through `preview`/`report`
 - non-interactive always — cleaners get `/dev/null` as stdin; pin `-y`-style
@@ -51,11 +55,21 @@ something new, fix it anyway.
 ## Tests
 
 Hermetic bats — a sandboxed HOME plus a stub PATH factory that records argv;
-no test may reach a real package manager, launchd, the notification center,
-or the network. `tests/helpers/setup.bash` has the factory; any
-`tests/*.bats` file shows the pattern. `tests/e2e.bats` drives whole user
-journeys through the real entry points; `tests/cron.bats` runs under
-cron-like minimal environments.
+PATH is the stub dir plus a curated dir of basic system utilities, so no
+test can reach a real package manager, language runtime, launchd, the
+notification center, or the network. `tests/helpers/setup.bash` has the
+factory; any `tests/*.bats` file shows the pattern. `tests/e2e.bats` drives
+whole user journeys through the real entry points; `tests/cron.bats` runs
+under cron-like minimal environments.
+
+Two bats rules that `make lint` enforces, because breaking them makes an
+assertion silently pass: never `! cmd` (errexit ignores it — use `refute`
+or `refute_sh`), and end a `[[ … ]]` assertion, or an `&&` chain of tests,
+with `|| false` (bash < 4.1, i.e. macOS's bash, ignores a failing `[[ ]]`
+that is not a test's last command; errexit ignores every member of an `&&`
+list but the last). CI also runs the suite under bash 5 on Linux, which
+enforces mid-test `[[ ]]` failures; to do the same locally, put a bash ≥
+4.1 (e.g. Homebrew's `bash`) first on PATH when you run `bats tests`.
 
 The **live E2E** workflow (`.github/workflows/e2e-live.yml`) runs scrubmac
 for real on GitHub's macOS and Ubuntu runners against real tools on every PR

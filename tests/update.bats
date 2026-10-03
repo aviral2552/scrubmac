@@ -72,16 +72,16 @@ require_ssh_signing() {
   commit_version 1.2.0-dev # untagged work past the release is not taken
   run "$INST/bin/scrubmac" update --check
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Update available: v1.0.0 -> v1.1.0"* ]]
+  [[ "$output" == *"Update available: v1.0.0 -> v1.1.0"* ]] || false
   [ "$(cat "$INST/VERSION")" = 1.0.0 ]
   run "$INST/bin/scrubmac" update
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Updated to v1.1.0"* ]]
+  [[ "$output" == *"Updated to v1.1.0"* ]] || false
   [ "$(cat "$INST/VERSION")" = 1.1.0 ]
   [ ! -e "$INST/CHANGE-1.2.0-dev" ]
   run "$INST/bin/scrubmac" update
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Already up to date (latest release: v1.1.0"* ]]
+  [[ "$output" == *"Already up to date (latest release: v1.1.0"* ]] || false
 }
 
 @test "release channel: the highest version wins, not the newest tag" {
@@ -91,7 +91,7 @@ require_ssh_signing() {
   commit_version 1.10.0
   tag v1.10.0
   run "$INST/bin/scrubmac" update --check
-  [[ "$output" == *"-> v1.10.0"* ]]
+  [[ "$output" == *"-> v1.10.0"* ]] || false
 }
 
 @test "release channel refuses a copy that diverged from the release (S3)" {
@@ -105,8 +105,59 @@ require_ssh_signing() {
   tag v1.1.0
   run "$INST/bin/scrubmac" update
   [ "$status" -eq 1 ]
-  [[ "$output" == *"diverged from release v1.1.0"* ]]
+  [[ "$output" == *"skipping release v1.1.0 — this copy has diverged from it"* ]] || false
+  [[ "$output" == *"update refused"* ]] || false
   [ "$(cat "$INST/VERSION")" = 1.0.0 ]
+}
+
+@test "release channel: pre-release and odd tags are never taken" {
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  commit_version 1.1.0
+  tag v1.1.0
+  commit_version 2.0.0-rc1
+  tag v2.0.0-rc1
+  tag v9-evil
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Updated to v1.1.0"* ]] || false
+  [ "$(cat "$INST/VERSION")" = 1.1.0 ]
+}
+
+@test "release channel: a release withdrawn upstream (tag deleted) is pruned, not taken" {
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  commit_version 1.1.0
+  tag v1.1.0
+  run "$INST/bin/scrubmac" update --check
+  [[ "$output" == *"v1.0.0 -> v1.1.0"* || "$output" == *"-> v1.1.0"* ]] || false
+  git -C "$ORIGIN" tag -d v1.1.0 >/dev/null
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Already up to date"* ]] || false
+  [ "$(cat "$INST/VERSION")" = 1.0.0 ]
+  refute git -C "$INST" rev-parse -q --verify refs/tags/v1.1.0
+}
+
+@test "branch channel on a detached HEAD says what to do instead of failing obscurely" {
+  make_origin
+  git clone -q "$ORIGIN" "$INST"
+  git -C "$INST" checkout -q --detach
+  CMM_UPDATE_CHANNEL=branch run "$INST/bin/scrubmac" update
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not on a branch that tracks a remote"* ]] || false
+}
+
+@test "an unreachable remote is reported as a fetch failure" {
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  git -C "$INST" remote set-url origin "$SANDBOX/no-such-remote"
+  run "$INST/bin/scrubmac" update --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"fetch failed"* ]] || false
 }
 
 @test "UPDATE_CHANNEL=branch follows the branch tip even when tags exist" {
@@ -116,7 +167,7 @@ require_ssh_signing() {
   commit_version 1.2.0-dev
   CMM_UPDATE_CHANNEL=branch run "$INST/bin/scrubmac" update
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Changes pulled:"* ]]
+  [[ "$output" == *"Changes pulled:"* ]] || false
   [ "$(cat "$INST/VERSION")" = 1.2.0-dev ]
 }
 
@@ -126,7 +177,7 @@ require_ssh_signing() {
   commit_version 1.0.1
   CMM_UPDATE_CHANNEL=branch run "$INST/bin/scrubmac" update --check
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1 new commit(s) available"* ]]
+  [[ "$output" == *"1 new commit(s) available"* ]] || false
   [ "$(cat "$INST/VERSION")" = 1.0.0 ]
 }
 
@@ -138,7 +189,7 @@ require_ssh_signing() {
   tag v1.1.0
   run "$INST/bin/scrubmac" update
   [ "$status" -eq 0 ]
-  [[ "$output" == *"release signatures are not checked"* ]]
+  [[ "$output" == *"release signatures are not checked"* ]] || false
 }
 
 @test "with pinned keys, a release signed by the pinned key is accepted" {
@@ -152,7 +203,25 @@ require_ssh_signing() {
   signed_tag v1.1.0 release
   run "$INST/bin/scrubmac" update
   [ "$status" -eq 0 ]
-  [[ "$output" == *"signature verified"* ]]
+  [[ "$output" == *"signature verified"* ]] || false
+  [ "$(cat "$INST/VERSION")" = 1.1.0 ]
+}
+
+@test "with pinned keys, an unsigned newer release is skipped for the newest signed one" {
+  require_ssh_signing
+  ssh_key release
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  pin_key release
+  commit_version 1.1.0
+  signed_tag v1.1.0 release
+  commit_version 1.2.0
+  tag v1.2.0
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipping release v1.2.0 — not signed by a key pinned"* ]] || false
+  [[ "$output" == *"Updated to v1.1.0"* ]] || false
   [ "$(cat "$INST/VERSION")" = 1.1.0 ]
 }
 
@@ -167,7 +236,7 @@ require_ssh_signing() {
   tag v1.1.0
   run "$INST/bin/scrubmac" update
   [ "$status" -eq 1 ]
-  [[ "$output" == *"not signed by a key pinned"* ]]
+  [[ "$output" == *"not signed by a key pinned"* ]] || false
   [ "$(cat "$INST/VERSION")" = 1.0.0 ]
 }
 
@@ -186,7 +255,7 @@ require_ssh_signing() {
   signed_tag v1.1.0 attacker
   run "$INST/bin/scrubmac" update
   [ "$status" -eq 1 ]
-  [[ "$output" == *"not signed by a key pinned"* ]]
+  [[ "$output" == *"not signed by a key pinned"* ]] || false
   [ "$(cat "$INST/VERSION")" = 1.0.0 ]
 }
 
@@ -195,7 +264,7 @@ require_ssh_signing() {
   cp -R "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/VERSION" "$SANDBOX/copy/"
   run "$SANDBOX/copy/bin/scrubmac" update
   [ "$status" -eq 1 ]
-  [[ "$output" == *"cannot self-update"* ]]
+  [[ "$output" == *"cannot self-update"* ]] || false
   run "$SANDBOX/copy/bin/scrubmac" update --bogus
   [ "$status" -eq 2 ]
 }

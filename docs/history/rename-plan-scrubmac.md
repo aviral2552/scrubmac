@@ -9,7 +9,7 @@ Decision locked 2026-08-09. GitHub name reserved (private placeholder at
 `aviral2552/scrubmac`; delete it in Phase 2 immediately before the real
 rename). Availability verified 2026-08-09: brew formula 404, cask 404,
 GitHub exact-name zero, npm 404, PyPI 404, no product hits.
-Supersedes the candidate table in [renaming.md](renaming.md).
+Supersedes the candidate table in [renaming.md](../renaming.md).
 *Rev 2 integrates a 20-finding adversarial review (4 blockers): shim
 symlink resolution, sed/worktree corruption, installer config-seeding vs
 migration ordering, self-hosted install.sh re-run, tap rename mechanics

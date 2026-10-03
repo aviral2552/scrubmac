@@ -14,6 +14,17 @@ set -euo pipefail
 
 skip_unless rustup
 
+# rustup >= 1.29 exits 100 from `rustup check` when updates are available
+# (0 when there are none): for the status report that is news, not an error.
+rustup() {
+  local rc=0
+  command rustup "$@" || rc=$?
+  if [ "${1:-}" = check ] && [ "$rc" -eq 100 ]; then
+    return 0
+  fi
+  return "$rc"
+}
+
 report rustup check
 skip_unless_updating
 

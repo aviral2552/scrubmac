@@ -6,16 +6,20 @@
 |---|---|
 | `~/.config/scrubmac/config` | settings, `KEY=value` — parsed with a strict grammar, **never executed** |
 | `~/.config/scrubmac/disabled` | cleaners you turned off, one name per line |
-| `~/.config/scrubmac/enabled` | opt-in cleaners you turned on, one name per line |
+| `~/.config/scrubmac/enabled` | cleaners you turned on (opt-ins, or defaults you re-enabled), one name per line |
 | `~/.config/scrubmac/cleaners.d/` | your own cleaners; a same-named file overrides a built-in |
 | `~/.local/state/scrubmac/logs/` | one log per run (`scrubmac last` shows the newest) |
 | `~/.local/state/scrubmac/last-run.json` | machine-readable record of the last real run |
-| `~/.local/state/scrubmac/run.lock` | the run lock (a symlink naming the holder's pid) |
+| `~/.local/state/scrubmac/run.lock` | the run lock (a symlink naming the holder's pid and start time) |
 | `~/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist` | the schedule, if you set one |
 
-`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are respected. Nothing lives in
-`$TMPDIR`: it differs between cron, launchd, and terminal sessions, which
-would let them miss each other's lock.
+`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are respected. Nothing that must
+outlive a run lives in `$TMPDIR`: it differs between cron, launchd, and
+terminal sessions, which would let them miss each other's lock. Only the
+per-run scratch directory goes there (falling back to `/tmp`, then the state
+dir, when `$TMPDIR` is unset or missing), plus — until v4 — a second,
+transitional lock taken exactly where cleanmymac 2.x takes it, so an
+unmigrated 2.x copy and scrubmac still exclude each other ([S1](security.md#s1--no-privilege-escalation)).
 
 ## The wizard
 
@@ -27,7 +31,7 @@ starts every screen from your **current** configuration — Enter keeps it:
 2. **Services** — one screen per group (package managers · JavaScript ·
    Python · AI tools · languages · Apple development · developer tools, then
    your own cleaners), each line showing the cleaner's summary, `found` /
-   `not found (auto-skips)`, and `opt-in` for cleaners that are off by
+   `not found — auto-skips`, and `opt-in` for cleaners that are off by
    default. Toggle by number, `a` = all on, `n` = none.
 3. **Update cooldown** — skip package versions younger than 0/3/7/14 days
    (7 recommended and the default). The screen states the trade-off:
@@ -35,7 +39,8 @@ starts every screen from your **current** configuration — Enter keeps it:
 4. **App updates** — whether Homebrew casks may be upgraded in runs nobody
    is watching ([why](#app-updates)).
 5. **Output** — full vs quiet; **color** — auto/always/never.
-6. **Summary** — confirm with `y`, restart with `r`, quit with `q`.
+6. **Summary** — Enter or `y` writes, `r` restarts, `q` quits; anything
+   else asks again.
 
 It rewrites only the four keys it manages (`COOLDOWN_DAYS`, `APP_UPDATES`,
 `QUIET`, `COLOR`); every other line in the config file — comments, other
@@ -49,12 +54,12 @@ offer writes the defaults, so you are never asked again.
 | `COOLDOWN_DAYS` | `7` | supply-chain cooldown: skip package versions younger than N days (`0` = off) — [S4](security.md#s4--supply-chain-cooldown) |
 | `QUIET` | `0` | `1` = hide cleaner output unless the cleaner fails |
 | `COLOR` | `auto` | `auto` / `always` / `never` (`NO_COLOR` is honored) |
-| `TIMEOUT` | `3600` | per-cleaner time limit in seconds (`0` = none); a cleaner that exceeds it is stopped — with its child processes — and reported as `TIMEOUT` |
+| `TIMEOUT` | `3600` | per-cleaner time limit in seconds (`0` = none); a cleaner that exceeds it is stopped — with every process it started: `TERM`, then `KILL` 5 s later — and reported as `TIMEOUT` |
 | `APP_UPDATES` | `interactive` | GUI app upgrades (Homebrew casks): `interactive` = only when you run scrubmac yourself, `always`, or `never` |
 | `NOTIFY` | `failures` | desktop notification after unattended runs: `failures`, `always`, `never` |
 | `ON_BATTERY` | `run` | scheduled runs on battery power: `run` or `skip` |
 | `MIN_HOURS_BETWEEN_RUNS` | `0` | scheduled runs skip when a full run succeeded within N hours (`0` = off) |
-| `LOG_KEEP` | `20` | number of run logs to keep |
+| `LOG_KEEP` | `20` | number of run logs to keep (at least 1 is always kept) |
 | `MEASURE` | `0` | `1` = measure the space each cleaner frees (slower: `du` before/after) — same as `--measure` |
 | `UPDATE_CHANNEL` | `release` | what `scrubmac update` follows on git installs: `release` (tags) or `branch` |
 | `DERIVEDDATA_AGE_DAYS` | `30` | xcode: purge DerivedData Xcode has not used for N days |
@@ -63,10 +68,13 @@ offer writes the defaults, so you are never asked again.
 | `DOCKER_KEEP_HOURS` | `168` | docker: keep build cache used within N hours |
 | `MISE_PRUNE` | `0` | mise: also remove tool versions no config file uses |
 
-Values may contain only `A-Za-z0-9._/-`; lines that do not match the grammar
-are ignored, and a value of the wrong type is reported and replaced by the
-default (a security property — see
-[security.md](security.md#s5--config-cannot-execute-code)).
+Values may contain only `A-Za-z0-9._/-`. A line that does not match the
+`KEY=value` grammar is ignored and reported (comments and blank lines are
+fine); a value of the wrong type is reported and replaced by the default —
+a security property, see
+[security.md](security.md#s5--config-cannot-execute-code). Whole numbers may
+have leading zeros (`08` is 8, never octal); a list setting takes exactly
+one of its words.
 
 ### `scrubmac config`
 
@@ -79,7 +87,13 @@ scrubmac config path                  # where the file is
 ```
 
 Keys that are not built-in settings can be stored too (with a warning), for
-your own cleaners to read with `setting KEY default`.
+your own cleaners to read with `setting KEY default` — except a near-miss of
+a built-in key (`COOLDOWN_DAY`), which is refused with a suggestion, since
+it is almost certainly a typo. `config get` of a key that is neither a
+setting nor in the file exits 1. Values pass through as given (`config set
+MY_FLAG -x` works); numbers are stored canonically (`08` → `8`). `config
+set` writes through a symlinked config file (a dotfiles manager's), keeping
+the link, and refuses to touch a config file it cannot read.
 
 ### Precedence
 
@@ -94,28 +108,39 @@ Other environment variables:
 |---|---|
 | `NO_COLOR` | disable color (standard) |
 | `CMM_OFFLINE=1` / `0` | force offline/online instead of probing the routing table |
-| `CMM_STATE_DIR` | relocate logs, last-run record, and the lock |
+| `XDG_STATE_HOME` | logs, last-run record and the lock go to `$XDG_STATE_HOME/scrubmac` |
+| `CMM_STATE_DIR` | relocate logs, last-run record, and the lock (beats `XDG_STATE_HOME`) |
 | `CMM_CLEANERS_DIR` | override the built-in cleaners directory (used by tests) |
 | `CMM_PREFIX`, `CMM_BIN_DIR`, `CMM_OLD_PREFIX` | install/uninstall location overrides (tests) |
+| `CMM_BREW_LOCATIONS` | where to look for a Homebrew that is installed but not on `PATH` (tests) |
 
 ## Enabling and disabling cleaners
 
 ```bash
 scrubmac list                    # name, state, default, tool found?, source, summary
 scrubmac disable npm
-scrubmac enable docker xcode     # several at once; opt-in cleaners start disabled
+scrubmac enable docker xcode     # several at once (or docker,xcode); opt-in cleaners start disabled
 ```
 
 `disabled` and `enabled` record *explicit* choices; every other cleaner
 follows its default (`# default: on|off` in its header). Explicit choices
 survive future default changes, and new opt-in cleaners stay off until you
-enable them. (Upgrading from ≤ 3.0 converts the old disabled-list-only
-format once and says so: docker/xcode you had enabled — and the go cleaner,
-which used to run by default — stay enabled.)
+enable them. Both files start with a `# scrubmac:` header line; you may edit
+them by hand — comments and stray whitespace are ignored, and your comments
+are kept when scrubmac rewrites them. A file scrubmac cannot read is never
+rewritten (`enable`/`disable` exit 2 instead of dropping its contents).
 
-Naming cleaners explicitly (`scrubmac docker`) runs them even when
-disabled — explicit intent wins. `--skip <name>` leaves a cleaner out of one
-run.
+Upgrading from ≤ 3.0 converts the old disabled-list-only format once and
+says so: docker/xcode you had enabled — and the go cleaner, which used to
+run by default — stay enabled. The conversion only touches a `disabled` file
+without the header and with no `enabled` file beside it, so a 3.1 setup
+whose state dir was wiped (a new Mac with synced dotfiles) is never
+mistaken for a 3.0 one.
+
+Naming cleaners explicitly (`scrubmac docker`, or `scrubmac run docker`)
+runs them even when disabled — explicit intent wins. `--skip <name>` (or a
+comma-separated list) leaves cleaners out of one run. Names are never
+glob-expanded.
 
 ## Modes
 
@@ -125,8 +150,15 @@ run.
 | `--update-only` | update tools; leave caches alone |
 | `--clean-only` | clean caches; change no versions |
 | `--measure` | report the space each cleaner frees |
-| `--json` | the run's summary as JSON on stdout; all other output goes to stderr |
-| `scrubmac status` | read-only: each cleaner's cache sizes and outdated packages |
+| `--json` | the run's summary as JSON on stdout; all other output goes to stderr (for runs, `status` and `last` only) |
+| `--quiet` / `-q` | one line per cleaner instead of its output; a failing cleaner's output is still shown |
+| `scrubmac status` | read-only: each cleaner's cache sizes and outdated packages (always shows output, even with `QUIET=1`) |
+
+An option that does not apply to a command is an error rather than silently
+ignored: `--dry-run` is refused for `update` (use `update --check`),
+`schedule`, `enable`, `disable`, `configure` and `config set|unset`; `--json`
+works only for runs, `status` and `last`; `--scheduled`, `--measure` and
+the mode flags only for runs.
 
 Offline (no default network route — scrubmac sends no traffic to check),
 updates are skipped and cleanup still runs.
@@ -150,7 +182,7 @@ are upgraded by their own cleaners in every run.
 
 ```bash
 scrubmac schedule weekly            # Mondays 09:00
-scrubmac schedule weekly fri 18:30
+scrubmac schedule weekly fri 18:30  # day names: mon … sun (or monday …)
 scrubmac schedule daily 07:00
 scrubmac schedule                   # status
 scrubmac schedule off
@@ -161,18 +193,27 @@ Unlike cron, launchd runs a job missed while the Mac slept as soon as it
 wakes (a Mac that is powered off skips it). The agent carries the `PATH`
 of the shell you scheduled from (minus `.` and relative entries), so your
 tools are found — re-run the command after changing your `PATH`. It runs
-with background priority.
+with background priority, and each cleaner starts in your home directory
+(launchd itself starts jobs in `/`). Re-scheduling replaces the old agent
+(waiting for launchd to unload it first), and re-enables an agent you had
+disabled with `launchctl disable`. When the agent is missing or broken,
+`scrubmac schedule status` and `scrubmac doctor` print the exact command that
+recreates it.
 
 `--scheduled` runs are unattended: never interactive (no casks unless
 `APP_UPDATES=always`), they honor `ON_BATTERY=skip` and
 `MIN_HOURS_BETWEEN_RUNS`, and with `NOTIFY=failures` (the default) a failure
-raises a desktop notification. Every run leaves a log — `scrubmac last`.
+raises a desktop notification. Every real run leaves a log (dry runs and
+`status` do not) — `scrubmac last`.
 
 ### cron
 
 cron's `PATH` is only `/usr/bin:/bin`, so without a `PATH=` line almost
-every cleaner skips (scrubmac warns when every cleaner skipped, and
-`scrubmac doctor` flags a crontab without `PATH`). A working crontab:
+every cleaner skips (scrubmac warns when every cleaner skipped, or when
+Homebrew is installed but not on the run's `PATH`, and `scrubmac doctor`
+flags a crontab entry that gets no `PATH` — it understands a `PATH=` line, an
+inline `PATH=… scrubmac`, and entries run through a login shell such as
+`zsh -lc`). A working crontab:
 
 ```
 PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -184,7 +225,8 @@ login session); launchd agents get them.
 
 Non-TTY runs never prompt: with no config they use the defaults and print a
 one-line hint. A concurrent run — manual, cron, or launchd — is excluded by
-the lock (the second exits 2).
+the lock (the second exits 2). Scheduling the same Mac with both cron and
+launchd runs scrubmac twice; `doctor` warns about that.
 
 ## Logs and the JSON record
 
@@ -192,7 +234,13 @@ Each real run writes `~/.local/state/scrubmac/logs/run-<UTC timestamp>-<pid>.log
 a header, one `== name: status (seconds, exit code)` line per cleaner with
 its captured output (unattended and quiet runs capture everything; an
 interactive run streams to your terminal and logs the statuses), the
-summary, and the exit code. The newest `LOG_KEEP` logs are kept.
+summary, and the exit code. The newest `LOG_KEEP` logs are kept (at least
+one).
+
+`MIN_HOURS_BETWEEN_RUNS` counts from the start of the last successful full
+run: no cleaner names, no `--skip`, not a dry run or a mode run, online, exit
+0, and at least one cleaner actually ran (`ok`). A stamp from the future (a
+clock change) is ignored.
 
 `last-run.json` (and `--json`) look like:
 
@@ -218,5 +266,7 @@ summary, and the exit code. The newest `LOG_KEEP` logs are kept.
 }
 ```
 
-Statuses: `ok`, `skip`, `fail`, `timeout`, `refused` (execution-safety
-guard), `stopped` (interrupted).
+Statuses: `ok`, `skip`, `fail` (including a cleaner file that disappeared
+mid-run), `timeout`, `refused` (execution-safety guard), `stopped`
+(interrupted). Notes name what went wrong — e.g. `failed: brew upgrade
+--formula (exit 1)` for a command run through `run` or `step`.

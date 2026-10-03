@@ -72,7 +72,7 @@ cask token 404, `github.com/aviral2552/<t>` free, npm/PyPI free, product-name we
   bottle as `cellar: :any_skip_relocation, all:` (precedent: `bats-core`);
   macOS-only is fine via `depends_on :macos` (precedent: `mas`); category
   precedent: `topgrade`. Self-update must stay disabled under brew — already
-  true (`cleanmymac update` delegates to brew).
+  true (`scrubmac update` delegates to brew).
 - Local gate before the PR: `HOMEBREW_NO_INSTALL_FROM_API=1 brew install
   --build-from-source <name>` · `brew test <name>` · `brew audit --strict
   --new --online <name>` · `brew style --fix --formula <name>` ·

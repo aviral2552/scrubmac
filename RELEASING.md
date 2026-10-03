@@ -16,7 +16,9 @@
    ```
 
 4. The `Release` workflow verifies tag == VERSION and the CHANGELOG section,
-   re-runs the full check, builds `scrubmac-x.y.z.tar.gz` with `git archive`
+   re-runs the full check (lint with the same pinned, checksum-verified
+   linters as CI; the test suite on macOS and Linux), and only then builds
+   `scrubmac-x.y.z.tar.gz` with `git archive`
    (`.gitattributes` keeps tests and CI config out of it), writes
    `SHA256SUMS`, records a **build-provenance attestation** for the tarball,
    and publishes the GitHub release.
@@ -54,9 +56,12 @@ it on:
    repo config). Check with
    `git -c gpg.ssh.allowedSignersFile=share/allowed_signers verify-tag vX.Y.Z`.
 
-Installs that already have the file refuse unsigned or wrongly-signed tags;
-installs from before it existed pick it up with their next update. Rotating
-the key means shipping the new key in a release signed by the old one.
+Installs that already have the file skip unsigned or wrongly-signed tags
+(with a warning; they take the newest release that verifies, and refuse to
+update if none newer does); installs from before it existed pick it up with
+their next update. Rotating the key means shipping the new key in a release
+signed by the old one. Never move or delete a published release tag:
+installs refuse a tag that moved, and prune one that was deleted.
 
 ## The Homebrew tap
 

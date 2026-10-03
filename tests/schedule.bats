@@ -13,7 +13,20 @@ setup() {
   setup_sandbox
   PLIST="$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist"
   UID_="$(id -u)"
-  make_stub launchctl
+  launchd_stub
+}
+
+# launchd_stub — a logging launchctl that models the agent's state: bootstrap
+# loads it, bootout unloads it, print answers 113 ("not found") when unloaded.
+launchd_stub() {
+  make_stub_script launchctl <<EOF
+case "\$1" in
+  bootstrap) : >"$SANDBOX/loaded" ;;
+  bootout) rm -f "$SANDBOX/loaded" ;;
+  print) [ -e "$SANDBOX/loaded" ] || exit 113 ;;
+esac
+exit 0
+EOF
 }
 teardown() { teardown_sandbox; }
 
@@ -33,11 +46,31 @@ plist_value() { # plist_value KEY — the value line after <key>KEY</key>
   grep -q '<string>--scheduled</string>' "$PLIST"
   grep -q '<string>--quiet</string>' "$PLIST"
   grep -q '<key>RunAtLoad</key>' "$PLIST"
-  diff <(calls) - <<EOF
+  diff "$CALL_LOG" - <<EOF
 launchctl bootout gui/$UID_/com.github.aviral2552.scrubmac
+launchctl print gui/$UID_/com.github.aviral2552.scrubmac
+launchctl enable gui/$UID_/com.github.aviral2552.scrubmac
 launchctl bootstrap gui/$UID_ $PLIST
 EOF
-  [[ "$output" == *"scheduled: weekly on Monday at 09:00"* ]]
+  [[ "$output" == *"scheduled: weekly on Monday at 09:00"* ]] || false
+}
+
+@test "re-scheduling waits for the old agent to unload, and retries a transient bootstrap failure" {
+  make_stub_script launchctl <<EOF
+case "\$1" in
+  print)
+    n=\$(cat "$SANDBOX/prints" 2>/dev/null || echo 0); echo \$((n + 1)) >"$SANDBOX/prints"
+    [ "\$n" -lt 2 ] || exit 113 ;; # still unloading for two polls
+  bootstrap)
+    [ -e "$SANDBOX/tried" ] || { : >"$SANDBOX/tried"; echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; } ;;
+esac
+exit 0
+EOF
+  run "$CMM" schedule weekly
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^launchctl print ' "$CALL_LOG")" -eq 3 ]
+  [ "$(grep -c '^launchctl bootstrap ' "$CALL_LOG")" -eq 2 ]
+  [[ "$output" == *"scheduled: weekly on Monday at 09:00"* ]] || false
 }
 
 @test "schedule daily HH:MM omits Weekday" {
@@ -46,7 +79,7 @@ EOF
   refute grep -q '<key>Weekday</key>' "$PLIST"
   [ "$(plist_value Hour)" = 18 ]
   [ "$(plist_value Minute)" = 30 ]
-  [[ "$output" == *"daily at 18:30"* ]]
+  [[ "$output" == *"daily at 18:30"* ]] || false
 }
 
 @test "schedule weekly accepts a day and a time in any order" {
@@ -61,6 +94,20 @@ EOF
 
 @test "schedule rejects bad days, times and subcommands" {
   run "$CMM" schedule weekly funday
+  [ "$status" -eq 2 ]
+  run "$CMM" schedule weekly 5 # numbers are ambiguous (is 0 Sunday?)
+  [ "$status" -eq 2 ]
+  run "$CMM" schedule weekly mon fri
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"two days given"* ]] || false
+  run "$CMM" schedule daily 09:00 10:00
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"two times given"* ]] || false
+  run "$CMM" schedule daily mon
+  [ "$status" -eq 2 ]
+  run "$CMM" schedule off now
+  [ "$status" -eq 2 ]
+  run "$CMM" schedule status please
   [ "$status" -eq 2 ]
   run "$CMM" schedule daily 25:00
   [ "$status" -eq 2 ]
@@ -101,24 +148,37 @@ exit 0
 EOF
   run "$CMM" schedule weekly
   [ "$status" -eq 1 ]
-  [[ "$output" == *"could not load"* ]]
+  [[ "$output" == *"could not load"* ]] || false
 }
 
 @test "schedule status: none, loaded, not loaded, launcher gone" {
   run "$CMM" schedule
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no schedule set"* ]]
+  [[ "$output" == *"no schedule set"* ]] || false
   run "$CMM" schedule weekly
   run "$CMM" schedule status
   [ "$status" -eq 0 ]
-  [[ "$output" == *"weekly on Monday at 09:00"* ]]
-  [[ "$output" == *"loaded"* ]]
-  make_stub launchctl 113 # print: service not found
+  [[ "$output" == *"weekly on Monday at 09:00"* ]] || false
+  [[ "$output" == *"state:    loaded"* ]] || false
+  rm -f "$SANDBOX/loaded" # launchd lost it (e.g. after a manual bootout)
   run "$CMM" schedule status
-  [[ "$output" == *"not loaded"* ]]
+  [[ "$output" == *"not loaded"* ]] || false
+  [[ "$output" != *"state:    loaded"* ]] || false
   sed -i.bak "s|$REPO_ROOT/bin/scrubmac|/nonexistent/bin/scrubmac|" "$PLIST"
   run "$CMM" schedule status
-  [[ "$output" == *"no longer exists"* ]]
+  [[ "$output" == *"no longer exists"* ]] || false
+}
+
+@test "repair hints recreate the exact schedule (day and time), not a default one" {
+  run "$CMM" schedule weekly fri 18:30
+  [ "$status" -eq 0 ]
+  rm -f "$SANDBOX/loaded"
+  run "$CMM" schedule status
+  [[ "$output" == *"reload it with: scrubmac schedule weekly fri 18:30"* ]] || false
+  run "$CMM" schedule daily 07:05
+  rm -f "$SANDBOX/loaded"
+  run "$CMM" schedule status
+  [[ "$output" == *"reload it with: scrubmac schedule daily 07:05"* ]] || false
 }
 
 @test "schedule off unloads and removes the agent; idempotent" {
@@ -130,7 +190,7 @@ EOF
   grep -q "^launchctl bootout gui/$UID_/com.github.aviral2552.scrubmac$" "$CALL_LOG"
   run "$CMM" schedule off
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no schedule was set"* ]]
+  [[ "$output" == *"no schedule was set"* ]] || false
 }
 
 @test "without launchd, schedule explains the cron alternative with an explicit PATH" {
@@ -142,8 +202,8 @@ EOF
   rm -f "$STUB_BIN/launchctl"
   run "$CMM" schedule weekly
   [ "$status" -eq 2 ]
-  [[ "$output" == *"PATH="* ]]
-  [[ "$output" == *"--scheduled --quiet"* ]]
+  [[ "$output" == *"PATH="* ]] || false
+  [[ "$output" == *"--scheduled --quiet"* ]] || false
   [ ! -f "$PLIST" ]
 }
 
@@ -167,5 +227,5 @@ EOF
   run "$CMM" schedule daily 06:00
   run "$CMM" doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"launchd agent:  daily at 06:00"* ]]
+  [[ "$output" == *"launchd agent:  daily at 06:00"* ]] || false
 }

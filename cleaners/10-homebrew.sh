@@ -35,6 +35,9 @@ if updating; then
   step brew upgrade --formula
   if app_updates_allowed; then
     step brew upgrade --cask
+  elif [ "${CMM_APP_UPDATES:-interactive}" = never ]; then
+    note "- casks not upgraded: APP_UPDATES=never"
+    summary_note "casks not upgraded (APP_UPDATES=never)"
   else
     note "- casks not upgraded: unattended run (APP_UPDATES=${CMM_APP_UPDATES:-interactive})"
     summary_note "casks not upgraded (unattended run; APP_UPDATES=${CMM_APP_UPDATES:-interactive})"

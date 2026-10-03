@@ -44,17 +44,25 @@ cmm__schedule_path() {
   printf '%s\n' "${out:-/usr/bin:/bin:/usr/sbin:/sbin}"
 }
 
-# cmm__weekday DAY — launchd Weekday number (0 = Sunday … 6 = Saturday).
+# cmm__weekday DAY — launchd Weekday number (0 = Sunday … 6 = Saturday) for
+# a day name. Numbers are not accepted: is 0 Sunday or Monday, is 7 valid?
 cmm__weekday() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-    sun | sunday | 0 | 7) echo 0 ;;
-    mon | monday | 1) echo 1 ;;
-    tue | tues | tuesday | 2) echo 2 ;;
-    wed | wednesday | 3) echo 3 ;;
-    thu | thur | thurs | thursday | 4) echo 4 ;;
-    fri | friday | 5) echo 5 ;;
-    sat | saturday | 6) echo 6 ;;
+    sun | sunday) echo 0 ;;
+    mon | monday) echo 1 ;;
+    tue | tues | tuesday) echo 2 ;;
+    wed | wednesday) echo 3 ;;
+    thu | thur | thurs | thursday) echo 4 ;;
+    fri | friday) echo 5 ;;
+    sat | saturday) echo 6 ;;
     *) return 1 ;;
+  esac
+}
+
+cmm__day_abbrev() {
+  case "$1" in
+    0) echo sun ;; 1) echo mon ;; 2) echo tue ;; 3) echo wed ;;
+    4) echo thu ;; 5) echo fri ;; 6) echo sat ;; *) echo mon ;;
   esac
 }
 
@@ -105,6 +113,21 @@ cmm_schedule_describe() { # one line describing the installed schedule
     printf 'weekly on %s at %02d:%02d\n' "$(cmm__day_name "$wd")" "${hour:-0}" "${minute:-0}"
   else
     printf 'daily at %02d:%02d\n' "${hour:-0}" "${minute:-0}"
+  fi
+}
+
+# cmm_schedule_command — the `scrubmac schedule …` command that recreates
+# the installed schedule exactly (for repair hints).
+cmm_schedule_command() {
+  local plist hour minute wd
+  plist="$(cmm_schedule_plist)"
+  hour="$(cmm__plist_value "$plist" Hour)"
+  minute="$(cmm__plist_value "$plist" Minute)"
+  wd="$(cmm__plist_value "$plist" Weekday)"
+  if [ -n "$wd" ]; then
+    printf 'scrubmac schedule weekly %s %02d:%02d\n' "$(cmm__day_abbrev "$wd")" "${hour:-9}" "${minute:-0}"
+  else
+    printf 'scrubmac schedule daily %02d:%02d\n' "${hour:-9}" "${minute:-0}"
   fi
 }
 
@@ -169,17 +192,22 @@ EOF
 }
 
 cmm_schedule_set() {
-  local kind="$1" wd='' arg hour=9 minute=0 plist domain
+  local kind="$1" wd='' arg hour=9 minute=0 plist domain got_day=0 got_time=0 i=0
+  local usage="usage: scrubmac schedule daily [HH:MM] | weekly [DAY] [HH:MM]   (DAY: mon … sun)"
   shift
   [ "$kind" = weekly ] && wd=1
   for arg in "$@"; do
     if cmm__parse_time "$arg"; then
+      [ "$got_time" = 0 ] || usage_err "two times given ('$arg') — $usage"
+      got_time=1
       hour="$CMM__HOUR"
       minute="$CMM__MINUTE"
     elif [ "$kind" = weekly ] && cmm__weekday "$arg" >/dev/null; then
+      [ "$got_day" = 0 ] || usage_err "two days given ('$arg') — $usage"
+      got_day=1
       wd="$(cmm__weekday "$arg")"
     else
-      usage_err "usage: scrubmac schedule daily [HH:MM] | weekly [DAY] [HH:MM]   (got '$arg')"
+      usage_err "unexpected '$arg' — $usage"
     fi
   done
   have launchctl || {
@@ -196,13 +224,26 @@ cmm_schedule_set() {
     err "generated an invalid plist at $plist — please report this"
     exit 1
   fi
-  # replace any loaded copy, then load the new definition
+  # Replace any loaded copy, then load the new definition. bootout returns
+  # before the job is gone, and an immediate bootstrap can fail ("5:
+  # Input/output error"), so wait for it to unload and retry briefly.
   launchctl bootout "$domain/$CMM_SCHEDULE_LABEL" >/dev/null 2>&1 || true
-  if ! launchctl bootstrap "$domain" "$plist"; then
-    err "launchctl could not load $plist"
-    note "try: launchctl bootstrap $domain '$plist'"
-    exit 1
-  fi
+  while cmm_schedule_loaded && [ "$i" -lt 20 ]; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  # a service you once disabled (launchctl disable) would refuse to load
+  launchctl enable "$domain/$CMM_SCHEDULE_LABEL" >/dev/null 2>&1 || true
+  i=0
+  until launchctl bootstrap "$domain" "$plist" 2>/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -ge 3 ]; then
+      err "launchctl could not load $plist"
+      note "try: launchctl bootstrap $domain '$plist'"
+      exit 1
+    fi
+    sleep 1
+  done
   note "scheduled: $(cmm_schedule_describe) — runs '$(cmm_stable_launcher) --scheduled --quiet'"
   note "  agent:  $plist"
   note "  PATH:   captured from this shell (re-run this command after changing your PATH)"
@@ -212,6 +253,7 @@ cmm_schedule_set() {
 
 cmm_schedule_off() {
   local plist
+  [ "$#" -eq 0 ] || usage_err "usage: scrubmac schedule off"
   plist="$(cmm_schedule_plist)"
   if have launchctl; then
     launchctl bootout "$(cmm__launchd_domain)/$CMM_SCHEDULE_LABEL" >/dev/null 2>&1 || true
@@ -226,6 +268,7 @@ cmm_schedule_off() {
 
 cmm_schedule_status() {
   local plist desc program
+  [ "$#" -eq 0 ] || usage_err "usage: scrubmac schedule status"
   plist="$(cmm_schedule_plist)"
   if [ ! -f "$plist" ]; then
     note "no schedule set — create one with: scrubmac schedule weekly   (or: daily)"
@@ -238,10 +281,10 @@ cmm_schedule_status() {
   if cmm_schedule_loaded; then
     note "state:    loaded"
   else
-    warn "the agent is not loaded — re-run 'scrubmac schedule ${desc%% *}' to load it"
+    warn "the agent is not loaded — reload it with: $(cmm_schedule_command)"
   fi
   if [ -n "$program" ] && [ ! -x "$program" ]; then
-    warn "the scheduled launcher no longer exists: $program — re-run 'scrubmac schedule' or 'scrubmac schedule off'"
+    warn "the scheduled launcher no longer exists: $program — recreate the schedule with '$(cmm_schedule_command)', or remove it with 'scrubmac schedule off'"
   fi
   if [ -f "$CMM_LAST_RUN_FILE" ]; then
     note "last run: $(sed -n 's/^  "finished_at": "\(.*\)",$/\1/p' "$CMM_LAST_RUN_FILE") (exit $(sed -n 's/^  "exit_code": \([0-9]*\),$/\1/p' "$CMM_LAST_RUN_FILE"))"
@@ -252,9 +295,9 @@ cmd_schedule() {
   local sub="${1:-status}"
   [ "$#" -gt 0 ] && shift
   case "$sub" in
-    status) cmm_schedule_status ;;
+    status) cmm_schedule_status "$@" ;;
     daily | weekly) cmm_schedule_set "$sub" "$@" ;;
-    off | remove) cmm_schedule_off ;;
+    off | remove) cmm_schedule_off "$@" ;;
     *) usage_err "usage: scrubmac schedule [status | daily [HH:MM] | weekly [DAY] [HH:MM] | off]" ;;
   esac
 }

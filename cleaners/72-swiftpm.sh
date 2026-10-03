@@ -19,7 +19,7 @@ skip_unless swift
 cache_dir "$HOME/Library/Caches/org.swift.swiftpm"
 skip_unless_cleaning
 
-scratch="$(mktemp -d "${TMPDIR:-/tmp}/scrubmac-swiftpm.XXXXXX")"
+scratch="$(cmm_scratch_dir)"
 cd "$scratch"
 step swift package purge-cache # step never aborts, so the cleanup below always runs
 cd /

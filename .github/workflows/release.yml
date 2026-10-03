@@ -8,7 +8,64 @@ permissions:
   contents: read
 
 jobs:
+  # The same gates as CI, on the tagged commit: pinned, checksum-verified
+  # linters (a newer Homebrew shellcheck must not fail a tag CI passed), and
+  # the suite on macOS (bash 3.2) and Linux (bash 5, GNU userland).
+  lint:
+    runs-on: ubuntu-24.04
+    env:
+      SHELLCHECK_VERSION: v0.11.0
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+      SHFMT_VERSION: v3.14.1
+      SHFMT_SHA256: 76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify tag matches VERSION
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="v$(cat VERSION)"
+          if [ "$TAG" != "$VER" ]; then
+            echo "tag $TAG does not match VERSION $VER" >&2
+            exit 1
+          fi
+      - name: Verify CHANGELOG has a section for this version
+        run: grep -q "^## \[$(cat VERSION)\]" CHANGELOG.md
+      - name: Install pinned shellcheck and shfmt (checksum-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          sudo install -m 0755 "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          curl -fsSL -o shfmt "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          echo "${SHFMT_SHA256}  shfmt" | sha256sum -c -
+          sudo install -m 0755 shfmt /usr/local/bin/shfmt
+      - run: make lint docs-check
+
+  test:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install bats
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install --quiet bats-core
+          else
+            sudo apt-get update -q && sudo apt-get install -y -q bats fish zsh
+          fi
+      - run: make test
+
   release:
+    needs: [lint, test]
     runs-on: macos-15
     permissions:
       contents: write # create the GitHub release
@@ -21,24 +78,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Verify tag matches VERSION
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          VER="v$(cat VERSION)"
-          if [ "$TAG" != "$VER" ]; then
-            echo "tag $TAG does not match VERSION $VER" >&2
-            exit 1
-          fi
-
-      - name: Verify CHANGELOG has a section for this version
-        run: grep -q "^## \[$(cat VERSION)\]" CHANGELOG.md
-
-      - name: Install toolchain
-        run: brew install --quiet shellcheck shfmt bats-core
-
-      - name: Full check
-        run: make lint test docs-check
 
       - name: License files must ship (a release may never carry the README's license claim without the term text)
         run: git ls-files --error-unmatch LICENSE NOTICE

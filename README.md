@@ -30,18 +30,20 @@ if you like.
   Trash, no `~/Library/Caches` sweeps, no Docker containers or volumes.
 - **A supply-chain cooldown, on by default.** Updates skip releases younger
   than 7 days wherever that can be enforced (npm, uv, pipx, pnpm, Bun) — the
-  window in which worms like the 2025 npm compromises were caught — and
-  nothing is ever downgraded. One setting turns it off.
+  window in which worms like the 2025 npm compromises were caught — and the
+  cooldown never downgrades anything. One setting turns it off.
 - **Preview everything.** `scrubmac --dry-run` prints every command that
   would change something and runs none of them; `scrubmac status` shows cache
   sizes and pending updates without touching anything.
 - **One failure never stops the rest.** Each cleaner runs in its own
-  process, with a time limit and no stdin; the summary says exactly what
-  happened, and every run leaves a log.
-- **Auditable.** About 5,000 lines of shellcheck-clean bash (about 3,700
-  without comments and blank lines), a [threat model](docs/security.md), and
-  a test suite of ~300 hermetic tests plus a live end-to-end run on real
-  macOS — every command checked against its tool's documentation.
+  process, with a time limit (a hung tool is stopped along with everything
+  it started) and no stdin; the summary says exactly what happened, and
+  every real run leaves a log.
+- **Auditable.** About 6,500 lines of shellcheck-clean bash (about 4,900
+  without comments and blank lines) plus a 500-line dependency-free node
+  resolver for the cooldown, a [threat model](docs/security.md), and a test
+  suite of ~450 hermetic tests plus a live end-to-end run on real macOS —
+  every command checked against its tool's documentation.
 
 ## Install
 
@@ -88,9 +90,9 @@ runs never prompt.
 ```
 scrubmac                     run every enabled cleaner
 scrubmac --dry-run           preview: print every command, change nothing
-scrubmac -q                  quiet: banners + summary; failures still dump output
-scrubmac homebrew npm        run exactly these cleaners (even if disabled)
-scrubmac --skip docker       leave a cleaner out of this run
+scrubmac -q                  quiet: one line per cleaner + summary; failures still show output
+scrubmac homebrew npm        run exactly these cleaners (even if disabled; also: scrubmac run …)
+scrubmac --skip docker,go    leave cleaners out of this run
 scrubmac --update-only       update tools, leave caches alone
 scrubmac --clean-only        free space, change no versions
 scrubmac --measure           report the space each cleaner frees
@@ -111,8 +113,10 @@ scrubmac help                full command reference
 ```
 
 Exit codes: `0` all ok/skipped · `1` something failed, timed out, or was
-refused · `2` usage error or a concurrent run · `130` interrupted. See
-`man scrubmac`. Shell completions for bash, zsh, and fish are included.
+refused · `2` usage or environment error, or a concurrent run · `130`
+interrupted. See `man scrubmac` (Homebrew installs link it; for a git
+install without Homebrew, `man ~/.scrubmac/man/scrubmac.1`). Shell
+completions for bash, zsh, and fish are included.
 
 ## Unattended runs
 
@@ -125,8 +129,8 @@ writes a per-user launchd agent that carries your `PATH` (cron's is just
 missed schedule at the next wake. Scheduled runs never prompt, skip GUI app
 upgrades unless you allow them, can skip on battery or when a run succeeded
 recently, notify you when something fails, and stop any cleaner that hangs
-(`TIMEOUT`, default an hour). Offline, updates are skipped and cleanup
-still runs. Details: [docs/configuration.md](docs/configuration.md#scheduling).
+— with everything it started (`TIMEOUT`, default an hour). Offline, updates
+are skipped and cleanup still runs. Details: [docs/configuration.md](docs/configuration.md#scheduling).
 
 ## What it cleans
 
@@ -224,7 +228,8 @@ brew uninstall scrubmac      # Homebrew installs
 ```
 
 `uninstall.sh` also removes a schedule that points at the install it
-removes.
+removes, and refuses to delete any directory that does not hold a scrubmac
+install.
 
 ## License
 

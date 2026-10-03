@@ -26,14 +26,22 @@ done safely, run live) when it was added; the tests pin that exact usage.
   `step` does not stop the remaining independent steps (the cleaner still
   reports FAIL).
 - **Package-manager awareness (D4).** A tool installed by Homebrew, npm,
-  pipx or uv is updated by *that* manager's cleaner, never by its own
-  self-updater (which would fight the manager). CLIs shipped as binary-only
-  Homebrew casks (Claude Code, Codex, Copilot, Cursor) are upgraded by name.
+  pipx or uv is updated by *that* manager's cleaner, and one that runs
+  through a version manager (mise, asdf, Volta, nodenv, rbenv, pyenv) is left
+  to it — never updated by its own self-updater (which would fight the
+  manager). npm and corepack belong to the Node.js install. CLIs shipped as
+  binary-only Homebrew casks (Claude Code, Codex, Copilot, Cursor) are
+  upgraded by name.
 - **Supply-chain cooldown (S4).** With `COOLDOWN_DAYS` > 0 (default 7),
   updates are limited to releases at least that old wherever it can be
-  enforced: npm (scrubmac's own resolver), uv, pipx, pnpm and Bun (their
-  native settings). Yarn classic global upgrades are held. Nothing is ever
-  downgraded.
+  enforced: npm, pnpm and Bun global packages and pnpm's self-update
+  (scrubmac's own resolver, `lib/registry.js`, picks each version from the
+  registry's publish times), uv and pipx (their native settings). Yarn
+  classic global upgrades and `bun upgrade` (which cannot be told a version)
+  are held. Nothing is ever downgraded. The cooldown covers what these
+  managers install — not other tools' own self-updaters (`uv self update`,
+  `deno upgrade`, `rustup update`, `mise self-update`, the AI CLIs'
+  `update` commands, …), which install their newest release.
 
 | Group | Cleaner | Default |
 |---|---|---|
@@ -79,39 +87,77 @@ a TTY.
 Reports pending Mac App Store updates with `mas outdated` (also the
 `scrubmac status` report) and names how many in the summary. It never runs
 `mas update`: mas installs updates as root by re-running itself through
-`sudo`, and scrubmac never escalates — run `mas update` yourself.
+`sudo`, and scrubmac never escalates — run `mas update` yourself. When
+`mas outdated` itself fails (App Store lookups that time out make it exit
+non-zero), the cleaner warns and notes "could not check the App Store" in
+the summary instead of claiming nothing is pending; being a report, it does
+not fail the run.
 
 ### npm
 
 `cleaners/30-npm.sh` — gate: `npm` — default: **on**
 
-- `npm install -g npm@latest` — **only** for a standalone npm; npm bundled
-  with node (or managed by Homebrew) is updated with node (D4). Under the
-  cooldown, the newest npm at least `COOLDOWN_DAYS` old is installed instead.
-- `npm outdated -g` *(advisory — exits 1 whenever anything is outdated;
-  also the `scrubmac status` report and the `--dry-run` preview)*
-- `npm update -g` — without a cooldown. npm moves globals to the `latest`
+- `npm outdated -g` — the `scrubmac status` report and the `--dry-run`
+  preview *(exits 1 whenever anything is outdated)*.
+- Which globals may be updated: `npm outdated -g --json` lists the outdated
+  ones and `npm ls -g --long --json` tells how each was installed (`npm root
+  -g` adds an on-disk check). Never touched: **npm and corepack** — they
+  belong to the Node.js install and update with it (D4); **linked or local
+  installs** (`npm link`, `npm i -g ./dir`) and **aliases**
+  (`npm i -g x@npm:y`) — updating those by name would install an unrelated
+  registry package of the same name in their place; and packages already
+  newer than their `latest` tag (never downgraded). npm records no source for
+  globals installed from a tarball or a git URL, so those look like registry
+  installs.
+- `npm update -g <pkg>…` — without a cooldown, for exactly those globals
+  (not run when there are none). npm moves globals to the `latest`
   dist-tag, which can cross major versions.
-- **With the cooldown:** `npm outdated -g --json` lists outdated globals;
-  for each, `npm view <pkg> time versions dist-tags --json` feeds a small
-  resolver (run with node) that picks the newest stable release that is
-  newer than the installed one, not past the `latest` tag, and published
-  before the cutoff; scrubmac then runs `npm install -g <pkg>@<version>`.
-  Packages whose newer releases are all too fresh are held and counted in
-  the summary. npm's own `--before`/`min-release-age` are deliberately not
-  used: with `npm update -g` they *downgrade* globals newer than the cutoff.
+- **With the cooldown:** for each of them, `npm view <pkg> time versions dist-tags --json`
+  feeds scrubmac's resolver (`lib/registry.js`, run with node). It picks the
+  newest release that is newer than the installed one, not past the
+  `latest` tag, and published before the cutoff — a stable release, or a
+  prerelease of the installed prerelease's own version (2.0.0-beta.1 may move
+  to 2.0.0-beta.2, and to 2.0.0 as soon as that is old enough). Then
+  `npm view "<pkg>@<v1> || <v2> …" name version deprecated engines --json`
+  rules out deprecated releases and ones whose `engines.node` excludes this
+  node (checked with npm's own semver; not checked when that cannot be
+  loaded), stepping down at most three times, and scrubmac runs
+  `npm install -g <pkg>@<version>`. Packages whose newer releases are all too
+  fresh are held and counted in the summary. npm's own `--before`/
+  `min-release-age` are deliberately not used: with `npm update -g` they
+  *downgrade* globals newer than the cutoff.
+- Without node (needed to read npm's JSON) global updates are held.
 - `npm cache verify` — garbage-collect and verify the cache.
 
 ### pnpm
 
 `cleaners/31-pnpm.sh` — gate: `pnpm` — default: **on**
 
-- `pnpm self-update` — standalone installs only (Corepack/Homebrew/npm
-  copies are left to their managers).
-- `pnpm update -g` — global packages, within the ranges they were installed
-  with. Under the cooldown both commands get
-  `--config.minimum-release-age=<days × 1440>` (pnpm's own setting, in
-  minutes; enforced by pnpm ≥ 10.16).
+- Global packages: `pnpm ls -g --depth=0 --json` lists them, and each moves
+  to the newest release of its current major (what `pnpm update -g` does for
+  the `^` ranges pnpm saves) — under the cooldown only to releases at least
+  `COOLDOWN_DAYS` old — picked with `npm view` and scrubmac's resolver
+  exactly as for npm (deprecated and engine-incompatible releases are
+  stepped over), then installed with `pnpm add -g <pkg>@<version>`. Packages
+  installed together (`pnpm add -g a,b` — one install group in pnpm ≥ 11)
+  are re-added together, `pnpm add -g a@x,b@y`: re-adding one member alone
+  would uninstall the others. pnpm records these as exact versions, so your
+  own `pnpm update -g` leaves them where scrubmac put them (use
+  `pnpm update -g --latest`). Never touched: pnpm itself, linked/local
+  installs (`link:`, `file:`, git) and aliases (`npm:`). The lookups need
+  node and npm; without them, `pnpm update -g` runs when the cooldown is off
+  and global updates are held when it is on.
+- `pnpm self-update` — standalone installs only (Corepack/Homebrew/npm/
+  version-manager copies are left to their managers). Under the cooldown,
+  `pnpm self-update <version>` names the newest release at least
+  `COOLDOWN_DAYS` old (held, with a note, while every newer one is fresher).
+- Updates run from an empty scratch directory: inside a project that pins
+  pnpm (`packageManager`), `pnpm self-update` would rewrite that pin
+  instead, and pnpm reads project settings from the working directory.
+- pnpm's own `minimumReleaseAge` is deliberately not used: with it,
+  `pnpm update -g` and `pnpm self-update` fail outright
+  (`ERR_PNPM_NO_MATURE_MATCHING_VERSION`) whenever an installed release is
+  newer than the cutoff, and pnpm 10's self-update ignores it.
 - `pnpm store prune` — drop unreferenced packages from the
   content-addressable store.
 - `pnpm outdated -g` — `scrubmac status` report.
@@ -131,11 +177,26 @@ does nothing.
 `cleaners/33-bun.sh` — gate: `bun` — default: **on**
 
 - `bun upgrade` — standalone installs only: it replaces the running binary
-  in place, so Homebrew/npm-managed copies are left to their managers.
-- `bun update -g` — global packages. Under the cooldown:
-  `bun update -g --minimum-release-age <days × 86400>` (Bun's own flag, in
-  seconds; Bun ≥ 1.3 — older Bun holds global updates).
-- `bun pm cache rm` — clear the global package cache.
+  in place, so Homebrew/npm/version-manager copies are left to their
+  managers. It cannot be told a version — it always installs the newest
+  release — so while the cooldown is on it is **held**, with a note when a
+  newer Bun exists (`npm view bun …` tells): run `bun upgrade` yourself.
+- `bun update -g` — global packages, within their saved ranges, without a
+  cooldown.
+- **With the cooldown:** the global packages are read from Bun's global
+  directory (named by the `bun pm ls -g` header: its `package.json` and each
+  package's installed version), each is resolved like npm's (`npm view` and
+  scrubmac's resolver) within what its saved range allows (`^`: the same
+  major, `~`: the same minor), and updated with
+  `bun update -g <pkg>@<version>`, which keeps the range's operator. Exact
+  pins (`bun update -g` leaves those too), linked/local installs and aliases
+  are never touched. Bun's own `--minimum-release-age` is deliberately not
+  used: `bun update -g` with it fails whenever an installed release is newer
+  than the cutoff, and downgrades packages when a range allows it. The
+  lookups need node and npm; without them global updates are held.
+- `bun pm cache rm -g` — clear the global package cache (`-g`: without it,
+  Bun 1.1–1.4 refuse to run outside a directory with a `package.json`);
+  `bun pm cache -g` names it for `scrubmac status`.
 
 ### deno
 
@@ -151,18 +212,19 @@ cache is left alone: `deno clean` would wipe all of it.
 
 | Runs | When / why |
 |---|---|
-| `uv self update` | standalone uv only (Homebrew/pipx builds refuse) |
+| `uv self update` | only the uv that uv's standalone installer manages: its install receipt (`uv-receipt.json` in `$XDG_CONFIG_HOME/uv` or `~/.config/uv`, looked up the way uv does) must exist and name this uv's directory. uv from pip, cargo, conda, Homebrew or a version manager refuses (exit 2) — those get a note instead |
 | `uv tool upgrade --all` | upgrade uv-managed tools |
 | `uv tool upgrade --all --exclude-newer "N days"` | under the cooldown (uv ≥ 0.11.4 keeps the span relative in tool receipts; older uv gets an absolute RFC 3339 date) |
+| `uv tool upgrade <tool> --exclude-newer false` | cooldown off, uv ≥ 0.11.24, before the upgrade above: for each tool whose receipt still carries a cutoff from an earlier cooldown (uv remembers it, so plain upgrades keep honoring it) — unless your own uv settings (`UV_EXCLUDE_NEWER`, `uv.toml`) set `exclude-newer`. Older uv: a summary note says how many tools stay held back |
 | `pipx upgrade-all` | upgrade pipx-managed packages |
 | `pipx upgrade-all --cooldown N` | under the cooldown (pipx ≥ 1.16; older pipx holds its upgrades) |
+| `pipx upgrade-all --cooldown 0` | cooldown off, pipx ≥ 1.16: pipx remembers an earlier `--cooldown` per package, and 0 is its opt-out (plain `pipx upgrade-all` when `PIPX_COOLDOWN` is set) |
 | `uv cache prune` | with `UV_LOCK_TIMEOUT=15` (uv ≥ 0.9.16): a cache held by running uv/uvx processes (e.g. MCP servers) is skipped with a note instead of waited on — and never `--force`d, which would delete environments those processes run from. Older uv: skipped up front when a uv process or anything executing from the cache is running |
 | `python3 -m pip cache purge` *(advisory)* | exits 1 when pip's cache is disabled |
 | `uv tool list --outdated` | `scrubmac status` report (uv ≥ 0.10.10) |
 
-Without a cooldown, the cleaner also points out uv tools whose receipts pin
-an absolute `exclude-newer` date from an earlier cooldown (plain upgrades of
-those stay frozen at that date).
+`uv self update` installs the newest uv: the cooldown covers the tools uv
+and pipx install, not uv's own self-update.
 
 ### conda
 
@@ -231,8 +293,12 @@ and no longer follows releases (reinstall with npm).
 `cleaners/48-gh.sh` — gate: `gh` — default: **on**
 
 `gh extension upgrade --all` — exits 0 when there is nothing to upgrade, so a
-non-zero exit is a real failure. gh itself is usually Homebrew-managed.
-`gh extension list` is the `scrubmac status` report.
+non-zero exit is a real failure. Extension commands need a logged-in gh
+(they exit 4 otherwise), so the cleaner is skipped, with the reason, when
+`gh auth status` fails (exit 1: no host logged in, or a token that no longer
+works) or `gh extension list` shows no extensions. gh itself is usually
+Homebrew-managed. `gh extension list` is the `scrubmac status` report (when
+logged in).
 
 ### cursor
 
@@ -248,7 +314,8 @@ Homebrew cask is upgraded by name. Never touches `~/.cursor`.
 
 `rustup update` — toolchains, plus rustup itself unless a package manager
 owns it (Homebrew's rustup is built without self-update and says so).
-`rustup check` is the `scrubmac status` report.
+`rustup check` is the `scrubmac status` report (rustup ≥ 1.29 exits 100 when
+updates are available — news, not a failure).
 
 ### composer
 
@@ -320,8 +387,10 @@ disk-freed figure can lag.
 `cleaners/61-krew.sh` — gate: `kubectl-krew` — default: **on**
 
 `kubectl krew upgrade` refreshes the plugin index and upgrades every kubectl
-plugin installed with krew. `kubectl krew list` is the `scrubmac status`
-report.
+plugin installed with krew. krew exits 0 even when a plugin fails to upgrade
+(it only prints `WARNING: failed to upgrade plugin …`), so its output is
+checked and such a run reports FAIL. `kubectl krew list` is the
+`scrubmac status` report.
 
 ### vscode
 
@@ -336,24 +405,34 @@ updater or package manager.
 `cleaners/63-pre-commit.sh` — gate: `pre-commit` — default: **on**
 
 `pre-commit gc` deletes cached hook repositories and environments that no
-recorded `.pre-commit-config.yaml` still uses.
+recorded `.pre-commit-config.yaml` still uses. gc counts a recorded config
+it cannot read as deleted, so it is **skipped** (with a summary note) while
+one sits where this run cannot see it: inside a folder macOS keeps from
+scheduled jobs (`~/Desktop`, `~/Documents`, `~/Downloads`, iCloud Drive) or
+on an unmounted volume. The recorded configs come from pre-commit's `db.db`
+(`sqlite3 -readonly`); without sqlite3, any unreadable protected folder
+blocks gc.
 
 ### xcode
 
-`cleaners/70-xcode.sh` — gate: `xcodebuild` — default: **off**
+`cleaners/70-xcode.sh` — gate: `xcodebuild`, `~/Library/Developer/Xcode/DerivedData` — default: **off**
 
+- Nothing is touched while Xcode is running (checked first).
 - `xcrun simctl delete unavailable` *(advisory)* — simulators for runtimes
   no longer installed; needs a full Xcode (not just the Command Line Tools).
 - DerivedData: each `~/Library/Developer/Xcode/DerivedData/<Project>-<hash>`
   is removed with `rm -rf` when its project (Xcode's recorded
-  `WorkspacePath`) no longer exists, or when Xcode's own `LastAccessedDate`
-  is older than `DERIVEDDATA_AGE_DAYS` (default 30). Folders without that
-  record are kept if anything inside changed within the window.
+  `WorkspacePath`) verifiably no longer exists — missing while its parent
+  folder exists and can be listed — or when Xcode's own `LastAccessedDate`
+  is older than `DERIVEDDATA_AGE_DAYS` (default 30). A scheduled run cannot
+  read `~/Desktop`, `~/Documents`, `~/Downloads` or iCloud Drive, and
+  volumes come and go: such projects are unknown, never "gone", and only
+  the age rule applies. Folders without Xcode's record are kept if anything
+  inside changed within the window.
 - Device support: each `~/Library/Developer/Xcode/<platform> DeviceSupport/<version>`
   folder older than `DEVICESUPPORT_AGE_DAYS` (default 90) is removed with
   `rm -rf` — except the newest per platform, which the device you use is
   most likely to need. Xcode re-copies symbols when a device reconnects.
-- Nothing is touched while Xcode is running.
 
 ### cocoapods
 

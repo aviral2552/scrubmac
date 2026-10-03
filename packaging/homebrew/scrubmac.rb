@@ -38,9 +38,9 @@ class Scrubmac < Formula
     ENV["HOME"] = testpath
     assert_match version.to_s, shell_output("#{bin}/scrubmac version")
     assert_match "homebrew", shell_output("#{bin}/scrubmac list --names")
-    # A dry run changes nothing; with no package managers on PATH every
-    # cleaner skips and the summary says so.
+    # A dry run changes nothing. With only the system PATH, the cleaners
+    # whose tools live elsewhere skip, and the summary counts them.
     ENV["PATH"] = "/usr/bin:/bin"
-    assert_match "skipped", shell_output("#{bin}/scrubmac --dry-run --quiet")
+    assert_match(/\d+ ok, \d+ skipped, 0 failed/, shell_output("#{bin}/scrubmac --dry-run --quiet"))
   end
 end

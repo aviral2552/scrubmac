@@ -2,15 +2,17 @@
 
 Start with `scrubmac doctor` — it reports the install, settings that differ
 from their defaults, every tool and how it was installed, the schedule and
-crontab, the last run, and PATH problems. `scrubmac last` shows the newest
-run's log.
+crontab, the last run, the launcher on your PATH, and PATH problems.
+`scrubmac last` shows the newest run's log; a failing step is also named in
+the summary (`failed: brew upgrade --formula (exit 1)`).
 
 ## "Every cleaner skipped" (cron)
 
 cron runs jobs with `PATH=/usr/bin:/bin`, so Homebrew, npm, uv and friends
 are "not found" and every cleaner skips — the run looks successful and does
-nothing. scrubmac warns when this happens, and `scrubmac doctor` flags a
-crontab without a `PATH=` line. Either add one:
+nothing. scrubmac warns when this happens — and, earlier, when Homebrew is
+installed but missing from the run's PATH — and `scrubmac doctor` flags a
+crontab entry that gets no `PATH`. Either add one:
 
 ```
 PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -23,7 +25,8 @@ your PATH into a launchd agent (and runs missed schedules after sleep).
 ## "TIMEOUT" in the summary
 
 A cleaner ran longer than `TIMEOUT` (default 3600 seconds) and was stopped —
-together with every process it started. The rest of the run continued. If a
+together with every process it started (`TERM`, then `KILL` five seconds
+later for anything that ignored it). The rest of the run continued. If a
 tool legitimately needs longer (a huge cask download, a from-source build),
 raise it: `scrubmac config set TIMEOUT 7200`, or `CMM_TIMEOUT=0 scrubmac`
 for one unbounded run.
@@ -32,16 +35,24 @@ for one unbounded run.
 
 The execution-safety guard (S2). Cleaner files must be owned by you and not
 writable by group/others, their directory likewise; symlinked cleaners are
-never run. A refusal fails the run on purpose. Fix: `chmod 755 file` /
-`chown` it, or delete it if you don't recognize it — that's the guard doing
-its job.
+never run. A refusal fails the run on purpose; `scrubmac doctor` says which
+condition failed. Fix: `chmod 755 file` / `chown` it, or delete it if you
+don't recognize it — that's the guard doing its job.
+
+## "the cleaner file disappeared during the run"
+
+One of your own cleaners (in `cleaners.d`) was deleted while the run was
+going. Built-in cleaners cannot hit this: they run from a private copy made
+at the start of the run, so even a Homebrew upgrade of scrubmac itself in
+the middle of the run (the homebrew cleaner can do that) leaves them alone.
 
 ## "brew doctor said something scary but the run shows ok"
 
 `brew doctor` and `brew missing` are *advisory* — brew exits non-zero
 whenever it has opinions, which is most machines. scrubmac reports what
-they said and moves on; only failures of mutating commands (`brew upgrade`,
-`brew cleanup`) fail the homebrew cleaner. `HOMEBREW_DOCTOR=0` skips them.
+they said and moves on; only failures of the mutating commands (`brew
+update`, `brew upgrade`, `brew cleanup`) fail the homebrew cleaner — and the
+summary names which one. `HOMEBREW_DOCTOR=0` skips the advisory pair.
 
 ## "casks not upgraded (unattended run)"
 
@@ -93,9 +104,12 @@ those updates fail instead, which the summary shows.
 ## "another scrubmac run is already in progress"
 
 Two runs at once would fight over package-manager locks, so a lock excludes
-them — manual, cron and launchd runs alike. If the pid in the message is
-not a running scrubmac, the next run recovers the lock automatically. Exit
-code 2 identifies this case for scripts.
+them — manual, cron and launchd runs alike. The lock records the holder's
+pid and start time: if that process is gone (or the pid now belongs to a
+different process), the next run recovers the lock automatically. Exit code
+2 identifies this case for scripts. (`cannot write to …/state/scrubmac` is
+a different problem — the state dir's ownership or permissions — and
+`doctor` flags it too.)
 
 ## "uv cache in use — prune skipped"
 
@@ -108,9 +122,10 @@ upgrades are unaffected.
 
 The installer links into the first user-writable of brew's bin,
 `/usr/local/bin`, `~/.local/bin` — and tells you if that directory is not on
-your PATH. Run `~/.scrubmac/bin/scrubmac doctor` directly; it reports the
-link and PATH state. If a `scrubmac` that is not ours (e.g. Homebrew's)
-already sits there, the installer leaves it alone and says so.
+your PATH. Run `~/.scrubmac/bin/scrubmac doctor` directly; it reports which
+launcher your PATH finds and any dangling links. If a `scrubmac` that is not
+ours (e.g. Homebrew's) already sits there, the installer leaves it alone
+and says two installs now exist — keep one.
 
 ## "docker/xcode/go/rubygems never run"
 
@@ -120,11 +135,25 @@ They are opt-in. `scrubmac enable docker`, the wizard, or run one explicitly:
 ## The schedule did not run
 
 `scrubmac schedule status` (or `doctor`) says whether the agent is loaded and
-whether its launcher still exists. launchd runs a schedule missed during
-sleep at the next wake, but skips it while the Mac is off. `ON_BATTERY=skip`
-and `MIN_HOURS_BETWEEN_RUNS` make scheduled runs skip on purpose — the log
-(`scrubmac last`) says why. After moving the install or changing your PATH,
-re-run `scrubmac schedule weekly` (or `daily`).
+whether its launcher still exists — and prints the exact `scrubmac schedule
+…` command that recreates your schedule. launchd runs a schedule missed
+during sleep at the next wake, but skips it while the Mac is off.
+`ON_BATTERY=skip` and `MIN_HOURS_BETWEEN_RUNS` make scheduled runs skip on
+purpose — the log (`scrubmac last`) says why. After moving the install or
+changing your PATH, re-run your `scrubmac schedule` command. If cron also
+runs scrubmac, `doctor` warns that you are scheduled twice.
+
+## "ignoring line N of …/config"
+
+That line does not match the strict `KEY=value` grammar (no spaces around
+`=`, no quotes, no trailing comments; values only `A-Za-z0-9._/-`), so it is
+ignored — and the warning says so instead of letting a typo pass silently.
+`scrubmac config set KEY VALUE` always writes a valid line.
+
+## "nothing to run"
+
+Every cleaner is disabled or left out by `--skip`. `scrubmac list` shows
+each cleaner's state.
 
 ## Why no sudo? Why no "deep clean"? Why is my Trash still full?
 
@@ -149,16 +178,30 @@ cache clean.
 ## Update says my copy has diverged
 
 `scrubmac update` only fast-forwards (S3) — you edited the installed copy,
-or the remote was force-pushed. Inspect with `git -C ~/.scrubmac status`,
-stash/reset your changes deliberately, and run update again. Local edits
-belong in `~/.config/scrubmac/cleaners.d/` instead — they survive updates.
+or the remote was force-pushed. A newer release it cannot take this way is
+skipped with a warning (and an older one it can take is used instead); if
+none can be taken, the update is refused. Inspect with `git -C ~/.scrubmac
+status`, stash/reset your changes deliberately, and run update again. Local
+edits belong in `~/.config/scrubmac/cleaners.d/` instead — they survive
+updates. A failed fetch (network, unreachable remote) and a detached HEAD
+(with `UPDATE_CHANNEL=branch`) each get their own message.
 
 ## "release signatures are not checked"
 
 Your install pins no signing keys yet (`share/allowed_signers`), so the
 update trusts the GitHub repository. Once releases are signed and the file
 ships, updates verify every release tag against the keys in your installed
-copy.
+copy, and skip (with a warning) a release that is not signed by one of
+them. Branch updates (`UPDATE_CHANNEL=branch`, or a repository with no
+release tags) are never signature-checked; scrubmac says so.
+
+## uninstall.sh "left … alone"
+
+uninstall.sh deletes a directory only when it holds a scrubmac install, and
+never `/`, your home or a parent of it — compared as canonical paths, so
+`$HOME/.` or a symlinked parent cannot trick it. When it refuses, it exits
+1 and names the directory; delete it yourself if it really is yours to
+delete.
 
 ## (historical) the cleanmymac name conflict — resolved by the rename
 
