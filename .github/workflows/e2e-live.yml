@@ -35,8 +35,12 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes a pull request's run; every other run (a push to
+# master, the schedule, a manual dispatch) is a group of its own, so no
+# commit lands without its run finishing (a shared group would also drop
+# queued runs).
 concurrency:
-  group: e2e-live-${{ github.ref }}
+  group: e2e-live-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -125,7 +129,7 @@ jobs:
           python3 tests/e2e-live/assert_run.py run.json --exit 0 --no-fail \
             --ok homebrew,npm,pnpm,yarn,python,poetry,codex,claude,rustup,mise,pre-commit,cocoapods,swiftpm \
             --status gh=skip --note "homebrew=casks,gh=not logged in"
-          scrubmac last | sed -n 1,40p # (sed reads it all: no SIGPIPE under pipefail)
+          scrubmac last | sed -n 1,40p # (sed reads all of it: no SIGPIPE)
 
       - name: gh extensions, logged in with the workflow token
         env:
@@ -161,11 +165,14 @@ jobs:
           test ! -e "$HOME/.scrubmac"
           test ! -e "$HOME/.config/scrubmac"
           pfx="$(brew --prefix)"
-          for f in bin/scrubmac share/man/man1/scrubmac.1 share/zsh/site-functions/_scrubmac etc/bash_completion.d/scrubmac; do
+          for f in bin/scrubmac share/man/man1/scrubmac.1 share/zsh/site-functions/_scrubmac etc/bash_completion.d/scrubmac \
+            share/fish/vendor_completions.d/scrubmac.fish; do
             if [ -e "$pfx/$f" ] || [ -L "$pfx/$f" ]; then echo "left behind: $pfx/$f"; exit 1; fi
           done
 
+      # (runs even when an earlier step failed: it needs only the checkout)
       - name: Homebrew formula from a local tap (install, test, audit)
+        if: ${{ !cancelled() }}
         run: |
           set -euxo pipefail
           ver="$(cat VERSION)"
@@ -178,7 +185,7 @@ jobs:
               packaging/homebrew/scrubmac.rb >"$tap/Formula/scrubmac.rb"
           brew install --build-from-source local/e2e/scrubmac
           brew test local/e2e/scrubmac
-          "$(brew --prefix)/opt/scrubmac/bin/scrubmac" list --names | grep -qx homebrew
+          "$(brew --prefix)/opt/scrubmac/bin/scrubmac" list --names | grep -x homebrew >/dev/null
           # (runs after uninstall.sh: install.sh's own links are gone, so
           # every link here must be the formula's, resolving into its keg)
           keg="$(brew --cellar scrubmac)"
@@ -192,13 +199,14 @@ jobs:
           done
 
       - name: brew audit --strict (the local tap's file:// URL may be flagged)
+        if: ${{ !cancelled() }}
         continue-on-error: true
         run: brew audit --strict local/e2e/scrubmac
 
       - name: remove the Homebrew copy again
         if: always()
-        run: brew uninstall local/e2e/scrubmac || true
-
+        run: |
+          if brew list --formula scrubmac >/dev/null 2>&1; then brew uninstall --formula scrubmac; fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

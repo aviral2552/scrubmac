@@ -42,11 +42,11 @@ _scrubmac() {
       ;;
     config)
       if [ "$nargs" -eq 0 ]; then
-        COMPREPLY=($(compgen -W "list get set unset path" -- "$cur"))
+        COMPREPLY=($(compgen -W "list get set unset path keys" -- "$cur"))
       elif [ "$nargs" -eq 1 ]; then
         case "$first" in
           get | set | unset)
-            COMPREPLY=($(compgen -W "$(scrubmac config list 2>/dev/null | awk 'NR > 1 && $1 ~ /^[A-Z][A-Z0-9_]*$/ { print $1 }')" -- "$cur"))
+            COMPREPLY=($(compgen -W "$(scrubmac config keys 2>/dev/null)" -- "$cur"))
             ;;
         esac
       fi

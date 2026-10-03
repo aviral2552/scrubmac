@@ -6,7 +6,7 @@ self-contained changes.
 ## Dev setup
 
 ```bash
-brew install shellcheck shfmt bats-core
+brew install shellcheck shfmt bats-core node
 git clone https://github.com/aviral2552/scrubmac.git && cd scrubmac
 make            # lint + test + docs-check
 ```
@@ -20,12 +20,14 @@ something new, fix it anyway.
 
 - bash 3.2 compatible (`/bin/bash` on macOS): no associative arrays,
   `mapfile`, `${var,,}`; CI smokes every script under `/bin/bash`
-- `set -euo pipefail`; no `eval` and no `sudo` in any command position
-  (CI tripwires catch them at a line start, after `;`/`|`/`&`/`(`/`{`/`!`,
-  in `$( )` or backticks, after `if`/`then`/`do`…, and as the argument of
-  `run`/`step`/`try`/`preview`/`report`/`exec`/`command`/`env`/`xargs`…;
-  mentions in comments and messages are fine); no `cmd | head` where the
-  exit status matters
+- `set -euo pipefail`; no `eval` and no `sudo` in any command position —
+  CI tripwires catch them at a line start, after `;`/`|`/`&`/`(`/`{`/`!`, in
+  `$( )` or backticks, after `if`/`then`/`do`/`else`… or a `case` arm, and as
+  the command of `run`/`step`/`try`/`preview`/`report`/`exec`/`command`/
+  `env`/`xargs`/`nice`… (also after their options), quoted or
+  path-qualified; that is a heuristic, so review backs it up; mentions in
+  comments and messages are fine. No `cmd | head` where the exit status
+  matters
 - every mutating command goes through `run`/`step`, advisory ones through
   `try`, read-only previews through `preview`/`report`
 - non-interactive always — cleaners get `/dev/null` as stdin; pin `-y`-style
@@ -46,7 +48,10 @@ something new, fix it anyway.
       skip-when-absent, modes/offline, and any behavior branches
       (managed-vs-standalone, version branches, daemon-down, …)
 - [ ] a `### name` section in [docs/cleaners.md](docs/cleaners.md) naming
-      every command it runs and its default (`make docs-check` enforces it)
+      every command it runs and its default (`make docs-check` checks the
+      `run`/`step`/`try`/`preview`/`report` commands, `ai_self_update`
+      self-updaters and `brew_cask_upgrade_self`; anything run through a
+      cleaner's own wrapper is on you and the reviewer)
 - [ ] self-updating tools use `ai_self_update` (package-manager awareness)
 - [ ] anything that deletes more than an obvious cache: propose it
       `# default: off`, like docker/xcode
@@ -62,12 +67,13 @@ factory; any `tests/*.bats` file shows the pattern. `tests/e2e.bats` drives
 whole user journeys through the real entry points; `tests/cron.bats` runs
 under cron-like minimal environments.
 
-Two bats rules that `make lint` enforces, because breaking them makes an
-assertion silently pass: never `! cmd` (errexit ignores it — use `refute`
-or `refute_sh`), and end a `[[ … ]]` assertion, or an `&&` chain of tests,
-with `|| false` (bash < 4.1, i.e. macOS's bash, ignores a failing `[[ ]]`
-that is not a test's last command; errexit ignores every member of an `&&`
-list but the last). CI also runs the suite under bash 5 on Linux, which
+Bats rules that `make lint` enforces (`scripts/lint-bats.sh`), because
+breaking them makes an assertion silently pass: never `! cmd` (errexit
+ignores it — use `refute` or `refute_sh`); end a `[[ … ]]` or `(( … ))`
+assertion, or an `&&` chain of tests, with `|| false` (bash < 4.1, i.e.
+macOS's bash, ignores a failing `[[ ]]` that is not a test's last command;
+errexit ignores every member of an `&&` list but the last); keep each
+`[[ … ]]` on one line. CI also runs the suite under bash 5 on Linux, which
 enforces mid-test `[[ ]]` failures; to do the same locally, put a bash ≥
 4.1 (e.g. Homebrew's `bash`) first on PATH when you run `bats tests`.
 

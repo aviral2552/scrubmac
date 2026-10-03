@@ -7,11 +7,13 @@
 
 load helpers/setup
 
+setup_file() { build_src_cache; }
+
 setup() {
   setup_sandbox
   export CMM_PREFIX="$SANDBOX/app"
   export CMM_BIN_DIR="$SANDBOX/bindir"
-  INSTALL="$REPO_ROOT/install.sh"
+  INSTALL="$(make_src_tree)/install.sh"
 }
 teardown() { teardown_sandbox; }
 
@@ -53,6 +55,14 @@ teardown() { teardown_sandbox; }
   [ ! -e "$CMM_PREFIX/path" ]
   [ ! -e "$CMM_PREFIX/cleaners/02_homebrew.sh" ]
   [ ! -e "$CMM_PREFIX/setup" ]
+}
+
+@test "the install carries install.sh's marker, ignored by git" {
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -f "$CMM_PREFIX/.scrubmac-install" ]
+  [ -d "$CMM_PREFIX/.git" ]
+  [ -z "$(git -C "$CMM_PREFIX" status --porcelain -- .scrubmac-install)" ]
 }
 
 @test "the .git metadata is preserved so 'scrubmac update' can work (F2)" {
@@ -120,6 +130,202 @@ EOF
   [ "$status" -eq 2 ]
   [[ "$output" == *"not a scrubmac install"* ]] || false
   [ -f "$HOME/.local/share/precious/data" ]
+}
+
+@test "a legacy path that is not a cleanmymac install is never moved or mirrored over" {
+  export CMM_OLD_PREFIX="$SANDBOX/oldapp"
+  mkdir -p "$CMM_OLD_PREFIX/precious"
+  printf 'data\n' >"$CMM_OLD_PREFIX/important.db"
+  printf 'notes\n' >"$CMM_OLD_PREFIX/precious/notes.txt"
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"is not a cleanmymac install — left alone"* ]] || false
+  [ -f "$CMM_OLD_PREFIX/important.db" ]
+  [ -f "$CMM_OLD_PREFIX/precious/notes.txt" ]
+  [ ! -L "$CMM_OLD_PREFIX" ]
+  [ -x "$CMM_PREFIX/bin/scrubmac" ] # the install itself went ahead
+  [ ! -e "$CMM_PREFIX/important.db" ]
+}
+
+@test "the legacy-path guard also refuses \$HOME and its parents" {
+  touch "$HOME/keep-me"
+  CMM_OLD_PREFIX="$HOME" run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/keep-me" ]
+  [ ! -L "$HOME" ]
+}
+
+@test "a dangling symlink at the install path gets a clear message" {
+  ln -s "$SANDBOX/not-there" "$CMM_PREFIX"
+  run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"is a symlink to $SANDBOX/not-there, which does not exist"* ]] || false
+}
+
+@test "refuses an install dir inside the source tree" {
+  local src="$SANDBOX/src"
+  mkdir -p "$src"
+  rsync -a --exclude=.git "$REPO_ROOT/" "$src/"
+  CMM_PREFIX="$src/inner" run "$src/install.sh"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"is inside the source tree"* ]] || false
+}
+
+@test "refuses a parent of \$HOME with the safety message (not just 'not an install')" {
+  CMM_PREFIX="$(dirname "$HOME")" run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to install into"*"parent of it"* ]] || false
+}
+
+@test "a directory whose 'install' files are symlinks is not an install" {
+  mkdir -p "$CMM_PREFIX/lib" "$CMM_PREFIX/bin" "$SANDBOX/elsewhere"
+  touch "$SANDBOX/elsewhere/f"
+  ln -s "$SANDBOX/elsewhere/f" "$CMM_PREFIX/lib/common.sh"
+  ln -s "$SANDBOX/elsewhere/f" "$CMM_PREFIX/VERSION"
+  ln -s "$SANDBOX/elsewhere/f" "$CMM_PREFIX/bin/scrubmac"
+  printf 'precious\n' >"$CMM_PREFIX/thesis.tex"
+  run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [ -f "$CMM_PREFIX/thesis.tex" ]
+}
+
+@test "a cleanmymac link that is not ours (MacPaw's CLI) is never removed" {
+  mkdir -p "$CMM_BIN_DIR" "$SANDBOX/macpaw/bin"
+  printf '#!/bin/sh\n' >"$SANDBOX/macpaw/bin/cleanmymac"
+  chmod 755 "$SANDBOX/macpaw/bin/cleanmymac"
+  ln -s "$SANDBOX/macpaw/bin/cleanmymac" "$CMM_BIN_DIR/cleanmymac"
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -L "$CMM_BIN_DIR/cleanmymac" ]
+  export PATH="$CMM_BIN_DIR:$PATH"
+  run "$REPO_ROOT/uninstall.sh"
+  [ -L "$CMM_BIN_DIR/cleanmymac" ]
+}
+
+@test "never mirrors an older copy over a newer install" {
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  echo 99.0.0 >"$CMM_PREFIX/VERSION" # the install was updated past this copy
+  run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"has scrubmac 99.0.0, newer than this copy"* ]] || false
+  [ "$(cat "$CMM_PREFIX/VERSION")" = 99.0.0 ]
+}
+
+@test "installing from a git worktree leaves its git metadata behind (no shared repository)" {
+  local src="$SANDBOX/wt"
+  mkdir -p "$src"
+  rsync -a --exclude=.git "$REPO_ROOT/" "$src/"
+  printf 'gitdir: /somewhere/main/.git/worktrees/wt\n' >"$src/.git"
+  run "$src/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"git worktree or submodule"* ]] || false
+  [ ! -e "$CMM_PREFIX/.git" ]
+  [ -x "$CMM_PREFIX/bin/scrubmac" ]
+}
+
+@test "a dangling launcher link is replaced (it is nobody's working install)" {
+  mkdir -p "$CMM_BIN_DIR"
+  ln -s "$SANDBOX/removed-keg/bin/scrubmac" "$CMM_BIN_DIR/scrubmac"
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"replaced the dangling launcher link"* ]] || false
+  [[ "$output" != *"two installs"* ]] || false
+  [ "$(readlink "$CMM_BIN_DIR/scrubmac")" = "$CMM_PREFIX/bin/scrubmac" ]
+}
+
+@test "an old cleanmymac link stays while the crontab still calls cleanmymac" {
+  run "$INSTALL"
+  ln -s "$CMM_PREFIX/bin/cleanmymac" "$CMM_BIN_DIR/cleanmymac"
+  printf '#!/bin/sh\necho "0 9 * * 1 cleanmymac -q"\n' >"$STUB_BIN/crontab"
+  chmod 755 "$STUB_BIN/crontab"
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -L "$CMM_BIN_DIR/cleanmymac" ]
+  [[ "$output" == *"kept old-name link"* ]] || false
+  printf '#!/bin/sh\nexit 1\n' >"$STUB_BIN/crontab"
+  run "$INSTALL"
+  [ ! -e "$CMM_BIN_DIR/cleanmymac" ]
+}
+
+@test "an old-name link of ours is announced once — never as MacPaw's command" {
+  run "$INSTALL"
+  mkdir -p "$HOME/.local/bin"
+  ln -s "$CMM_PREFIX/bin/cleanmymac" "$HOME/.local/bin/cleanmymac"
+  printf '#!/bin/sh\necho "0 9 * * 1 cleanmymac -q"\n' >"$STUB_BIN/crontab"
+  chmod 755 "$STUB_BIN/crontab"
+  CMM_BIN_DIR="$HOME/.local/bin" PATH="$HOME/.local/bin:$PATH" run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'kept old-name link')" -eq 1 ]
+  [[ "$output" != *MacPaw* ]] || false
+}
+
+@test "a crontab entry running MacPaw's cleanmymac does not keep our old-name link" {
+  run "$INSTALL"
+  ln -s "$CMM_PREFIX/bin/cleanmymac" "$CMM_BIN_DIR/cleanmymac"
+  printf '#!/bin/sh\necho "0 9 * * 1 /Applications/CleanMyMac.app/Contents/MacOS/cleanmymac --scan"\n' >"$STUB_BIN/crontab"
+  chmod 755 "$STUB_BIN/crontab"
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ ! -e "$CMM_BIN_DIR/cleanmymac" ]
+  [[ "$output" != *"crontab still references"* ]] || false
+}
+
+@test "never mirrors over a working clone the install path links to (that would erase it, .git and all)" {
+  local clone="$SANDBOX/devclone"
+  git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$clone"
+  printf 'notes\n' >"$clone/MY_NOTES.txt"
+  ln -s "$clone" "$CMM_PREFIX"
+  run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"which install.sh did not create"* ]] || false
+  [ -f "$clone/MY_NOTES.txt" ]
+  [ -d "$clone/.git" ]
+  [ ! -e "$clone/.scrubmac-install" ]
+}
+
+@test "never mirrors over a git checkout at the install path that holds local work" {
+  local why
+  for why in untracked dirty stash unpushed; do
+    rm -rf "$CMM_PREFIX"
+    git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$CMM_PREFIX"
+    case "$why" in
+      untracked) printf 'notes\n' >"$CMM_PREFIX/MY_NOTES.txt" ;;
+      dirty) printf '# my tweak\n' >>"$CMM_PREFIX/README.md" ;;
+      stash)
+        printf '# wip\n' >>"$CMM_PREFIX/README.md"
+        git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t stash -q
+        ;;
+      unpushed) git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m WIP ;;
+    esac
+    run "$INSTALL"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"is a git checkout with"* ]] || false
+    [ -d "$CMM_PREFIX/.git" ]
+    [ ! -e "$CMM_PREFIX/.scrubmac-install" ]
+  done
+}
+
+@test "upgrades a clean, fully pushed git install that predates the marker (a 3.0 install)" {
+  git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$CMM_PREFIX"
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -f "$CMM_PREFIX/.scrubmac-install" ]
+  [ -x "$CMM_PREFIX/bin/scrubmac" ]
+}
+
+@test "an exported CDPATH never confuses where install.sh and scrubmac find themselves" {
+  local src
+  src="$(make_src_tree)"
+  mkdir -p "$SANDBOX/cdp/src" "$SANDBOX/cdp/bin" # decoys a CDPATH search would pick
+  cd "$SANDBOX"
+  CDPATH="$SANDBOX/cdp" run bash src/install.sh
+  [ "$status" -eq 0 ]
+  [ -x "$CMM_PREFIX/bin/scrubmac" ]
+  cd "$src"
+  CDPATH="$SANDBOX/cdp" run bash bin/scrubmac version
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scrubmac $(cat "$src/VERSION")"* ]] || false
 }
 
 @test "installs through a symlinked parent dir into the real location" {

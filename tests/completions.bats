@@ -48,7 +48,7 @@ completions() {
 }
 
 @test "bash: config offers subcommands first, keys only after get/set/unset" {
-  [ "$(completions scrubmac config '')" = "get list path set unset" ]
+  [ "$(completions scrubmac config '')" = "get keys list path set unset" ]
   [[ " $(completions scrubmac config set '') " == *" COOLDOWN_DAYS "* ]] || false
   [[ " $(completions scrubmac config get T) " == *" TIMEOUT "* ]] || false
   [ -z "$(completions scrubmac config list '')" ]
@@ -59,7 +59,17 @@ completions() {
   [ "$(completions scrubmac enable '')" = "alpha beta" ]
   [ "$(completions scrubmac run a)" = "alpha" ]
   [ "$(completions scrubmac --skip '')" = "alpha beta" ]
-  [ "$(completions scrubmac --skip alpha '')" != "" ]
+  [[ " $(completions scrubmac --skip alpha '') " == *" run "* ]] || false # a command may follow
+  [[ " $(completions scrubmac --skip alpha '') " == *" beta "* ]] || false
+}
+
+@test "completion's key list has no side effects (no config-dir migration)" {
+  mkdir -p "$XDG_CONFIG_HOME/cleanmymac"
+  printf 'MY_KEY=1\n' >"$XDG_CONFIG_HOME/cleanmymac/config"
+  [[ " $(completions scrubmac config get '') " == *" TIMEOUT "* ]] || false
+  [ -d "$XDG_CONFIG_HOME/cleanmymac" ]
+  [ ! -L "$XDG_CONFIG_HOME/cleanmymac" ]
+  [ ! -e "$XDG_CONFIG_HOME/scrubmac" ]
 }
 
 @test "zsh completion parses" {

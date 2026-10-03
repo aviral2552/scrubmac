@@ -181,6 +181,19 @@ EOF
   [[ "$output" == *"reload it with: scrubmac schedule daily 07:05"* ]] || false
 }
 
+@test "a schedule saved as a binary plist reads back the same (status and repair hint)" {
+  command -v plutil >/dev/null || skip "plutil (macOS) converts the plist"
+  run "$CMM" schedule weekly fri 18:30
+  [ "$status" -eq 0 ]
+  plutil -convert binary1 "$PLIST"
+  run "$CMM" schedule status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"weekly on Friday at 18:30"* ]] || false
+  rm -f "$SANDBOX/loaded" # unloaded: status offers the command that recreates it
+  run "$CMM" schedule status
+  [[ "$output" == *"scrubmac schedule weekly fri 18:30"* ]] || false
+}
+
 @test "schedule off unloads and removes the agent; idempotent" {
   run "$CMM" schedule weekly
   : >"$CALL_LOG"

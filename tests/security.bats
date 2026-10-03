@@ -117,18 +117,24 @@ EOF
 }
 
 @test "S1: every entry point carries the root-refusal guard" {
-  grep -q 'EUID' "$REPO_ROOT/bin/scrubmac"
-  grep -q 'must not run as root' "$REPO_ROOT/bin/scrubmac"
-  grep -q 'must not run as root' "$REPO_ROOT/install.sh"
-  grep -q 'must not run as root' "$REPO_ROOT/uninstall.sh"
+  local f
+  for f in bin/scrubmac install.sh uninstall.sh; do
+    # (the exact test, so a weakened comparison is caught — running the
+    # scripts as root is not something a test suite should do)
+    grep -Fqx 'if [ "${EUID:-$(id -u)}" -eq 0 ]; then' "$REPO_ROOT/$f"
+    grep -q 'must not run as root' "$REPO_ROOT/$f"
+  done
 }
 
-@test "S1: the run lock never lives in a shared world-writable directory" {
-  make_cleaner 10-peek.sh 'echo "LOCK=$(readlink "$HOME/.local/state/scrubmac/run.lock")"'
+@test "S1: the run lock lives in your state dir; only the transitional 2.x lock is in TMPDIR, and only as your own dir" {
+  make_cleaner 10-peek.sh 'echo "LOCK=$(readlink "$HOME/.local/state/scrubmac/run.lock")"' \
+    'ls -ld "$TMPDIR/cleanmymac.$(id -u).lock"'
   run "$CMM"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"LOCK="[0-9]* ]] || false
-  [ ! -e "/tmp/scrubmac.$(id -u).lock" ] || ! [ -O "/tmp/scrubmac.$(id -u).lock" ]
+  [[ "$output" =~ LOCK=[0-9]+: ]] || false
+  [[ "$output" == *"$(id -un)"* ]] || false # the 2.x-compatible lock dir is ours
+  [ -z "$(find "$TMPDIR" -maxdepth 1 -name 'scrubmac*.lock' 2>/dev/null)" ]
+  [ ! -e "$TMPDIR/cleanmymac.$(id -u).lock" ] # released after the run
 }
 
 @test "S5: a cleaner's stdin is /dev/null — it can never read or answer prompts" {
@@ -138,18 +144,33 @@ EOF
   [[ "$output" != *secret-typed-input* ]] || false
 }
 
-# Tripwires: eval/sudo in command position — at the start of a command,
-# after ; | & ( { ! or a backtick, inside $( ), after a keyword (if then do
-# …), or as the argument of a helper or wrapper (run step try preview report
-# exec command env xargs nohup nice time). Mentions in comments and messages
-# are fine; invocations are not.
+# Tripwires: eval/sudo in command position — at a line start, after
+# ; | & ( { ! or a backtick, inside $( ), after a keyword (if then do else
+# elif while until) or a case arm's ")", or as the command of a helper or
+# wrapper (run step try preview report exec command builtin env xargs nohup
+# nice time coproc) even after its options or VAR=value assignments — quoted,
+# backslash-escaped or path-qualified ("sudo", \sudo, /usr/bin/sudo) too. A heuristic backed by review:
+# mentions in comments and messages are fine; invocations are not.
 cmd_position_hits() { # cmd_position_hits WORD [FILE…]
   local word="$1"
   shift
   [ "$#" -gt 0 ] || set -- "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/cleaners" \
     "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh"
-  { grep -rnE "(^|[;|&({\`!]|\\\$\(|(^|[[:space:]])(run|try|step|preview|report|then|do|if|elif|while|until|exec|command|builtin|env|xargs|nohup|nice|time))[[:space:]]*$word([[:space:]]|\$)" "$@" || true; } |
-    grep -vE '^([^:]+:)?[0-9]+:[[:space:]]*#' || true
+  local n
+  n="$(find "$@" -type f \( -name '*.sh' -o -name 'scrubmac' -o -name 'cleanmymac' -o -name '*.bash' \) | wc -l)"
+  [ "$n" -gt 0 ] || {
+    echo "tripwire scanned no files"
+    return 0
+  }
+  find "$@" -type f \( -name '*.sh' -o -name 'scrubmac' -o -name 'cleanmymac' -o -name '*.bash' \) -print0 |
+    xargs -0 perl -ne '
+      BEGIN { $w = shift @ARGV }
+      next if /^\s*#/;
+      my $pre  = qr/(?:^|[;&|({!`]|\$\(|\b(?:if|then|do|else|elif|while|until|coproc)\b|\)\s)/;
+      my $wrap = qr/\b(?:run|step|try|preview|report|exec|command|builtin|env|xargs|nohup|nice|time|coproc)\b(?:\s+(?:-a\s+\S+|-\S*|\w+=\S*|\d+))*/;
+      print "$ARGV:$.: $_" if /(?:$pre|$wrap)\s*\\?["\x27]?(?:[\w.\/-]*\/)?$w["\x27]?(?=\s|$|[;&|)])/;
+      close ARGV if eof;
+    ' "$word"
 }
 
 @test "no eval invoked anywhere in product code" {
@@ -161,13 +182,30 @@ cmd_position_hits() { # cmd_position_hits WORD [FILE…]
 }
 
 @test "the tripwires catch the forms that used to slip past them" {
-  local f="$SANDBOX/mutant.sh"
-  printf 'step sudo -n mas upgrade\n' >"$f"
-  [ -n "$(cmd_position_hits sudo "$f")" ]
+  local f="$SANDBOX/mutant.sh" form
+  while IFS= read -r form; do
+    printf '%s\n' "$form" >"$f"
+    [ -n "$(cmd_position_hits sudo "$f")" ] || {
+      echo "not caught: $form"
+      false
+    }
+  done <<'EOF'
+step sudo -n mas upgrade
+x=`sudo id`
+if true; then :; else sudo id; fi
+case x in x) sudo id ;; esac
+env FOO=1 sudo id
+nice -n 5 sudo id
+find . -print0 | xargs -0 sudo rm
+run "sudo" id
+step /usr/bin/sudo id
+( sudo id )
+\sudo id
+exec -a x sudo id
+coproc sudo id
+EOF
   printf 'if eval "true"; then :; fi\n' >"$f"
   [ -n "$(cmd_position_hits eval "$f")" ]
-  printf 'x=`sudo id`\n' >"$f"
-  [ -n "$(cmd_position_hits sudo "$f")" ]
-  printf 'note "never uses sudo, ever"\n# sudo in a comment\n' >"$f"
+  printf 'note "never uses sudo, ever"\n# sudo in a comment\necho "  sudo rm $link"\n' >"$f"
   [ -z "$(cmd_position_hits sudo "$f")" ]
 }

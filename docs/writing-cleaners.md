@@ -76,7 +76,7 @@ File names may use only `A-Za-z0-9._+@-`.
 | `have CMD` | silent presence test (treats Apple's inert developer-tool shims as absent) |
 | `skip_unless CMD` / `skip MSG` | exit 75 with a note |
 | `run` / `step` / `try CMD…` | announce + execute (dry-run aware) — see the contract; a `run`/`step` failure is named in the summary, and a tool's exit 75 counts as a failure, not a skip |
-| `preview` / `report CMD…` | read-only commands for `--dry-run` / `status` |
+| `preview` / `report [--ok=N] CMD…` | read-only commands for `--dry-run` / `status`; a failure only warns, and `--ok=N` makes exit N an answer instead (e.g. `npm outdated` exits 1 when something is outdated) |
 | `cache_dir DIR…` / `cache_dir_cmd CMD…` | declare cache dirs (status sizes, `--measure`) |
 | `cmm_scratch_dir` | a private temp directory for this cleaner; the dispatcher removes it after the run, even after a TIMEOUT (standalone runs get a `mktemp -d` dir to clean up yourself) |
 | `updating` / `cleaning` | mode (and offline) predicates |
@@ -117,7 +117,10 @@ PRs welcome. A built-in cleaner additionally needs:
   `[[ … ]]`: bash 3.2 would otherwise ignore a failing one — `make lint`
   checks)
 - a `### name` section in [docs/cleaners.md](cleaners.md) naming every
-  command it runs and its default — `make docs-check` fails otherwise
+  command it runs and its default — `make docs-check` fails when a
+  `run`/`step`/`try`/`preview`/`report` command, an `ai_self_update`
+  self-updater or a `brew_cask_upgrade_self` upgrade is not mentioned
+  (commands run through a cleaner's own wrapper are checked by review)
 - the commands and flags checked against the tool's official documentation
   (say which in the PR)
 - `make lint test docs-check` green

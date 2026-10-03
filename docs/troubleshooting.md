@@ -24,9 +24,11 @@ your PATH into a launchd agent (and runs missed schedules after sleep).
 
 ## "TIMEOUT" in the summary
 
-A cleaner ran longer than `TIMEOUT` (default 3600 seconds) and was stopped —
-together with every process it started (`TERM`, then `KILL` five seconds
-later for anything that ignored it). The rest of the run continued. If a
+A cleaner ran longer than `TIMEOUT` (default 3600 seconds) and was stopped
+together with the processes it started (`TERM`, then `KILL` up to five
+seconds later for anything that ignored it; a process that detached into a
+session of its own, as daemons do, is out of reach). The rest of the run
+continued. If a
 tool legitimately needs longer (a huge cask download, a from-source build),
 raise it: `scrubmac config set TIMEOUT 7200`, or `CMM_TIMEOUT=0 scrubmac`
 for one unbounded run.
@@ -66,7 +68,7 @@ accept that in scheduled runs. See
 ## "App Store updates pending — run 'mas update' yourself"
 
 mas installs App Store updates as root (it re-runs itself through `sudo`),
-and scrubmac never escalates, so it only reports them.
+and scrubmac never runs `sudo` itself, so it only reports them.
 
 ## "why did my cleaner say 'X is Homebrew-managed / npm-managed'?"
 
@@ -89,11 +91,12 @@ for one run: `CMM_COOLDOWN_DAYS=0 scrubmac`. Details:
 
 ## "uv tool(s) are pinned to a past --exclude-newer date"
 
-uv stores `--exclude-newer` in each tool's receipt. Releases of scrubmac
-before 3.1 passed an absolute date, which keeps plain upgrades of those
-tools frozen at that date. With uv ≥ 0.11.24,
-`uv tool upgrade --all --exclude-newer false` releases them; or reinstall
-the tools (`uv tool install --force <tool>`).
+uv stores `--exclude-newer` in each tool's receipt. scrubmac before 3.1 —
+and 3.1 with a uv older than 0.11.4, which cannot store a relative span —
+passed an absolute date, which keeps plain upgrades of those tools frozen at
+that date. With uv ≥ 0.11.24, `uv tool upgrade --all --exclude-newer false`
+releases them (scrubmac does this itself when the cooldown is off); or
+reinstall the tools (`uv tool install --force <tool>`).
 
 ## "offline — updates skipped"
 
@@ -143,12 +146,15 @@ purpose — the log (`scrubmac last`) says why. After moving the install or
 changing your PATH, re-run your `scrubmac schedule` command. If cron also
 runs scrubmac, `doctor` warns that you are scheduled twice.
 
-## "ignoring line N of …/config"
+## "ignoring line N of …/config" / "… is not a setting — did you mean …?"
 
 That line does not match the strict `KEY=value` grammar (no spaces around
 `=`, no quotes, no trailing comments; values only `A-Za-z0-9._/-`), so it is
 ignored — and the warning says so instead of letting a typo pass silently.
-`scrubmac config set KEY VALUE` always writes a valid line.
+The same goes for a key one edit away from a built-in setting
+(`APP_UPDATE=never`): no setting reads it. Keys of your own cleaners that
+are not near a built-in name pass quietly. `scrubmac config set KEY VALUE`
+always writes a valid line.
 
 ## "nothing to run"
 
@@ -157,8 +163,10 @@ each cleaner's state.
 
 ## Why no sudo? Why no "deep clean"? Why is my Trash still full?
 
-Doctrine: scrubmac never escalates, never deletes user data, never fights
-SIP. macOS maintains itself; most "deep cleaning" of system caches is
+Doctrine: scrubmac never runs `sudo` itself (the one exception: Homebrew
+asks for your password to upgrade a pkg-based cask, in a run you start at a
+terminal — `APP_UPDATES=never` rules it out), never deletes user data, never
+fights SIP. macOS maintains itself; most "deep cleaning" of system caches is
 regression-prone theater. The old 1.x "macOS core cleaner" shipped fully
 commented out for exactly this reason — 2.x deleted it and wrote the
 reasoning down: [security.md](security.md#what-scrubmac-will-never-do).
@@ -180,7 +188,11 @@ cache clean.
 `scrubmac update` only fast-forwards (S3) — you edited the installed copy,
 or the remote was force-pushed. A newer release it cannot take this way is
 skipped with a warning (and an older one it can take is used instead); if
-none can be taken, the update is refused. Inspect with `git -C ~/.scrubmac
+none can be taken, the update is refused. The same goes for a release tag
+that was re-pointed upstream after your copy first saw it, or whose tag
+object names a different release — published release tags never move. If
+the maintainer did fix a tag on purpose, the warning shows the one command
+that accepts it. Inspect with `git -C ~/.scrubmac
 status`, stash/reset your changes deliberately, and run update again. Local
 edits belong in `~/.config/scrubmac/cleaners.d/` instead — they survive
 updates. A failed fetch (network, unreachable remote) and a detached HEAD
@@ -199,9 +211,48 @@ release tags) are never signature-checked; scrubmac says so.
 
 uninstall.sh deletes a directory only when it holds a scrubmac install, and
 never `/`, your home or a parent of it — compared as canonical paths, so
-`$HOME/.` or a symlinked parent cannot trick it. When it refuses, it exits
-1 and names the directory; delete it yourself if it really is yours to
-delete.
+`$HOME/.` or a symlinked parent cannot trick it. It checks the install dir
+before it touches anything, so a mistyped `CMM_PREFIX` costs nothing (with
+`--purge`, a `CMM_PREFIX` that names nothing at all is refused before your
+configuration is touched). When
+the install path is a symlink, the link goes, and its target too if
+install.sh created it (a link to a dev clone is kept, with a note). When it
+refuses, it exits 1 and names the directory; delete it yourself if it really
+is yours to delete.
+
+## install.sh "… which install.sh did not create" / "is a git checkout with …"
+
+install.sh makes the install dir an exact mirror of the copy you run it
+from, deleting whatever is not in it. It therefore refuses to mirror over a
+copy it did not create itself (no `.scrubmac-install` marker) when that copy
+may be someone's working clone:
+
+- the install path is a symlink to it (the dev-clone setup): run that
+  clone's own install.sh, which refreshes the links in place, or remove the
+  link first;
+- it is a git checkout with uncommitted or untracked files, a stash, or
+  commits that are on no remote: commit and push, or move it away, first.
+
+A clean git install from before 3.1 (everything pushed, nothing edited) is
+upgraded as usual.
+
+## "cannot read …/disabled — refusing to guess"
+
+Your `enabled` or `disabled` file exists but cannot be read — its
+permissions, or it is a dotfiles symlink into a folder this process may not
+open (a launchd job cannot read `~/Documents` or an unmounted volume).
+Running with the defaults instead would silently re-enable the cleaners you
+turned off, so runs and `scrubmac list` stop with exit 2 until it is
+readable again (fix the permissions or the link, or remove the file to go
+back to the defaults). Running cleaners by name still works: it does not
+consult those files.
+
+## install.sh "newer than this copy"
+
+The install at `~/.scrubmac` was updated past the copy whose install.sh you
+ran (a stale clone, or the old `~/.cleanmymac`): mirroring it would
+downgrade you. Run the newer copy's install.sh, or remove `~/.scrubmac`
+first if you really mean to go back.
 
 ## (historical) the cleanmymac name conflict — resolved by the rename
 

@@ -7,12 +7,18 @@
 #      and every such section has a cleaner;
 #   2. every built-in cleaner carries valid gate/group/default/summary
 #      headers, and its section states the same default;
-#   3. every command a cleaner runs through run/try/step/preview/report
-#      appears (up to its first variable or quote) in that cleaner's section;
-#   4. every built-in setting is documented in docs/configuration.md and in
-#      the man page;
-#   5. every subcommand is documented in README.md and in the man page.
+#   3. every command a cleaner runs through run/try/step/preview/report/
+#      cache_dir_cmd — at a line start or after ; && || then do else — and
+#      every self-updater it hands to ai_self_update, appears (up to its
+#      first variable or quote) in that cleaner's section, as does "brew
+#      upgrade --cask" for brew_cask_upgrade_self (cleaner-specific wrappers
+#      are left to review);
+#   4. every built-in setting is documented in docs/configuration.md and has
+#      a ".B KEY" entry in the man page, both stating its current default;
+#   5. every subcommand bin/scrubmac dispatches is documented in README.md
+#      and in the man page.
 set -euo pipefail
+unset CDPATH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOC="$ROOT/docs/cleaners.md"
@@ -40,6 +46,26 @@ section() {
     on && /^##/ { exit }
     on { print }
   ' "$DOC"
+}
+
+# helper_commands FILE — the commands FILE runs through the helper
+# vocabulary, one per line, cut at the first quote, variable or backslash.
+# Quoted strings are masked first, so prose in messages never matches.
+helper_commands() {
+  perl -ne '
+    next if /^\s*#/;
+    chomp(my $l = $_);
+    $l =~ s/\s+#.*$//;
+    (my $m = $l) =~ s/"(?:[^"\\]|\\.)*"|\x27[^\x27]*\x27/\x01/g;
+    my @found;
+    while ($m =~ /(?:^|[;&|]|(?:^|[;&|])\s*(?:then|do|else))\s*(?:run|try|step|cache_dir_cmd|(?:preview|report)(?:\s+--ok=\d+)?)\s+([^;&|\x01]*)/g) { push @found, $1 }
+    while ($m =~ /(?:^|[;&|]|(?:^|[;&|])\s*(?:then|do|else))\s*ai_self_update\s+\S+\s+([^;&|\x01]*)/g) { push @found, $1 }
+    for my $c (@found) {
+      $c =~ s/[\$\\].*$//; $c =~ s/\s+$//; $c =~ s/\s+/ /g;
+      print "$c\n" if $c =~ m{^[A-Za-z0-9_./]};
+    }
+    print "brew upgrade --cask\n" if $m =~ /(?:^|[;&|]|then|do|else|\|\|)\s*brew_cask_upgrade_self\s/;
+  ' "$1"
 }
 
 # 1 + 2 + 3: per-cleaner checks
@@ -71,8 +97,7 @@ for f in "$ROOT"/cleaners/*.sh; do
       problem "docs/cleaners.md '### $name' never mentions \`$cmd\` (run by $b)"
     fi
   done <<EOF
-$(sed -n -E 's/^[[:space:]]*(run|try|step|preview|report)[[:space:]]+([A-Za-z0-9_./][^[:space:]]*.*)$/\2/p' "$f" |
-    sed -E 's/[[:space:]]+#.*$//; s/["$'"'"'\\].*$//; s/[[:space:]]+$//')
+$(helper_commands "$f")
 EOF
 done
 
@@ -93,13 +118,19 @@ keys="$(sed -n '/^CMM_SETTINGS=/,/^[^A-Z]/p' "$ROOT/lib/dispatch.sh" |
   sed -E "s/^CMM_SETTINGS='//" | awk -F '|' 'NF >= 4 { print $1 }')"
 [ -n "$keys" ] || problem "could not read the settings registry from lib/dispatch.sh"
 for key in $keys; do
-  grep -Fq "\`$key\`" "$CONF" || problem "setting $key is not documented in docs/configuration.md"
-  grep -Fq "$key" "$MAN" || problem "setting $key is not documented in man/scrubmac.1"
+  def="$(sed -n "s/^CMM_SETTINGS='//; s/^$key|\([^|]*\)|.*/\1/p" "$ROOT/lib/dispatch.sh" | head -n 1)"
+  grep -Fq "| \`$key\` | \`$def\` |" "$CONF" ||
+    problem "setting $key is not in docs/configuration.md's table with its default ($def)"
+  grep -Fxq ".B $key" "$MAN" || problem "setting $key has no '.B $key' entry in man/scrubmac.1"
+  awk -v k=".B $key" -v d="(default $def)" '$0 == k { f = 1; next } f { if (index($0, d)) ok = 1; if (/^\.(TP|SH)/) exit } END { exit !ok }' "$MAN" ||
+    problem "man/scrubmac.1's '.B $key' entry does not say '(default $def)'"
 done
 
-# 5: subcommands
-for cmd in list status doctor configure enable disable config schedule last update version help; do
-  grep -Eq "scrubmac $cmd" "$README" || problem "README.md never shows 'scrubmac $cmd'"
+# 5: subcommands — the arms of bin/scrubmac's final dispatch
+cmds="$(awk '/^case "\$CMD" in$/ { on = 1; next } on && /^esac/ { exit } on && /^  [a-z][a-z-]*\)/ { sub(/^  /, ""); sub(/\).*/, ""); print }' "$ROOT/bin/scrubmac")"
+[ -n "$cmds" ] || problem "could not read the subcommands from bin/scrubmac"
+for cmd in $cmds; do
+  grep -Eq "scrubmac $cmd([^a-z-]|\$)" "$README" || problem "README.md never shows 'scrubmac $cmd'"
   awk -v c="$cmd" '/^\.B / && $2 == c { f = 1 } END { exit !f }' "$MAN" ||
     problem "man/scrubmac.1 has no '.B $cmd' entry"
 done

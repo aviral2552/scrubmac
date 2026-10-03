@@ -164,6 +164,15 @@ EOF
   refute grep -q sometool-updater "$CALL_LOG"
 }
 
+@test "cmm_canon_path never returns a leading // (a symlink to /)" {
+  ln -s / "$SANDBOX/rootlink"
+  run lib "cmm_canon_path '$SANDBOX/rootlink/usr'"
+  [ "$status" -eq 0 ]
+  [ "$output" = /usr ]
+  run lib "cmm_unsafe_target \"\$(cmm_canon_parent '$SANDBOX/rootlink$HOME')\" && echo UNSAFE"
+  [[ "$output" == *UNSAFE* ]] || false
+}
+
 @test "cmm_scratch_dir: the dispatcher's per-cleaner dir, or a fresh one when standalone" {
   mkdir -p "$SANDBOX/given"
   run lib "CMM_SCRATCH_DIR='$SANDBOX/given' cmm_scratch_dir"
@@ -257,6 +266,32 @@ EOF
   [ ! -e "$SANDBOX/made" ]
 }
 
+@test "cmm_launcher_dirs: the given dirs, then CMM_LINK_DIRS, each once, empty ones dropped" {
+  [ "$(CMM_LINK_DIRS="/a:/b::/a" lib 'cmm_launcher_dirs "" /b /c' | tr '\n' ' ')" = "/b /c /a " ]
+  [ -z "$(CMM_LINK_DIRS='' lib 'cmm_link_dirs')" ]
+  [ "$(env -u CMM_LINK_DIRS HOME=/h bash -c ". '$CMM_LIB_PATH'; cmm_link_dirs" | tr '\n' ' ')" = "/usr/local/bin /h/.local/bin " ]
+}
+
+@test "cmm_old_name_ours: a cleanmymac that leads into the given dirs, not MacPaw's" {
+  mkdir -p "$SANDBOX/inst/bin" "$SANDBOX/links"
+  printf '#!/bin/sh\n' >"$SANDBOX/inst/bin/cleanmymac"
+  ln -s "$SANDBOX/inst/bin/cleanmymac" "$SANDBOX/links/cleanmymac"
+  lib "cmm_old_name_ours '$SANDBOX/inst/bin/cleanmymac' '$SANDBOX/inst'"
+  lib "cmm_old_name_ours '$SANDBOX/links/cleanmymac' '$SANDBOX/inst'"
+  refute lib "cmm_old_name_ours /Applications/CleanMyMac.app/Contents/MacOS/cleanmymac '$SANDBOX/inst'"
+  PATH="$SANDBOX/links:$PATH" lib "cmm_old_name_ours cleanmymac '$SANDBOX/inst'"
+  lib "cmm_old_name_ours cleanmymac '$SANDBOX/inst'" # not on PATH: the old docs' bare name
+}
+
+@test "config_get reads through CRLF line ends and a byte-order mark" {
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  printf '\357\273\277TIMEOUT=600\r\nQUIET=1\r\nBAD=a b\r\n' >"$XDG_CONFIG_HOME/scrubmac/config"
+  [ "$(lib 'config_get TIMEOUT x')" = 600 ]
+  [ "$(lib 'config_get QUIET x')" = 1 ]
+  [ "$(lib 'config_get BAD dflt')" = dflt ]
+  [ "$(lib 'config_get MISSING dflt')" = dflt ]
+}
+
 # ---------- modes, previews, reports ----------
 
 @test "status mode: run/try/step are silent no-ops; report runs" {
@@ -277,6 +312,23 @@ EOF
   run lib "export CMM_DRY_RUN=1; preview false; echo SURVIVED"
   [ "$status" -eq 0 ]
   [[ "$output" == *SURVIVED* ]] || false
+}
+
+@test "preview/report --ok=N: exit N is an answer (npm outdated exits 1), any other failure still warns" {
+  run lib "export CMM_MODE=status; report --ok=1 sh -c 'echo LISTED; exit 1'; echo SURVIVED"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"~ sh -c"* ]] || false
+  [[ "$output" != *"--ok"* ]] || false
+  [[ "$output" == *LISTED*SURVIVED* ]] || false
+  [[ "$output" != *"exited"* ]] || false
+  run lib "export CMM_MODE=status; report --ok=1 sh -c 'exit 2'"
+  [[ "$output" == *"report 'sh' exited 2 (continuing)"* ]] || false
+  run lib "export CMM_MODE=status; report sh -c 'exit 1'"
+  [[ "$output" == *"report 'sh' exited 1 (continuing)"* ]] || false
+  run lib "export CMM_DRY_RUN=1; preview --ok=1 sh -c 'exit 1'; preview --ok=1 sh -c 'exit 3'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"preview 'sh' exited 3 (continuing)"* ]] || false
+  [[ "$output" != *"exited 1"* ]] || false
 }
 
 @test "updating/cleaning follow CMM_MODE; offline explains itself once" {
@@ -487,6 +539,23 @@ EOF
 # ---------- dispatcher internals (lib/dispatch.sh) ----------
 
 dlib() { bash -c ". '$CMM_LIB_PATH'; . '$REPO_ROOT/lib/dispatch.sh'; $1"; }
+
+@test "the watchdog's deadline leaves a cleaner that already finished alone (no TIMEOUT marker)" {
+  run dlib "cmm__watchdog_fire $(dead_pid) 0 '$SANDBOX/marker'"
+  [ "$status" -eq 0 ]
+  [ ! -e "$SANDBOX/marker" ]
+}
+
+@test "the watchdog's deadline marks a cleaner that is still running, and stops it" {
+  hang_child
+  "$SANDBOX/hangchild" >/dev/null 2>&1 3>&- &
+  local pid=$!
+  wait_for test -e "$SANDBOX/hangchild.ready"
+  CMM__KILL_GRACE=1 run dlib "cmm__watchdog_fire $pid 0 '$SANDBOX/marker'"
+  [ "$status" -eq 0 ]
+  [ -e "$SANDBOX/marker" ]
+  no_hang_child
+}
 
 @test "cleaner_name strips only an all-digit NN- prefix and the .sh suffix" {
   [ "$(dlib 'cleaner_name /x/10-homebrew.sh')" = homebrew ]

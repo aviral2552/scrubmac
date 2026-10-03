@@ -16,12 +16,14 @@ cmm_schedule_plist() {
   printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$CMM_SCHEDULE_LABEL"
 }
 
+# cmm__xml_escape TEXT — the replacements are quoted and the assignments
+# unquoted: the one form whose "&" is literal on bash 3.2 and 5.2 alike.
 cmm__xml_escape() {
   local s="$1"
-  s="${s//&/&amp;}"
-  s="${s//</&lt;}"
-  s="${s//>/&gt;}"
-  s="${s//\"/&quot;}"
+  s=${s//&/"&amp;"}
+  s=${s//</"&lt;"}
+  s=${s//>/"&gt;"}
+  s=${s//\"/"&quot;"}
   printf '%s' "$s"
 }
 
@@ -88,19 +90,26 @@ cmm__parse_time() {
 
 cmm__launchd_domain() { printf 'gui/%s\n' "$(id -u)"; }
 
-cmm__plist_value() { # cmm__plist_value FILE KEY — the integer/string after <key>KEY</key>
-  awk -v k="<key>$2</key>" '
-    index($0, k) { found = 1; next }
-    found { gsub(/^[ \t]*<(integer|string)>|<\/(integer|string)>[ \t]*$/, ""); print; exit }
-  ' "$1" 2>/dev/null
+# cmm__plist_value FILE KEY — the first integer or string after <key>KEY</key>
+# (on the same line or a later one), XML-unescaped. KEY=ProgramArguments
+# gives the program path. A plist saved in binary form is read through
+# plutil.
+cmm__plist_value() {
+  cmm_plist_xml "$1" | awk -v k="<key>$2</key>" '
+    { buf = buf $0 "\n" }
+    END {
+      i = index(buf, k)
+      if (!i) exit
+      rest = substr(buf, i + length(k))
+      if (!match(rest, /<(integer|string)>[^<]*<\/(integer|string)>/)) exit
+      v = substr(rest, RSTART, RLENGTH)
+      gsub(/<[^>]*>/, "", v)
+      gsub(/&lt;/, "<", v); gsub(/&gt;/, ">", v); gsub(/&quot;/, "\"", v); gsub(/&amp;/, "\\&", v)
+      print v
+    }' 2>/dev/null
 }
 
-cmm__plist_program() { # first ProgramArguments entry
-  awk '
-    /<key>ProgramArguments<\/key>/ { found = 1; next }
-    found && /<string>/ { s = $0; sub(/^[ \t]*<string>/, "", s); sub(/<\/string>[ \t]*$/, "", s); print s; exit }
-  ' "$1" 2>/dev/null
-}
+cmm__plist_program() { cmm__plist_value "$1" ProgramArguments; }
 
 cmm_schedule_describe() { # one line describing the installed schedule
   local plist hour minute wd

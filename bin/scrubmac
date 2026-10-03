@@ -9,6 +9,7 @@
 # when one fails. See `scrubmac help`.
 set -euo pipefail
 export LC_ALL=C
+unset CDPATH # (cd would search it, and print where it went)
 
 # ---------- locate ourselves (through symlinks; no state files) ----------
 CMM_SELF="${BASH_SOURCE[0]}"
@@ -59,7 +60,7 @@ COMMANDS
   configure                (re)run the setup wizard
   enable <cleaner ...>     turn cleaners on
   disable <cleaner ...>    turn cleaners off
-  config [get|set|unset|path] [KEY [VALUE]]
+  config [get|set|unset|path|keys] [KEY [VALUE]]
                            show or change settings (no args: list them all)
   schedule [daily|weekly|status|off] [DAY] [HH:MM]
                            run scrubmac automatically via launchd
@@ -69,7 +70,7 @@ COMMANDS
   help                     show this page
 
 OPTIONS
-  -n, --dry-run            print every command; run nothing that changes state
+  -n, --dry-run            print every command; change none of your tools
   -q, --quiet              hide cleaner output unless the cleaner fails
       --update-only        only update tools (skip cache cleanup)
       --clean-only         only clean caches (change no versions)
@@ -89,7 +90,9 @@ Cleaners live in:
 EXIT STATUS
   0 all cleaners succeeded or were skipped; 1 at least one cleaner failed,
   timed out, or was refused (also: 'config get' of an unknown key, 'last
-  --json' with no run yet); 2 usage or environment error; 130 interrupted.
+  --json' with no run yet, an 'update' that failed or was refused, a
+  'schedule' launchd could not load); 2 usage or environment error; 130
+  interrupted.
 
 PROJECT
   https://github.com/aviral2552/scrubmac
@@ -230,11 +233,13 @@ if [ "$CMM_JSON" = 1 ]; then
   exec 3>&1 1>&2
 fi
 case "$CMD:${ARGS[*]:-}" in
-  list:--names) ;;             # shell completion: no side effects
-  *) cmm_migrate_config_dir ;; # 2026 rename: adopt ~/.config/cleanmymac if present
-esac
-case "$CMD" in
-  run | status | config | doctor | configure) cmm_config_lint ;;
+  list:--names | config:keys) ;; # shell completion: no side effects
+  *)
+    cmm_migrate_config_dir # 2026 rename: adopt ~/.config/cleanmymac if present
+    case "$CMD" in
+      run | status | config | doctor | configure) cmm_config_lint ;;
+    esac
+    ;;
 esac
 cmm_settings_export
 cmm_init_colors
@@ -282,6 +287,12 @@ on_exit() {
   # Preserve the real exit status: a failing cleanup command in an EXIT trap
   # would otherwise become the script's status.
   local rc=$?
+  # Output may be gone (terminal closed, `| head` exited): ignore SIGPIPE,
+  # and flush what bash 3.2 still buffers from a failed write into
+  # /dev/null — left there, it would leak into the next $(…) below.
+  trap '' PIPE
+  exec >/dev/null 2>&1
+  echo
   cmm_locks_release
   if [ -n "$CMM_TMP" ]; then
     rm -rf "$CMM_TMP"
@@ -289,6 +300,9 @@ on_exit() {
   exit "$rc"
 }
 trap on_exit EXIT
+# Interrupted outside the run loop's own handler (cmm__on_int): the
+# documented status, by way of on_exit (locks released, scratch removed).
+trap 'exit 130' INT TERM HUP
 
 # ---------- subcommands ----------
 write_default_config() {
@@ -334,12 +348,19 @@ first_run_offer() {
   fi
 }
 
-# cmm__skipped_run REASON — record a scheduled run that chose not to run.
+# cmm__skipped_run REASON — record a scheduled run that chose not to run
+# (with --json: a run record with no cleaners and "skipped": REASON).
 cmm__skipped_run() {
   note "scheduled run skipped: $1"
   cmm__open_log
-  cmm_log "scrubmac $CMM_VERSION — $(cmm_now_iso) — scheduled run skipped: $1"
+  CMM__RUN_STARTED="$(cmm_now_iso)"
+  CMM__RUN_START_SECS=$SECONDS
+  cmm_log "scrubmac $CMM_VERSION — $CMM__RUN_STARTED — scheduled run skipped: $1"
   cmm__rotate_logs
+  if [ "$CMM_JSON" = 1 ]; then
+    CMM__SKIPPED="$1"
+    cmm__json_run 0 '' >&3
+  fi
 }
 
 cmd_run() {
@@ -352,6 +373,11 @@ cmd_run() {
   fi
 
   if [ "$CMM_SCHEDULED" = 1 ]; then
+    # launchd appends every scheduled run's output to launchd.log (the run
+    # logs hold all of it too): keep it to two files of about 512 KB
+    if [ -n "$(find "$CMM_STATE_DIR/launchd.log" -size +512k 2>/dev/null)" ]; then
+      mv -f "$CMM_STATE_DIR/launchd.log" "$CMM_STATE_DIR/launchd.log.old" 2>/dev/null || true
+    fi
     if [ "$CMM_ON_BATTERY" = skip ] && cmm_on_battery; then
       cmm__skipped_run "on battery power (ON_BATTERY=skip)"
       exit 0
@@ -412,6 +438,7 @@ cmd_list() {
     return 0
   fi
   cmm_state_migrate
+  cmm_require_state_readable
   cmm_discover
   printf '%-16s %-9s %-7s %-5s %-8s %s\n' NAME STATE DEFAULT TOOL SOURCE SUMMARY
   while IFS="$TAB" read -r name base path src gate group def summary; do
@@ -472,12 +499,12 @@ cmm__valid_key() {
   return 0
 }
 
-# cmm__config_key_hint KEY — " — did you mean 'X'?" for a near-miss of a
-# built-in key, or nothing.
+# cmm__config_key_hint KEY [MAX] — " — did you mean 'X'?" for a built-in
+# key close to KEY (within MAX edits, when given), or nothing.
 cmm__config_key_hint() {
   local hint
   # shellcheck disable=SC2046  # keys never contain whitespace
-  hint="$(cmm_suggest "$1" $(cmm_setting_keys))"
+  hint="$(CMM__SUGGEST_MAX="${2:-0}" cmm_suggest "$1" $(cmm_setting_keys))"
   [ -n "$hint" ] && printf " — did you mean '%s'?" "$hint"
   return 0
 }
@@ -494,7 +521,18 @@ cmd_config() {
   esac
   case "$sub" in
     -h | --help | help)
-      note "usage: scrubmac config [list | get KEY | set KEY VALUE | unset KEY | path]"
+      note "usage: scrubmac config [list | get KEY | set KEY VALUE | unset KEY | path | keys]"
+      ;;
+    keys)
+      # setting names, one per line (shell completion): built-ins, then the
+      # custom keys in the config file
+      cmm_setting_keys
+      if [ -r "$CMM_CONFIG_FILE" ]; then
+        { grep -E '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._/-]*$' "$CMM_CONFIG_FILE" 2>/dev/null || true; } |
+          sed 's/=.*//' | while IFS= read -r key; do
+          cmm_setting_info "$key" || printf '%s\n' "$key"
+        done | awk '!seen[$0]++'
+      fi
       ;;
     list)
       printf '%-24s %-12s %-8s %s\n' KEY VALUE SOURCE DESCRIPTION
@@ -538,9 +576,9 @@ EOF
           usage_err "invalid value for $1: '$2' (expected $(cmm_type_hint "$CMM__S_TYPE"))"
         val="$(cmm_setting_norm "$CMM__S_TYPE" "$2")"
       else
-        hint="$(cmm__config_key_hint "$1")"
-        # a near-miss of a built-in key is a typo, not a custom setting
-        [ -z "$hint" ] || usage_err "unknown setting '$1'$hint (custom keys can't be one typo away from a built-in)"
+        hint="$(cmm__config_key_hint "$1" 1)"
+        # one typo away from a built-in key is a typo, not a custom setting
+        [ -z "$hint" ] || usage_err "unknown setting '$1'$hint (a custom key one typo away from a built-in is refused — pick a more distinct name)"
         warn "$1 is not a built-in setting — stored for custom cleaners"
       fi
       cmm_config_put "$1" "$val" || exit 2
@@ -553,8 +591,30 @@ EOF
       note "unset $1"
       ;;
     path) note "$CMM_CONFIG_FILE" ;;
-    *) usage_err "usage: scrubmac config [list|get KEY|set KEY VALUE|unset KEY|path]" ;;
+    *) usage_err "usage: scrubmac config [list|get KEY|set KEY VALUE|unset KEY|path|keys]" ;;
   esac
+}
+
+# cmm__newest_log — the newest run log's name: by the timestamp in its
+# name, passing over names from the future (written while the clock was
+# wrong) unless nothing else is left.
+cmm__newest_log() {
+  local now f ts
+  now="$(date -u '+%Y%m%d%H%M%S')"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    ts="${f#run-}"
+    ts="${ts%%Z-*}"
+    ts="${ts%%T*}${ts#*T}"
+    case "$ts" in '' | *[!0-9]*) continue ;; esac
+    if [ "$ts" -le "$now" ]; then
+      printf '%s\n' "$f"
+      return 0
+    fi
+  done <<EOF
+$(cmm__log_files)
+EOF
+  cmm__log_files | awk 'NR == 1'
 }
 
 cmd_last() {
@@ -567,7 +627,7 @@ cmd_last() {
     err "no runs recorded yet"
     exit 1
   fi
-  latest="$(cmm__log_files | awk 'NR == 1')"
+  latest="$(cmm__newest_log)"
   if [ -z "$latest" ]; then
     note "no runs recorded yet (logs live in $CMM_LOG_DIR)"
     return 0

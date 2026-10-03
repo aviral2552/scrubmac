@@ -57,6 +57,73 @@ crontab_with() { # crontab_with LINE… — a crontab stub listing these lines
   [[ "$output" != *"sets no PATH"* ]] || false
 }
 
+@test "crontab: no false alarms from a trailing space, MANPATH=, bash -cl, or lines that only mention scrubmac" {
+  crontab_with 'MAILTO=me@scrubmac.example' 'PATH=/opt/homebrew/bin:/usr/bin:/bin  ' \
+    '0 9 * * 1 MANPATH=/x scrubmac -q' '30 9 * * 1 bash -cl "scrubmac -q"' \
+    '0 * * * * tail -n 5 ~/.local/state/scrubmac/logs/x.log'
+  CMM_BREW_PREFIX=/opt/homebrew run "$CMM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"crontab:        2 entries run scrubmac"* ]] || false
+  [[ "$output" != *"lacks /opt/homebrew/bin"* ]] || false
+  [[ "$output" != *"sets no PATH"* ]] || false
+}
+
+@test "crontab: entries with a redirection, a subshell or && are still found" {
+  crontab_with 'PATH=/usr/bin:/bin' '0 9 * * 1 scrubmac>>$HOME/scrub.log 2>&1' \
+    '0 10 * * 1 (scrubmac -q)' '0 11 * * 1 cd ~ &&scrubmac -q'
+  run "$CMM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"crontab:        3 entries run scrubmac"* ]] || false
+}
+
+@test "crontab: -l means a login shell only as a shell's own option" {
+  crontab_with "0 9 * * 1 /bin/zsh -lic 'scrubmac -q'"
+  run "$CMM" doctor
+  [[ "$output" == *"1 entry runs scrubmac"* ]] || false
+  [[ "$output" != *"sets no PATH"* ]] || false
+  crontab_with '0 9 * * 1 ls -l /tmp; scrubmac -q'
+  run "$CMM" doctor
+  [[ "$output" == *"sets no PATH"* ]] || false
+}
+
+@test "crontab: MacPaw's own cleanmymac command is not taken for scrubmac" {
+  crontab_with '0 9 * * 1 /Applications/CleanMyMac.app/Contents/MacOS/cleanmymac --scan'
+  run "$CMM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"runs scrubmac"* ]] || false
+  [[ "$output" != *"still references 'cleanmymac'"* ]] || false
+  crontab_with "0 9 * * 1 $HOME/.cleanmymac/bin/cleanmymac --scheduled"
+  run "$CMM" doctor
+  [[ "$output" == *"1 entry runs scrubmac"* ]] || false
+  [[ "$output" == *"still references 'cleanmymac'"* ]] || false
+}
+
+@test "crontab: Homebrew's bin with a trailing slash, or in a quoted PATH with spaces, counts" {
+  crontab_with '0 9 * * 1 PATH=/opt/homebrew/bin/:/usr/bin:/bin scrubmac -q' \
+    '0 10 * * 1 PATH="/a b:/opt/homebrew/bin" scrubmac -q'
+  CMM_BREW_PREFIX=/opt/homebrew run "$CMM" doctor
+  [[ "$output" == *"2 entries run scrubmac"* ]] || false
+  [[ "$output" != *"lacks /opt/homebrew/bin"* ]] || false
+}
+
+@test "crontab: an inline PATH is read from PATH=, not from MANPATH=" {
+  crontab_with '0 9 * * 1 PATH=/usr/bin:/bin MANPATH=/opt/homebrew/bin scrubmac -q'
+  CMM_BREW_PREFIX=/opt/homebrew run "$CMM" doctor
+  [[ "$output" == *"lacks /opt/homebrew/bin"* ]] || false
+}
+
+@test "a PATH with a trailing ':' (an empty entry: the current directory) is flagged" {
+  PATH="$STUB_BIN:$SYSBIN:" run "$CMM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PATH has an empty entry"* ]] || false
+}
+
+@test "with both ~/.cleanmymac and ~/.scrubmac, doctor says delete the old copy (not run its install.sh)" {
+  mkdir -p "$HOME/.cleanmymac" "$HOME/.scrubmac"
+  run "$CMM" doctor
+  [[ "$output" == *"delete the old copy (its install.sh would downgrade you)"* ]] || false
+}
+
 @test "crontab plus a launchd agent is flagged as scheduling twice" {
   crontab_with 'PATH=/usr/bin:/bin' '0 9 * * 1 scrubmac -q'
   mkdir -p "$HOME/Library/LaunchAgents"
@@ -65,6 +132,62 @@ crontab_with() { # crontab_with LINE… — a crontab stub listing these lines
   run "$CMM" doctor
   [ "$status" -eq 0 ]
   [[ "$output" == *"scheduled twice"* ]] || false
+}
+
+@test "a schedule whose launcher is gone gets the exact recreate command" {
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat >"$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" <<'EOF'
+<plist><dict>
+  <key>ProgramArguments</key>
+  <array><string>/nonexistent/bin/scrubmac</string></array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>5</integer>
+    <key>Hour</key>
+    <integer>18</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+</dict></plist>
+EOF
+  run "$CMM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launcher no longer exists: /nonexistent/bin/scrubmac — recreate the schedule with: scrubmac schedule weekly fri 18:30"* ]] || false
+}
+
+@test "a schedule launchd has not loaded is flagged, with the exact reload command" {
+  mkdir -p "$HOME/Library/LaunchAgents"
+  printf '<plist><dict>\n<key>ProgramArguments</key>\n<array>\n<string>%s</string>\n</array>\n<key>Hour</key>\n<integer>7</integer>\n<key>Minute</key>\n<integer>5</integer>\n</dict></plist>\n' "$CMM" \
+    >"$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist"
+  run "$CMM" doctor # the default launchctl stub answers "not loaded"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not loaded — reload it with: scrubmac schedule daily 07:05"* ]] || false
+}
+
+@test "no default network route is reported (when probed)" {
+  unset CMM_OFFLINE
+  make_stub_script route <<'EOF'
+echo "route: writing to routing socket: not in table" >&2
+EOF
+  CMM_OS=Darwin run "$CMM" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no default network route"* ]] || false
+}
+
+@test "a dangling launcher link in Homebrew's bin is found" {
+  mkdir -p "$SANDBOX/brewpfx/bin"
+  ln -s "$SANDBOX/brewpfx/Cellar/scrubmac/1/bin/scrubmac" "$SANDBOX/brewpfx/bin/scrubmac"
+  CMM_BREW_PREFIX="$SANDBOX/brewpfx" run "$CMM" doctor
+  [[ "$output" == *"dangling scrubmac symlink: $SANDBOX/brewpfx/bin/scrubmac"* ]] || false
+}
+
+@test "an unwritable config dir is flagged" {
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  chmod 500 "$XDG_CONFIG_HOME/scrubmac"
+  run "$CMM" doctor
+  chmod 700 "$XDG_CONFIG_HOME/scrubmac"
+  [[ "$output" == *"the config dir is not writable"* ]] || false
 }
 
 @test "a refused cleaner is reported with the reason it would be refused" {

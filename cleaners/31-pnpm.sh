@@ -5,36 +5,39 @@
 # gate: pnpm
 # group: JavaScript
 # default: on
-# summary: update global packages within their major (cooldown-aware), self-update standalone pnpm, prune the store
-# pnpm: move each global package to the newest release of its current major
-# (what `pnpm update -g` does for the ^ ranges pnpm saves) — under the
-# supply-chain cooldown, only to releases at least COOLDOWN_DAYS old, never
-# backwards — self-update standalone installs (to the newest release old
-# enough), and drop unreferenced packages from the content-addressable store.
-# pnpm's own minimumReleaseAge is deliberately not used: with it, `pnpm
-# update -g` and `pnpm self-update` fail outright whenever an installed
-# release is newer than the cutoff, and pnpm 10's self-update ignores it.
+# summary: update global packages within their saved ranges (cooldown-aware), self-update standalone pnpm, prune the store
+# pnpm: update global packages within the ranges they were saved with, and
+# self-update standalone installs. Under the supply-chain cooldown (or your
+# own stricter minimumReleaseAge), each global moves to the newest release
+# of its range that is old enough — never backwards — re-added with the same
+# range operator and pnpm's own minimumReleaseAge, which holds every
+# dependency to the cutoff too; pnpm itself self-updates to the newest
+# release old enough. Without either, plain `pnpm update -g` and
+# `pnpm self-update`. Then drop unreferenced packages from the store.
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 . "${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
 
 TAB=$'\t'
-# lib/registry.js (the registry resolver) sits next to the lib/common.sh above
-REGISTRY_JS="${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
-REGISTRY_JS="${REGISTRY_JS%/*}/registry.js"
+# lib/registry.cjs (the registry resolver) sits next to the lib/common.sh above
+REGISTRY_CJS="${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
+REGISTRY_CJS="${REGISTRY_CJS%/*}/registry.cjs"
 
-# reg_resolve NAME CURRENT CUTOFF MODE [VERIFY-FLAG] — the registry verdict
-# for NAME (the rules are in lib/registry.js) in REG_VERDICT — pick, held,
-# none, unsuitable, or error when the registry could not be read — and
-# REG_VERSION. Releases that are deprecated, or whose engines.node excludes
-# this node (unless VERIFY-FLAG is --no-engines), are passed over (at most
-# three times) with a note.
+# reg_resolve NAME CURRENT CUTOFF MODE [--no-engines] — the registry verdict
+# for NAME (the rules are in lib/registry.cjs) in REG_VERDICT — pick, held,
+# none, unsuitable, foreign (CURRENT is no release of NAME there), missing
+# (the registry does not know NAME), or error when it could not be read —
+# and REG_VERSION. Releases that are deprecated, or whose engines.node
+# excludes this node, are passed over (at most three times) with a note;
+# REG_STEPPED says whether that happened.
 reg_resolve() {
-  local name="$1" info out cands kind v why
+  local name="$1" cur="$2" info out cands kind v why
   REG_VERDICT=error
   REG_VERSION=''
-  info="$(npm view "$name" time versions dist-tags --json 2>/dev/null)" || return 0
-  out="$(printf '%s' "$info" | node "$REGISTRY_JS" pick "$name" "$2" "$3" "$4")" || return 0
+  REG_STEPPED=0
+  # npm prints an E404 as a JSON error object (exit 1): pick tells it apart
+  info="$(npm view "$name" time versions dist-tags --json 2>/dev/null)" || true
+  out="$(printf '%s' "$info" | node "$REGISTRY_CJS" pick "$name" "$cur" "$3" "$4")" || return 0
   case "$out" in
     pick"$TAB"*) cands="${out#pick"$TAB"}" ;;
     held"$TAB"*)
@@ -42,21 +45,26 @@ reg_resolve() {
       REG_VERSION="${out#held"$TAB"}"
       return 0
       ;;
-    *)
-      REG_VERDICT=none
+    none | foreign | missing)
+      REG_VERDICT="$out"
       return 0
       ;;
+    *) return 0 ;;
   esac
-  info="$(npm view "$name@${cands//$TAB/ || }" name version deprecated engines --json 2>/dev/null)" || info=''
-  out="$(printf '%s' "$info" | node "$REGISTRY_JS" verify "${cands//$TAB/,}" ${5+"$5"} --npm "$(command -v npm)")" ||
+  info="$(npm view "$name@${cands//$TAB/ || } || $cur" name version deprecated engines --json 2>/dev/null)" || info=''
+  out="$(printf '%s' "$info" | node "$REGISTRY_CJS" verify "${cands//$TAB/,}" --current "$cur" ${5+"$5"} --npm "$(command -v npm)")" ||
     out="ok$TAB${cands%%"$TAB"*}"
   REG_VERDICT=unsuitable
   while IFS="$TAB" read -r kind v why; do
     case "$kind" in
-      skip) note "- $name $v: $why — trying the next release" ;;
+      skip)
+        REG_STEPPED=1
+        note "- $name $v: $why — trying the next release"
+        ;;
       ok)
         REG_VERDICT=pick
         REG_VERSION="$v"
+        [ -z "$why" ] || note "- $name $v: $why"
         ;;
     esac
   done <<EOF
@@ -65,34 +73,51 @@ EOF
   return 0
 }
 
-# can_resolve — node, npm and lib/registry.js are there for registry lookups.
-can_resolve() { have node && have npm && [ -f "$REGISTRY_JS" ]; }
+# can_resolve — node, npm and lib/registry.cjs are there for registry lookups.
+can_resolve() { have node && have npm && [ -f "$REGISTRY_CJS" ]; }
 
-# pnpm_self_update DAYS — standalone installs only (Corepack/Homebrew/npm
-# copies are left to their managers); under the cooldown, to the newest
-# release at least DAYS old, named explicitly.
+# pnpm_policy DAYS — PNPM_VER/PNPM_MAJOR; PNPM_POLICY: the minimum release
+# age (minutes) asked for — the cooldown, or your own minimumReleaseAge when
+# stricter (passing a smaller value on the command line would relax it);
+# PNPM_GATE: that, but at least pnpm's built-in default (1440 since pnpm 11);
+# PNPM_WHY: where it comes from.
+pnpm_policy() {
+  local cfg
+  PNPM_VER="$(pnpm --version 2>/dev/null)" || PNPM_VER=0
+  PNPM_MAJOR="${PNPM_VER%%.*}"
+  case "$PNPM_MAJOR" in '' | *[!0-9]*) PNPM_MAJOR=0 ;; esac
+  cfg="$(pnpm config get minimumReleaseAge 2>/dev/null | tail -n 1)" || cfg=''
+  case "$cfg" in '' | *[!0-9]*) cfg=0 ;; esac
+  PNPM_POLICY=$(($1 * 1440))
+  PNPM_WHY=''
+  [ "$1" -gt 0 ] && PNPM_WHY="the ${1}-day cooldown"
+  if [ "$cfg" -gt 0 ]; then
+    PNPM_WHY="${PNPM_WHY:+$PNPM_WHY; }pnpm minimumReleaseAge=$cfg"
+    [ "$cfg" -gt "$PNPM_POLICY" ] && PNPM_POLICY="$cfg"
+  fi
+  PNPM_GATE="$PNPM_POLICY"
+  if [ "$PNPM_MAJOR" -ge 11 ] && [ "$PNPM_GATE" -lt 1440 ]; then
+    PNPM_GATE=1440
+  fi
+  return 0
+}
+
+# pnpm_self_update — standalone installs only (Corepack/Homebrew/npm/
+# version-manager copies are left to their managers): the newest release
+# published before PNPM_CUTOFF, named explicitly.
 pnpm_self_update() {
-  local days="$1" cur
+  local cur
   if [ "$(install_kind pnpm)" != standalone ]; then
     ai_self_update pnpm # explains which manager owns it
     return 0
   fi
-  if [ "$days" -eq 0 ]; then
-    ai_self_update pnpm pnpm self-update
-    return 0
-  fi
-  if ! can_resolve; then
-    note "- pnpm self-update held by the ${days}-day cooldown: node/npm (needed to pick a release) not found"
-    summary_note "pnpm self-update held (node/npm not found for the cooldown)"
-    return 0
-  fi
-  cur="$(pnpm --version 2>/dev/null)" || cur=''
-  reg_resolve pnpm "$cur" "$(date_days_ago "$days")" latest --no-engines
+  cur="$PNPM_VER"
+  reg_resolve pnpm "$cur" "$PNPM_CUTOFF" latest --no-engines
   case "$REG_VERDICT" in
     pick) ai_self_update pnpm pnpm self-update "$REG_VERSION" ;;
     held)
-      note "- pnpm $cur: pnpm $REG_VERSION is under ${days} days old — self-update held"
-      summary_note "pnpm self-update held by the ${days}-day cooldown"
+      note "- pnpm $cur: pnpm $REG_VERSION is too fresh ($PNPM_WHY) — self-update held"
+      summary_note "pnpm self-update held by the cooldown ($PNPM_WHY)"
       ;;
     unsuitable) note "- pnpm $cur: the newer releases old enough are deprecated — not self-updated" ;;
     none) note "- pnpm $cur is up to date" ;;
@@ -110,71 +135,121 @@ pnpm_skip_note() {
     alias) note "- skipping $1: an aliased install (npm:…) — updating it by name would install a different package" ;;
     local) note "- skipping $1: linked/local install (link:, file: or git)" ;;
     group:*) note "- skipping $1: installed together with ${2#group:} (pnpm add -g a,b), which cannot be reinstalled by version" ;;
+    foreign) note "- skipping $1: its version is not a release of $1 on the registry (installed from git, a tarball, a fork or another registry?)" ;;
+    missing) note "- skipping $1: not found on npm's configured registry (a registry set only in pnpm's own config?)" ;;
     *) note "- skipping $1 ($2)" ;;
   esac
 }
 
-# pnpm_update_group CUTOFF MEMBER… — move one install group's packages
-# (NAME@VERSION each) to their picks. pnpm >= 11 replaces a whole group when
-# any member is re-added, so a group is re-added as a whole, comma-joined;
-# `pnpm add -g` with an explicit version records it as an exact pin.
-pnpm_update_group() {
-  local cutoff="$1" m name cur joined specs=() changed=0
-  shift
-  for m in "$@"; do
-    name="${m%@*}"
-    cur="${m##*@}"
-    reg_resolve "$name" "$cur" "$cutoff" caret
-    case "$REG_VERDICT" in
-      pick)
-        specs+=("$name@$REG_VERSION")
-        changed=1
-        continue
-        ;;
-      held)
-        PNPM_HELD=$((PNPM_HELD + 1))
-        note "- $name $cur: every newer release in its major is under ${PNPM_DAYS} days old — held"
-        ;;
-      unsuitable)
-        PNPM_HELD=$((PNPM_HELD + 1))
-        note "- $name $cur: the newest releases old enough are deprecated or need a newer Node.js — left as is"
-        ;;
-      error)
-        warn "registry lookup failed for $name"
-        cmm_fail_later
-        ;;
-    esac
-    specs+=("$m")
-  done
-  [ "$changed" -eq 1 ] || return 0
-  joined="$(
-    IFS=,
-    printf '%s' "${specs[*]}"
-  )"
-  step pnpm add -g "$joined"
+# pnpm_outdated_filter — PNPM_OUTDATED: the globals `pnpm outdated -g`
+# reports a newer in-range release for (" name name … "), or "" when it could
+# not be read (then every global is looked up).
+pnpm_outdated_filter() {
+  local json names
+  PNPM_OUTDATED=''
+  json="$(pnpm outdated -g --format json 2>/dev/null)" || true # exits 1 whenever anything is outdated
+  names="$(printf '%s' "$json" | node "$REGISTRY_CJS" pnpm-outdated 2>/dev/null)" || return 0
+  PNPM_OUTDATED=" $(printf '%s\n' "$names" | tr '\n' ' ')"
 }
 
-# pnpm_update_globals DAYS — every global package to its pick (cutoff: DAYS
-# ago, or now without a cooldown).
-pnpm_update_globals() {
-  local days="$1" cutoff json rows line members
-  if ! can_resolve; then
-    if [ "$days" -eq 0 ]; then
-      step pnpm update -g
+# pnpm_flush_group — update the install group collected in G_NAMES, G_VERS,
+# G_MODES and G_SPECS. Every member keeps its saved range operator: ^ and ~
+# move to the pick (or stay on the installed version), exact pins and other
+# ranges are passed as saved. pnpm >= 11 re-adds the group as a whole (one
+# member alone would uninstall the rest), with the installed version of each
+# member that does not move excluded from the age gate — without that, a
+# group-mate installed recently fails the gate. A group whose lookups failed
+# or that has a member pnpm would move onto an unsuitable release is not
+# re-added at all.
+pnpm_flush_group() {
+  local i name ver mode spec target joined sel changed=0 blocked='' sels=() excl=() movers=() moved=()
+  [ "${#G_NAMES[@]}" -gt 0 ] || return 0
+  i=0
+  while [ "$i" -lt "${#G_NAMES[@]}" ]; do
+    name="${G_NAMES[$i]}"
+    ver="${G_VERS[$i]}"
+    mode="${G_MODES[$i]}"
+    spec="${G_SPECS[$i]}"
+    i=$((i + 1))
+    target="$ver"
+    case "$mode" in
+      caret | tilde | latest)
+        if [ -n "$PNPM_OUTDATED" ] && [ "${PNPM_OUTDATED#* "$name" }" = "$PNPM_OUTDATED" ]; then
+          REG_VERDICT=none
+        else
+          reg_resolve "$name" "$ver" "$PNPM_CUTOFF" "$mode"
+        fi
+        case "$REG_VERDICT" in
+          pick)
+            if [ "$REG_STEPPED" = 1 ]; then
+              # pnpm resolves ranges itself and would land on the newer release
+              PNPM_UNSUITABLE=$((PNPM_UNSUITABLE + 1))
+              note "- $name $ver: not suitable — the newest release old enough is deprecated or needs a newer Node.js; left as is"
+              blocked="$name"
+            else
+              target="$REG_VERSION"
+              changed=1
+              movers+=("$name@$target")
+            fi
+            ;;
+          held)
+            PNPM_HELD=$((PNPM_HELD + 1))
+            note "- $name $ver: every newer release its range allows is too fresh ($name $REG_VERSION) — held"
+            ;;
+          unsuitable)
+            PNPM_UNSUITABLE=$((PNPM_UNSUITABLE + 1))
+            note "- $name $ver: not suitable — the newer releases old enough are deprecated or need a newer Node.js; left as is"
+            blocked="$name"
+            ;;
+          foreign | missing) pnpm_skip_note "$name" "$REG_VERDICT" ;;
+          none) ;;
+          *)
+            warn "registry lookup failed for $name"
+            cmm_fail_later
+            blocked="$name"
+            ;;
+        esac
+        ;;
+    esac
+    case "$mode" in
+      caret) sel="$name@^$target" ;;
+      tilde) sel="$name@~$target" ;;
+      *) sel="$name@$spec" ;; # exact pins and other ranges stay as saved
+    esac
+    sels+=("$sel")
+    if [ "$target" = "$ver" ]; then
+      moved+=(0)
+      excl+=("--config.minimum-release-age-exclude=$name@$ver")
     else
-      note "- cooldown active (${days}d) but node/npm (needed for registry lookups) not found: global updates are held"
-      summary_note "global updates held (node/npm not found for the cooldown)"
+      moved+=(1)
     fi
+  done
+  G_NAMES=() G_VERS=() G_MODES=() G_SPECS=()
+  [ "$changed" -eq 1 ] || return 0
+  if [ -n "$blocked" ] && [ "${#sels[@]}" -gt 1 ]; then
+    note "- not re-adding ${movers[*]} this run: it shares an install group with $blocked, which pnpm would move or which could not be checked"
     return 0
   fi
-  if [ "$days" -gt 0 ]; then
-    cutoff="$(date_days_ago "$days")"
-    note "- cooldown: updating global packages only to releases published before $cutoff (${days}d)"
+  if [ "$PNPM_MAJOR" -ge 11 ]; then
+    joined="$(
+      IFS=,
+      printf '%s' "${sels[*]}"
+    )"
+    step pnpm add -g "$joined" --config.minimum-release-age="$PNPM_GATE" ${excl[@]+"${excl[@]}"}
   else
-    cutoff="$(cmm_now_iso)"
+    i=0 # pnpm 10: one global project, no a,b groups — one add per package
+    while [ "$i" -lt "${#sels[@]}" ]; do
+      [ "${moved[$i]}" = 1 ] && step pnpm add -g "${sels[$i]}" --config.minimum-release-age="$PNPM_GATE"
+      i=$((i + 1))
+    done
   fi
+}
+
+# pnpm_update_globals — every global package to its pick (see the header).
+pnpm_update_globals() {
+  local json rows line kind group name ver mode spec prev=''
   if ! json="$(pnpm ls -g --depth=0 --json 2>/dev/null)" ||
-    ! rows="$(printf '%s' "$json" | node "$REGISTRY_JS" pnpm-globals)"; then
+    ! rows="$(printf '%s' "$json" | node "$REGISTRY_CJS" pnpm-globals)"; then
     warn "could not read 'pnpm ls -g --depth=0 --json'"
     cmm_fail_later
     return 0
@@ -183,31 +258,43 @@ pnpm_update_globals() {
     note "- no global packages"
     return 0
   fi
+  note "- cooldown: updating global packages only to releases published before $PNPM_CUTOFF ($PNPM_WHY)"
+  pnpm_outdated_filter
   PNPM_HELD=0
-  PNPM_DAYS="$days"
+  PNPM_UNSUITABLE=0
+  G_NAMES=() G_VERS=() G_MODES=() G_SPECS=()
   while IFS= read -r line <&3; do
-    case "$line" in
-      skip"$TAB"*)
+    kind="${line%%"$TAB"*}"
+    case "$kind" in
+      skip)
         line="${line#skip"$TAB"}"
         pnpm_skip_note "${line%%"$TAB"*}" "${line#*"$TAB"}"
         ;;
-      group"$TAB"*)
-        members=()
-        IFS="$TAB" read -r -a members <<<"${line#group"$TAB"}"
-        pnpm_update_group "$cutoff" "${members[@]}"
+      member)
+        IFS="$TAB" read -r kind group name ver mode spec <<<"$line"
+        if [ "$group" != "$prev" ]; then
+          pnpm_flush_group
+          prev="$group"
+        fi
+        G_NAMES+=("$name")
+        G_VERS+=("$ver")
+        G_MODES+=("$mode")
+        G_SPECS+=("$spec")
         ;;
     esac
   done 3<<EOF
 $rows
 EOF
-  [ "$PNPM_HELD" -gt 0 ] && summary_note "$PNPM_HELD global update(s) held by the ${days}-day cooldown"
+  pnpm_flush_group
+  [ "$PNPM_HELD" -gt 0 ] && summary_note "$PNPM_HELD global update(s) held by the cooldown ($PNPM_WHY)"
+  [ "$PNPM_UNSUITABLE" -gt 0 ] && summary_note "$PNPM_UNSUITABLE global update(s) not suitable (deprecated, or need a newer Node.js)"
   return 0
 }
 
 skip_unless pnpm
 
 cache_dir_cmd pnpm store path
-report pnpm outdated -g
+report --ok=1 pnpm outdated -g # exits 1 whenever anything is outdated
 
 if updating; then
   days="$(cooldown_days)"
@@ -217,8 +304,23 @@ if updating; then
   here="$PWD"
   scratch="$(cmm_scratch_dir)" || scratch=''
   [ -n "$scratch" ] && cd "$scratch"
-  pnpm_self_update "$days"
-  pnpm_update_globals "$days"
+  pnpm_policy "$days"
+  if [ "$PNPM_POLICY" -eq 0 ]; then
+    ai_self_update pnpm pnpm self-update
+    step pnpm update -g
+  elif ! can_resolve; then
+    note "- cooldown active ($PNPM_WHY) but node/npm (needed for registry lookups) not found: global updates and the self-update are held"
+    summary_note "global updates held (node/npm not found for the cooldown)"
+  else
+    PNPM_CUTOFF="$(node "$REGISTRY_CJS" cutoff --minutes "$PNPM_GATE")"
+    pnpm_self_update
+    if cmm_version_ge "$PNPM_VER" 10.16; then
+      pnpm_update_globals
+    else
+      note "- this pnpm ($PNPM_VER) predates minimumReleaseAge (10.16), so the cooldown cannot hold dependencies back: global updates are held"
+      summary_note "global updates held by the cooldown (pnpm < 10.16)"
+    fi
+  fi
   if [ -n "$scratch" ]; then
     cd "$here" 2>/dev/null || cd /
     rm -rf "$scratch" # step never aborts, so this always runs

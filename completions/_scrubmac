@@ -12,7 +12,7 @@ _scrubmac_cleaners() {
 
 _scrubmac_keys() {
   local -a keys
-  keys=(${(f)"$(scrubmac config list 2>/dev/null | awk 'NR > 1 && $1 ~ /^[A-Z][A-Z0-9_]*$/ { print $1 }')"})
+  keys=(${(f)"$(scrubmac config keys 2>/dev/null)"})
   _describe -t keys 'setting' keys
 }
 
@@ -57,7 +57,7 @@ _scrubmac() {
         run | enable | disable | status) _scrubmac_cleaners ;;
         config)
           if ((CURRENT == 2)); then
-            _values 'config' list get set unset path
+            _values 'config' list get set unset path keys
           elif ((CURRENT == 3)) && [[ "${words[2]}" == (get|set|unset) ]]; then
             _scrubmac_keys
           fi

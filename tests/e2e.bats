@@ -10,6 +10,8 @@
 
 load helpers/setup
 
+setup_file() { build_src_cache; }
+
 setup() {
   setup_sandbox
   export CMM_PREFIX="$SANDBOX/app"
@@ -68,7 +70,7 @@ EOF
 }
 
 install_scrubmac() {
-  run "$REPO_ROOT/install.sh"
+  run "$(make_src_tree)/install.sh"
   [ "$status" -eq 0 ]
   [ -x "$SM" ]
 }
@@ -124,7 +126,8 @@ install_scrubmac() {
   agent_path="$(awk '/<key>PATH<\/key>/ { f = 1; next } f { gsub(/^[ \t]*<string>|<\/string>[ \t]*$/, ""); print; exit }' "$plist")"
   program="$(awk '/<key>ProgramArguments<\/key>/ { f = 1; next } f && /<string>/ { gsub(/^[ \t]*<string>|<\/string>[ \t]*$/, ""); print; exit }' "$plist")"
   [ "$program" = "$CMM_PREFIX/bin/scrubmac" ]
-  run env -i HOME="$HOME" TMPDIR="$TMPDIR" PATH="$agent_path" CMM_OFFLINE=0 "$program" --scheduled --quiet
+  run env -i HOME="$HOME" TMPDIR="$TMPDIR" PATH="$agent_path" CMM_OFFLINE=0 \
+    CMM_BREW_LOCATIONS="$CMM_BREW_LOCATIONS" CMM_LINK_DIRS="$CMM_LINK_DIRS" "$program" --scheduled --quiet
   [ "$status" -eq 0 ]
   [ "$(json_get "$STATE_DIR/last-run.json" scheduled)" = true ]
 
@@ -149,7 +152,8 @@ install_scrubmac() {
 cat >/dev/null
 EOF
   export BREW_UPGRADE_FAILS=1
-  run env -i HOME="$HOME" TMPDIR="$TMPDIR" PATH="$PATH" BREW_UPGRADE_FAILS=1 CMM_OFFLINE=0 CALL_LOG="$CALL_LOG" "$SM" --scheduled --quiet
+  run env -i HOME="$HOME" TMPDIR="$TMPDIR" PATH="$PATH" BREW_UPGRADE_FAILS=1 CMM_OFFLINE=0 CALL_LOG="$CALL_LOG" \
+    CMM_BREW_LOCATIONS="$CMM_BREW_LOCATIONS" CMM_LINK_DIRS="$CMM_LINK_DIRS" "$SM" --scheduled --quiet
   [ "$status" -eq 1 ]
   [[ "$output" == *"FAIL    homebrew"* ]] || false
   [[ "$output" == *"failed to build"* ]] || false             # quiet mode still dumps a failure
@@ -166,13 +170,16 @@ EOF
 [ "\$1" = update ] && exec "$SANDBOX/hangchild"
 exit 0
 EOF
-  local start=$SECONDS
-  CMM_TIMEOUT=2 run "$SM" homebrew gh
-  [ "$status" -eq 1 ]
-  [ $((SECONDS - start)) -lt 30 ]
-  [[ "$output" == *"TIMEOUT homebrew"* ]] || false
-  [[ "$output" == *"ok      gh"* ]] || false
-  no_hang_child
+  local start group
+  for group in 0 1; do
+    start=$SECONDS
+    CMM__PGRP=$group CMM__KILL_GRACE=1 CMM_TIMEOUT=2 run "$SM" homebrew gh
+    [ "$status" -eq 1 ]
+    [ $((SECONDS - start)) -lt 30 ]
+    [[ "$output" == *"TIMEOUT homebrew"* ]] || false
+    [[ "$output" == *"ok      gh"* ]] || false
+    no_hang_child
+  done
 }
 
 @test "journey: offline — updates are skipped, caches still cleaned" {

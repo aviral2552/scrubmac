@@ -10,8 +10,12 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes a pull request's run; every other run (a push to
+# master, the schedule, a manual dispatch) is a group of its own, so no
+# commit lands without its run finishing (a shared group would also drop
+# queued runs).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -57,6 +61,7 @@ jobs:
       matrix:
         os: [macos-15, macos-26]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -77,6 +82,7 @@ jobs:
   test-linux:
     name: bats (Linux — GNU userland portability)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,6 +95,7 @@ jobs:
     name: coverage (informational)
     runs-on: ubuntu-26.04
     continue-on-error: true
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

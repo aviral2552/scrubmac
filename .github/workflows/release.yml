@@ -9,8 +9,9 @@ permissions:
 
 jobs:
   # The same gates as CI, on the tagged commit: pinned, checksum-verified
-  # linters (a newer Homebrew shellcheck must not fail a tag CI passed), and
-  # the suite on macOS (bash 3.2) and Linux (bash 5, GNU userland).
+  # linters (a newer Homebrew shellcheck must not fail a tag CI passed), the
+  # man-page lint, and the suite on macOS 15/26 (bash 3.2, plus the bash 3.2
+  # smoke) and Linux (bash 5, GNU userland).
   lint:
     runs-on: ubuntu-24.04
     env:
@@ -44,13 +45,19 @@ jobs:
           echo "${SHFMT_SHA256}  shfmt" | sha256sum -c -
           sudo install -m 0755 shfmt /usr/local/bin/shfmt
       - run: make lint docs-check
+      - name: man page lint
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q mandoc
+          mandoc -T lint -W warning man/scrubmac.1
 
   test:
     strategy:
       fail-fast: true
       matrix:
-        os: [macos-15, ubuntu-24.04]
+        os: [macos-15, macos-26, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,6 +70,15 @@ jobs:
             sudo apt-get update -q && sudo apt-get install -y -q bats fish zsh
           fi
       - run: make test
+      - name: bash 3.2 smoke — the shipped macOS bash must run everything
+        if: runner.os == 'macOS'
+        run: |
+          make bash32
+          /bin/bash bin/scrubmac version
+          /bin/bash bin/scrubmac list
+          /bin/bash bin/scrubmac --dry-run
+          /bin/bash bin/scrubmac status
+          /bin/bash bin/scrubmac doctor
 
   release:
     needs: [lint, test]

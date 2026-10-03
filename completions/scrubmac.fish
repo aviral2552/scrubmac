@@ -10,7 +10,7 @@ function __scrubmac_cleaners
 end
 
 function __scrubmac_keys
-    scrubmac config list 2>/dev/null | awk 'NR > 1 && $1 ~ /^[A-Z][A-Z0-9_]*$/ { print $1 }'
+    scrubmac config keys 2>/dev/null
 end
 
 # __scrubmac_after SUB — the words typed after subcommand SUB
@@ -40,7 +40,7 @@ complete -c scrubmac -s V -l version -d 'print the version'
 complete -c scrubmac -n "not __fish_seen_subcommand_from $commands" -a "$commands"
 complete -c scrubmac -n "not __fish_seen_subcommand_from $commands" -a '(__scrubmac_cleaners)'
 complete -c scrubmac -n '__fish_seen_subcommand_from run enable disable status' -a '(__scrubmac_cleaners)'
-complete -c scrubmac -n '__fish_seen_subcommand_from config; and test (count (__scrubmac_after config)) -eq 0' -a 'list get set unset path'
+complete -c scrubmac -n '__fish_seen_subcommand_from config; and test (count (__scrubmac_after config)) -eq 0' -a 'list get set unset path keys'
 complete -c scrubmac -n '__fish_seen_subcommand_from config; and test (count (__scrubmac_after config)) -eq 1; and contains -- (__scrubmac_after config)[1] get set unset' -a '(__scrubmac_keys)'
 complete -c scrubmac -n '__fish_seen_subcommand_from schedule; and test (count (__scrubmac_after schedule)) -eq 0' -a 'status daily weekly off'
 complete -c scrubmac -n '__fish_seen_subcommand_from schedule; and test (count (__scrubmac_after schedule)) -eq 1; and test (__scrubmac_after schedule)[1] = weekly' -a 'mon tue wed thu fri sat sun'

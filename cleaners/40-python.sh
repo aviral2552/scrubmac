@@ -12,10 +12,12 @@
 # The supply-chain cooldown is passed natively: uv's --exclude-newer as a
 # relative "N days" span (uv >= 0.11.4 stores it as a span in tool receipts,
 # so it never goes stale; neither uv nor pipx downgrades an installed tool)
-# and pipx's --cooldown DAYS (pipx >= 1.16). Both remember the cutoff (uv in
-# each tool receipt, pipx in pipx_metadata.json), so with the cooldown off
-# the cutoffs are cleared explicitly (uv >= 0.11.24: --exclude-newer false;
-# pipx: --cooldown 0) — unless your own uv/pipx settings define one.
+# and pipx's --cooldown DAYS (pipx >= 1.16) — or your own exclude-newer /
+# PIPX_COOLDOWN when stricter, since the flags override both. uv and pipx
+# remember the cutoff (uv in each tool receipt, pipx in pipx_metadata.json),
+# so with the cooldown off the cutoffs are cleared explicitly (uv >= 0.11.24:
+# --exclude-newer false; pipx: --cooldown 0) — unless your own uv/pipx
+# settings define one.
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 . "${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
@@ -81,19 +83,23 @@ uv_prune() {
 # uv_receipt_ok — uv's standalone installer left an install receipt for
 # THIS uv. `uv self update` refuses (exit 2) otherwise: for uv from pip,
 # cargo, conda, mise/asdf…, and when the receipt belongs to another copy.
-# Mirrors uv/axoupdater's lookup: $AXOUPDATER_CONFIG_PATH, else
-# $XDG_CONFIG_HOME/uv then ~/.config/uv (macOS included), and the receipt's
-# install_prefix must be where this uv runs from (minus a trailing bin/).
+# Mirrors uv/axoupdater: the FIRST receipt file that exists decides — in
+# the current directory with $AXOUPDATER_CONFIG_WORKING_DIR, else in
+# $AXOUPDATER_CONFIG_PATH, else $XDG_CONFIG_HOME/uv then ~/.config/uv (macOS
+# included) — and its install_prefix must be where this uv runs from (minus
+# a trailing bin/).
 uv_receipt_ok() {
   local f exe dir root prefix
   exe="$(command -v uv)" || return 1
   exe="$(resolve_self "$exe")"
   dir="$(cd "${exe%/*}" && pwd -P)" || return 1
-  if [ -n "${AXOUPDATER_CONFIG_PATH:-}" ]; then
+  if [ -n "${AXOUPDATER_CONFIG_WORKING_DIR+x}" ]; then
+    set -- "$PWD/uv-receipt.json"
+  elif [ -n "${AXOUPDATER_CONFIG_PATH:-}" ]; then
     set -- "$AXOUPDATER_CONFIG_PATH/uv-receipt.json"
   else
     set -- "$HOME/.config/uv/uv-receipt.json"
-    if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    if [ -n "${XDG_CONFIG_HOME:-}" ] && [ -d "$XDG_CONFIG_HOME/uv" ]; then
       set -- "$XDG_CONFIG_HOME/uv/uv-receipt.json" "$@"
     fi
   fi
@@ -102,13 +108,14 @@ uv_receipt_ok() {
     prefix="$(awk 'match($0, /"install_prefix"[[:space:]]*:[[:space:]]*"[^"]*"/) {
       s = substr($0, RSTART, RLENGTH); sub(/^"install_prefix"[[:space:]]*:[[:space:]]*"/, "", s)
       sub(/"$/, "", s); print s; exit }' "$f")" || prefix=''
-    [ -n "$prefix" ] || continue
-    root="$(cd "$prefix" 2>/dev/null && pwd -P)" || continue
+    [ -n "$prefix" ] || return 1 # unreadable: uv refuses too
+    root="$(cd "$prefix" 2>/dev/null && pwd -P)" || return 1
     if [ "${dir##*/}" = bin ] && [ "${root##*/}" != bin ]; then
-      [ "${dir%/*}" = "$root" ] && return 0
-    elif [ "$dir" = "$root" ]; then
-      return 0
+      [ "${dir%/*}" = "$root" ]
+      return
     fi
+    [ "$dir" = "$root" ]
+    return
   done
   return 1
 }
@@ -142,31 +149,139 @@ uv_cutoff_tools() {
   done
 }
 
-# uv_own_cutoff — your own uv configuration sets exclude-newer (then
-# scrubmac leaves the receipts' cutoffs alone).
-uv_own_cutoff() {
-  [ -n "${UV_EXCLUDE_NEWER:-}" ] && return 0
-  grep -Eqs '^[[:space:]]*exclude-newer[[:space:]]*=' \
-    "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" /etc/uv/uv.toml
+# uv_user_exclude_newer — your own exclude-newer, as uv reads it for tool
+# commands: UV_EXCLUDE_NEWER, else the top-level key of UV_CONFIG_FILE, or of
+# the user config (${XDG_CONFIG_HOME:-~/.config}/uv/uv.toml) and then the
+# system one (/etc/uv/uv.toml). Prints nothing when none is set.
+uv_user_exclude_newer() {
+  local f v
+  if [ -n "${UV_EXCLUDE_NEWER:-}" ]; then
+    printf '%s\n' "$UV_EXCLUDE_NEWER"
+    return 0
+  fi
+  case "${UV_NO_CONFIG:-}" in 1 | true | yes) return 0 ;; esac
+  if [ -n "${UV_CONFIG_FILE:-}" ]; then
+    set -- "$UV_CONFIG_FILE"
+  else
+    set -- "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" /etc/uv/uv.toml
+  fi
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    v="$(awk '/^[[:space:]]*\[/ { exit }
+      /^[[:space:]]*exclude-newer[[:space:]]*=/ {
+        sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*(#.*)?$/, "")
+        gsub(/^["\047]|["\047]$/, ""); print; exit }' "$f")"
+    if [ -n "$v" ]; then
+      printf '%s\n' "$v"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# uv_age_seconds VALUE — how far back an exclude-newer VALUE reaches, in
+# seconds: an RFC 3339 timestamp or a date (taken as UTC midnight), a
+# "friendly" duration (24 hours, 1 week, 30 days) or an ISO 8601 one (P7D,
+# PT24H). 0 for false; nothing when it cannot be read.
+uv_age_seconds() {
+  local v="$1" ep now
+  case "$v" in
+    false) echo 0 ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] | [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*)
+      case "$v" in *T*) ;; *) v="${v}T00:00:00Z" ;; esac
+      ep="$(cmm_iso_to_epoch "$v")" || return 0
+      now="$(date -u '+%s')"
+      echo $((now > ep ? now - ep : 0))
+      ;;
+    *)
+      awk -v v="$v" 'BEGIN {
+        s = tolower(v); gsub(/,/, " ", s); gsub(/^ +| +$/, "", s); total = 0; ok = 0
+        if (s ~ /^p/) {
+          t = 0; rest = substr(s, 2)
+          while (rest != "") {
+            if (rest ~ /^t/) { t = 1; rest = substr(rest, 2); continue }
+            if (!match(rest, /^[0-9]+(\.[0-9]+)?[ymwdhs]/)) { ok = 0; break }
+            n = substr(rest, 1, RLENGTH - 1) + 0; u = substr(rest, RLENGTH, 1); rest = substr(rest, RLENGTH + 1)
+            if (u == "y") total += n * 31536000
+            else if (u == "m") total += (t ? n * 60 : n * 2592000)
+            else if (u == "w") total += n * 604800
+            else if (u == "d") total += n * 86400
+            else if (u == "h") total += n * 3600
+            else total += n
+            ok = 1
+          }
+        } else {
+          while (s != "") {
+            if (!match(s, /^[0-9]+(\.[0-9]+)? *[a-z]+ */)) { ok = 0; break }
+            tok = substr(s, 1, RLENGTH); s = substr(s, RLENGTH + 1)
+            match(tok, /^[0-9]+(\.[0-9]+)?/); n = substr(tok, 1, RLENGTH) + 0
+            u = substr(tok, RLENGTH + 1); gsub(/ /, "", u)
+            if (u ~ /^(s|secs?|seconds?)$/) total += n
+            else if (u ~ /^(m|mins?|minutes?)$/) total += n * 60
+            else if (u ~ /^(h|hrs?|hours?)$/) total += n * 3600
+            else if (u ~ /^(d|days?)$/) total += n * 86400
+            else if (u ~ /^(w|wks?|weeks?)$/) total += n * 604800
+            else if (u ~ /^(mos?|months?)$/) total += n * 2592000
+            else if (u ~ /^(y|yrs?|years?)$/) total += n * 31536000
+            else { ok = 0; break }
+            ok = 1
+          }
+        }
+        if (ok) printf "%d\n", total
+      }'
+      ;;
+  esac
+}
+
+# uv_cooldown_value DAYS — the --exclude-newer to pass under the cooldown:
+# DAYS as a relative span (uv >= 0.11.4; older uv an absolute date) — or
+# your own exclude-newer, verbatim, when it reaches further back (the flag
+# beats both your settings and the tool receipts, so it must not relax
+# them), or when it cannot be read.
+uv_cooldown_value() {
+  local user age
+  user="$(uv_user_exclude_newer)"
+  if [ -n "$user" ] && [ "$user" != false ]; then
+    age="$(uv_age_seconds "$user")"
+    if [ -z "$age" ] || [ "$age" -gt $(($1 * 86400)) ]; then
+      printf '%s\n' "$user"
+      return 0
+    fi
+  fi
+  if cmm_version_ge "$(uv_version)" 0.11.4; then
+    printf '%s days\n' "$1"
+  else
+    date_days_ago "$1"
+  fi
 }
 
 # uv_upgrade_uncooled — upgrade uv tools with the cooldown off: first clear
-# the cutoffs an earlier cooldown left in tool receipts (uv >= 0.11.24),
-# then upgrade everything.
+# the cutoff an earlier cooldown left in the receipts of the tools it is
+# holding back (uv >= 0.11.24; `uv tool list --outdated --exclude-newer false`
+# names them — uv rewrites a receipt only when its tool upgrades), unless
+# your own uv settings set exclude-newer; then upgrade everything.
 uv_upgrade_uncooled() {
-  local tools n t
+  local tools n outdated t cleared=0
   tools="$(uv_cutoff_tools)"
   if [ -n "$tools" ]; then
     n="$(printf '%s\n' "$tools" | awk 'NF { c++ } END { print c + 0 }')"
-    if uv_own_cutoff; then
+    if [ -n "$(uv_user_exclude_newer)" ]; then
       note "- $n uv tool(s) keep an exclude-newer cutoff in their receipts; your uv settings define exclude-newer, so they are left as they are"
     elif cmm_version_ge "$(uv_version)" 0.11.24; then
-      note "- clearing the exclude-newer cutoff an earlier cooldown left in $n uv tool receipt(s)"
+      outdated=" $(uv tool list --outdated --exclude-newer false --color never 2>/dev/null |
+        awk '/^[^ -][^ ]* v[0-9]/ { printf "%s ", $1 }')" || outdated=' '
       while IFS= read -r t <&3; do
-        [ -n "$t" ] && step uv tool upgrade "$t" --exclude-newer false
+        [ -n "$t" ] || continue
+        case "$outdated" in
+          *" $t "*)
+            step uv tool upgrade "$t" --exclude-newer false
+            cleared=$((cleared + 1))
+            ;;
+        esac
       done 3<<EOF
 $tools
 EOF
+      [ "$cleared" -gt 0 ] && note "- cleared the exclude-newer cutoff an earlier cooldown left in $cleared uv tool receipt(s)"
     else
       note "- $n uv tool(s) keep an exclude-newer cutoff from an earlier cooldown in their receipts, and this uv (< 0.11.24) cannot clear it: plain upgrades of them stay held back — upgrade uv, or reinstall them with 'uv tool install --force'"
       summary_note "$n uv tool(s) still held back by an exclude-newer cutoff in their receipts"
@@ -190,11 +305,7 @@ if updating; then
   if have uv; then
     uv_self_update
     if [ "$days" -gt 0 ]; then
-      if cmm_version_ge "$(uv_version)" 0.11.4; then
-        step uv tool upgrade --all --exclude-newer "$days days"
-      else
-        step uv tool upgrade --all --exclude-newer "$(date_days_ago "$days")"
-      fi
+      step uv tool upgrade --all --exclude-newer "$(uv_cooldown_value "$days")"
     else
       uv_upgrade_uncooled
     fi
@@ -202,7 +313,11 @@ if updating; then
   if have pipx; then
     if [ "$days" -gt 0 ]; then
       if pipx_has_cooldown; then
-        step pipx upgrade-all --cooldown "$days"
+        # PIPX_COOLDOWN is pipx's own default: never pass a smaller value
+        pc="${PIPX_COOLDOWN:-0}"
+        case "$pc" in '' | *[!0-9]*) pc=0 ;; esac
+        [ "$pc" -gt "$days" ] || pc="$days"
+        step pipx upgrade-all --cooldown "$pc"
       else
         note "- cooldown active (${days}d) but this pipx predates --cooldown (1.16): pipx upgrades are held"
         summary_note "pipx upgrades held by the ${days}-day cooldown (pipx < 1.16)"

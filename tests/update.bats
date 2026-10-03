@@ -54,6 +54,23 @@ pin_key() { # pin_key KEYNAME — pin KEYNAME in the INSTALLED copy only
   printf 'release@scrubmac.invalid namespaces="git" %s\n' "$(cat "$SANDBOX/$1.pub")" >"$INST/share/allowed_signers"
 }
 
+# vouching_gpg — gpg and gpgsm stubs that report a good, ultimately trusted
+# signature for anything: your own keyrings vouching for a tag must count
+# for nothing when the installed copy pins SSH keys.
+vouching_gpg() {
+  local t
+  for t in gpg gpgsm; do
+    make_stub_script "$t" <<'EOF'
+cat >/dev/null 2>&1
+echo "[GNUPG:] NEWSIG"
+echo "[GNUPG:] GOODSIG 0123456789ABCDEF Release <release@example.invalid>"
+echo "[GNUPG:] VALIDSIG 0123456789ABCDEF0123456789ABCDEF01234567 2026-10-04 1791000000 0 4 0 22 10 00 0123456789ABCDEF0123456789ABCDEF01234567"
+echo "[GNUPG:] TRUST_ULTIMATE 0 pgp"
+exit 0
+EOF
+  done
+}
+
 require_ssh_signing() {
   command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not available"
   ssh_key probe
@@ -81,7 +98,7 @@ require_ssh_signing() {
   [ ! -e "$INST/CHANGE-1.2.0-dev" ]
   run "$INST/bin/scrubmac" update
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Already up to date (latest release: v1.1.0"* ]] || false
+  [[ "$output" == *"Already up to date (this copy: v1.1.0; no newer release)"* ]] || false
 }
 
 @test "release channel: the highest version wins, not the newest tag" {
@@ -141,6 +158,68 @@ require_ssh_signing() {
   refute git -C "$INST" rev-parse -q --verify refs/tags/v1.1.0
 }
 
+@test "update --check never deletes or moves your own tags (a dev clone's)" {
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  git -C "$INST" tag wip-bisect-good
+  git -C "$INST" tag -a v1.1.0 -m "my unpushed release tag"
+  run "$INST/bin/scrubmac" update --check
+  [ "$status" -eq 0 ]
+  git -C "$INST" rev-parse -q --verify refs/tags/wip-bisect-good >/dev/null
+  git -C "$INST" rev-parse -q --verify refs/tags/v1.1.0 >/dev/null
+}
+
+@test "an inherited GIT_DIR (e.g. from a git hook) never redirects the update" {
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  commit_version 1.1.0
+  tag v1.1.0
+  git init -q "$SANDBOX/other"
+  GIT_DIR="$SANDBOX/other/.git" GIT_WORK_TREE="$SANDBOX/other" run "$INST/bin/scrubmac" update
+  [ "$status" -eq 0 ]
+  [ "$(cat "$INST/VERSION")" = 1.1.0 ]
+  [ -z "$(git -C "$SANDBOX/other" for-each-ref)" ]
+}
+
+@test "release channel: a release tag re-pointed upstream after this copy saw it is refused" {
+  make_origin
+  tag v1.0.0
+  commit_version 1.1.0
+  tag v1.1.0
+  git clone -q "$ORIGIN" "$INST"
+  git -C "$INST" reset -q --hard v1.0.0 # this copy is still on 1.0.0
+  echo evil >"$ORIGIN/EVIL"
+  git -C "$ORIGIN" add -A
+  git -C "$ORIGIN" commit -qm evil
+  git -C "$ORIGIN" tag -f -a v1.1.0 -m 1.1.0 >/dev/null # re-pointed at the evil commit
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"skipping release v1.1.0 — it was re-pointed upstream"* ]] || false
+  [ ! -e "$INST/EVIL" ]
+  [ "$(cat "$INST/VERSION")" = 1.0.0 ]
+  run "$INST/bin/scrubmac" update # and it stays refused on the next run
+  [ "$status" -eq 1 ]
+  [ ! -e "$INST/EVIL" ]
+}
+
+@test "release channel: the highest version wins even when an older-version tag is newer (v1.9.0 vs v1.10.0)" {
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  commit_version 1.9.0
+  local c19
+  c19="$(git -C "$ORIGIN" rev-parse HEAD)"
+  commit_version 1.10.0
+  tag v1.10.0
+  sleep 1
+  git -C "$ORIGIN" tag -a v1.9.0 -m 1.9.0 "$c19" # created after v1.10.0
+  run "$INST/bin/scrubmac" update --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-> v1.10.0"* ]] || false
+}
+
 @test "branch channel on a detached HEAD says what to do instead of failing obscurely" {
   make_origin
   git clone -q "$ORIGIN" "$INST"
@@ -192,6 +271,20 @@ require_ssh_signing() {
   [[ "$output" == *"release signatures are not checked"* ]] || false
 }
 
+@test "an allowed_signers file holding only comments pins no keys" {
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  mkdir -p "$INST/share"
+  printf '# release signing keys go here\n\n' >"$INST/share/allowed_signers"
+  commit_version 1.1.0
+  tag v1.1.0
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"release signatures are not checked"* ]] || false
+  [ "$(cat "$INST/VERSION")" = 1.1.0 ]
+}
+
 @test "with pinned keys, a release signed by the pinned key is accepted" {
   require_ssh_signing
   ssh_key release
@@ -223,6 +316,103 @@ require_ssh_signing() {
   [[ "$output" == *"skipping release v1.2.0 — not signed by a key pinned"* ]] || false
   [[ "$output" == *"Updated to v1.1.0"* ]] || false
   [ "$(cat "$INST/VERSION")" = 1.1.0 ]
+}
+
+@test "release channel: a stray high-numbered tag on an old commit never hides a newer release" {
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  commit_version 1.1.0
+  tag v1.1.0
+  git -C "$ORIGIN" tag v9.9.9 "$(git -C "$ORIGIN" rev-list --max-parents=0 HEAD)"
+  run "$INST/bin/scrubmac" update --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Update available: v1.0.0 -> v1.1.0"* ]] || false
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Updated to v1.1.0"* ]] || false
+  [ "$(cat "$INST/VERSION")" = 1.1.0 ]
+}
+
+@test "with pinned keys, an unsigned tag on an old commit never freezes updates" {
+  require_ssh_signing
+  ssh_key release
+  make_origin
+  signed_tag v1.0.0 release
+  git clone -q "$ORIGIN" "$INST"
+  pin_key release
+  commit_version 1.1.0
+  signed_tag v1.1.0 release
+  git -C "$ORIGIN" tag v9.9.9 "$(git -C "$ORIGIN" rev-list --max-parents=0 HEAD)"
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"signature verified"* ]] || false
+  [[ "$output" == *"Updated to v1.1.0"* ]] || false
+  [ "$(cat "$INST/VERSION")" = 1.1.0 ]
+}
+
+@test "with pinned keys, only an SSH signature counts (a PGP-looking tag is not 'signed')" {
+  require_ssh_signing
+  ssh_key release
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  pin_key release
+  vouching_gpg
+  commit_version 1.1.0
+  git -C "$ORIGIN" tag -a v1.1.0 -m $'1.1.0\n-----BEGIN PGP SIGNATURE-----\n\niQEz\n-----END PGP SIGNATURE-----'
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"skipping release v1.1.0 — not signed by a key pinned"* ]] || false
+  [ "$(cat "$INST/VERSION")" = 1.0.0 ]
+}
+
+@test "with pinned keys, deleting every tag upstream never turns into an unsigned branch pull" {
+  require_ssh_signing
+  ssh_key release
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  pin_key release
+  git -C "$ORIGIN" tag -d v1.0.0 >/dev/null
+  commit_version 6.6.6 # the attacker's unsigned commit on the branch
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"will not follow the unsigned branch"* ]] || false
+  [ "$(cat "$INST/VERSION")" = 1.0.0 ]
+}
+
+@test "with pinned keys, an SSH armor line quoted in a PGP-signed tag's message does not count" {
+  require_ssh_signing
+  ssh_key release
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  pin_key release
+  vouching_gpg
+  commit_version 1.1.0
+  git -C "$ORIGIN" tag -a v1.1.0 -m $'1.1.0\n-----BEGIN SSH SIGNATURE-----\nquoted\n-----END SSH SIGNATURE-----\n-----BEGIN PGP SIGNATURE-----\n\niQEz\n-----END PGP SIGNATURE-----'
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"skipping release v1.1.0 — not signed by a key pinned"* ]] || false
+  [ "$(cat "$INST/VERSION")" = 1.0.0 ]
+}
+
+@test "with pinned keys, a genuine signed tag republished under a higher name is skipped" {
+  require_ssh_signing
+  ssh_key release
+  make_origin
+  tag v1.0.0
+  git clone -q "$ORIGIN" "$INST"
+  pin_key release
+  commit_version 1.1.0
+  signed_tag v1.1.0 release
+  git -C "$ORIGIN" update-ref refs/tags/v9.9.9 "$(git -C "$ORIGIN" rev-parse refs/tags/v1.1.0)"
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipping release v9.9.9 — the tag object names a different release"* ]] || false
+  [[ "$output" == *"Updated to v1.1.0"* ]] || false
+  [[ "$output" != *"error:"* ]] || false # merging the commit, not the signed tag: no gpg noise
 }
 
 @test "with pinned keys, an unsigned release is refused" {

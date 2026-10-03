@@ -38,11 +38,36 @@ cmm__unquote() {
   printf '%s\n' "$v"
 }
 
+# cmm__rtrim TEXT — TEXT without trailing whitespace.
+cmm__rtrim() { printf '%s\n' "${1%"${1##*[![:space:]]}"}"; }
+
+# cmm__path_has DIR PATHVALUE — the colon-separated PATHVALUE lists DIR
+# (trailing slashes aside).
+cmm__path_has() {
+  local rest="$2" e
+  while :; do
+    e="${rest%%:*}"
+    while [ "${#e}" -gt 1 ] && [ "${e%/}" != "$e" ]; do e="${e%/}"; done
+    [ "$e" = "$1" ] && return 0
+    case "$rest" in
+      *:*) rest="${rest#*:}" ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
 # cmm__doctor_cron — crontab entries that run scrubmac: do they get a PATH
 # with the tools in it (a PATH= line, an inline PATH=… on the entry, or a
 # login shell that reads your profile), and is scrubmac also on launchd?
+# An entry is a schedule (five time fields or @word) whose command runs
+# scrubmac (or the old cleanmymac name, when it leads here) as a word — not
+# a line that merely mentions it.
 cmm__doctor_cron() {
-  local tab line refs=0 env_path='' env_set=0 brewbin='' entry_path ok_path missing=0 lacks=0 old=0
+  local tab line cmd refs=0 env_path='' env_set=0 brewbin='' entry_path ok_path missing=0 lacks=0 old=0 tok
+  local sched='^(@[a-z]+|[0-9*/,A-Za-z-]+([[:space:]]+[0-9*/,A-Za-z-]+){4})[[:space:]]+'
+  # a command word: between shell separators, quotes, redirections, parens
+  local pre='(^|[/[:space:]"'"'"'(;&|`])' post='([[:space:]"'"'"';&|<>)`]|$)'
+  local login='(^|[[:space:]/])(ba|z|k|da|fi|tc|c)?sh([[:space:]]+-[A-Za-z]+)*[[:space:]]+(-[A-Za-z]*l[A-Za-z]*|--login)([[:space:]]|$)'
   have crontab || return 0
   tab="$(crontab -l 2>/dev/null || true)"
   [ -n "$tab" ] || return 0
@@ -54,35 +79,32 @@ cmm__doctor_cron() {
     esac
     # environment line (applies to the entries below it): PATH = "…"
     if printf '%s\n' "$line" | grep -Eq '^PATH[[:space:]]*='; then
-      env_path="$(cmm__unquote "$(printf '%s\n' "$line" | sed -E 's/^PATH[[:space:]]*=[[:space:]]*//')")"
+      env_path="$(printf '%s\n' "$line" | sed -E 's/^PATH[[:space:]]*=[[:space:]]*//')"
+      env_path="$(cmm__unquote "$(cmm__rtrim "$env_path")")"
       env_set=1
       continue
     fi
-    case "$line" in
-      *scrubmac* | *cleanmymac*) ;;
-      *) continue ;;
-    esac
+    printf '%s\n' "$line" | grep -Eq "$sched" || continue
+    cmd="$(printf '%s\n' "$line" | sed -E "s/$sched//")"
+    if ! printf '%s\n' "$cmd" | grep -Eq "${pre}scrubmac${post}"; then
+      printf '%s\n' "$cmd" | grep -Eq "${pre}cleanmymac${post}" || continue
+      tok="$(printf '%s\n' "$cmd" | grep -oE '[^[:space:]"'"'"'(;&|<>`]*cleanmymac' | sed -n 1p)"
+      cmm_old_name_ours "$tok" "$CMM_ROOT" "$HOME/.cleanmymac" || continue
+      old=1
+    fi
     refs=$((refs + 1))
-    case "$line" in *cleanmymac*) old=1 ;; esac
-    entry_path=''
+    # an inline PATH=… (the last one wins, as in the shell), quotes honored
+    entry_path="$(printf '%s\n' "$cmd" | sed -nE 's/^(.*[[:space:]])?PATH=("([^"]*)"|'"'"'([^'"'"']*)'"'"'|([^[:space:]"'"'"']*)).*/\3\4\5/p' | sed -n 1p)"
     ok_path="$env_set"
-    case "$line" in
-      *PATH=*)
-        entry_path="$(printf '%s\n' "$line" | sed -E 's/.*PATH=("[^"]*"|'"'"'[^'"'"']*'"'"'|[^[:space:]]*).*/\1/')"
-        entry_path="$(cmm__unquote "$entry_path")"
-        ok_path=1
-        ;;
-      *" -l "* | *" -lc "* | *" --login "*)
-        ok_path=login # the login shell reads your profile's PATH
-        ;;
-    esac
+    if [ -n "$entry_path" ]; then
+      ok_path=1
+    elif printf '%s\n' "$cmd" | grep -Eq "$login"; then
+      ok_path=login # the login shell reads your profile's PATH
+    fi
     if [ "$ok_path" = 0 ]; then
       missing=1
-    elif [ "$ok_path" = 1 ] && [ -n "$brewbin" ]; then
-      case ":${entry_path:-$env_path}:" in
-        *":$brewbin:"*) ;;
-        *) lacks=1 ;;
-      esac
+    elif [ "$ok_path" = 1 ] && [ -n "$brewbin" ] && ! cmm__path_has "$brewbin" "${entry_path:-$env_path}"; then
+      lacks=1
     fi
   done <<EOF
 $tab
@@ -161,6 +183,11 @@ cmd_doctor() {
   banner "Cleaners"
   local name path gate def ok=0 bad=0 on=0 off=0 desc reason f
   cmm_state_migrate
+  for f in "$CMM_DISABLED_FILE" "$CMM_ENABLED_FILE"; do
+    if { [ -e "$f" ] || [ -L "$f" ]; } && { [ ! -f "$f" ] || ! { : <"$f"; } 2>/dev/null; }; then
+      warn "cannot read $f — runs refuse to start until it is readable again (fix its permissions, or remove it)"
+    fi
+  done
   cmm_discover
   while IFS="$TAB" read -r name _ path _ _ _ def _; do
     [ -n "$name" ] || continue
@@ -212,7 +239,7 @@ EOF
     local program
     program="$(cmm__plist_program "$(cmm_schedule_plist)")"
     if [ -n "$program" ] && [ ! -x "$program" ]; then
-      warn "the scheduled launcher no longer exists: $program"
+      warn "the scheduled launcher no longer exists: $program — recreate the schedule with: $(cmm_schedule_command)"
     fi
   else
     note "launchd agent:  none ('scrubmac schedule weekly' sets one up)"
@@ -255,12 +282,22 @@ EOF
 
   banner "PATH audit (S6)"
   local dir warned=0 old_ifs="$IFS"
+  case ":$PATH:" in
+    *::*)
+      warn "PATH has an empty entry (a leading, trailing or doubled ':') — it searches the current directory, like '.'"
+      warned=1
+      ;;
+  esac
   set -f # no pathname expansion while splitting $PATH
   IFS=':'
   for dir in $PATH; do
     IFS="$old_ifs"
     case "$dir" in
-      '' | .)
+      '')
+        IFS=':' # (reported above)
+        continue
+        ;;
+      .)
         warn "PATH contains '.' (current directory) — a classic hijack vector"
         warned=1
         IFS=':'
@@ -310,18 +347,24 @@ EOF
   fi
   # command -v never returns a dangling link (it is not executable): look
   # where installers put launchers instead
-  for d in "${CMM_BREW_PREFIX:+$CMM_BREW_PREFIX/bin}" /usr/local/bin "$HOME/.local/bin"; do
+  while IFS= read -r d; do
     [ -n "$d" ] || continue
     for n in scrubmac cleanmymac; do
       if [ -L "$d/$n" ] && [ ! -e "$d/$n" ]; then
         warn "dangling $n symlink: $d/$n -> $(readlink "$d/$n")"
       fi
     done
-  done
+  done <<EOF
+$(cmm_launcher_dirs "${CMM_BREW_PREFIX:+$CMM_BREW_PREFIX/bin}")
+EOF
   if [ -L "$HOME/.cleanmymac" ]; then
     note "legacy:         ~/.cleanmymac is a compat link -> $(readlink "$HOME/.cleanmymac") (for pre-rename cron paths; uninstall.sh removes it)"
   elif [ -d "$HOME/.cleanmymac" ]; then
-    warn "an old cleanmymac 2.x install is still at ~/.cleanmymac — re-run install.sh to migrate it, or delete it"
+    if [ -d "$HOME/.scrubmac" ]; then
+      warn "an old cleanmymac 2.x copy is still at ~/.cleanmymac — scrubmac is installed at ~/.scrubmac, so delete the old copy (its install.sh would downgrade you)"
+    else
+      warn "an old cleanmymac 2.x install is still at ~/.cleanmymac — run ~/.cleanmymac/install.sh to migrate it, or delete it"
+    fi
   fi
   note ""
 }

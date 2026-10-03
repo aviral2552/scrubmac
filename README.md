@@ -23,26 +23,32 @@ if you like.
 
 ## Why you can trust it
 
-- **Never `sudo`.** Refuses to run as root. No system files, no SIP fights —
-  and it won't even run tools that escalate on their own (`mas update`).
-- **Never your data.** Only updates and regenerable caches. AI tool state
-  (`~/.claude`, `~/.codex`, `~/.cursor`, `~/.copilot`) is never touched. No
-  Trash, no `~/Library/Caches` sweeps, no Docker containers or volumes.
+- **Never runs `sudo` itself.** Refuses to run as root, no system files, no
+  SIP fights — and it skips tools that always escalate (`mas update`). The
+  one exception is Homebrew: upgrading a pkg-based cask makes Homebrew run
+  that installer through `sudo`, asking for your password — by default only
+  in runs you start in a terminal; `APP_UPDATES=never` rules it out.
+- **Never your data.** Updates and regenerable caches, plus Homebrew's own
+  housekeeping (`brew autoremove` of dependencies nothing needs any more,
+  `brew cleanup` of old formula versions). AI tool state (`~/.claude`,
+  `~/.codex`, `~/.cursor`, `~/.copilot`) is never touched. No Trash, no
+  `~/Library/Caches` sweeps, no Docker containers or volumes.
 - **A supply-chain cooldown, on by default.** Updates skip releases younger
   than 7 days wherever that can be enforced (npm, uv, pipx, pnpm, Bun) — the
   window in which worms like the 2025 npm compromises were caught — and the
   cooldown never downgrades anything. One setting turns it off.
 - **Preview everything.** `scrubmac --dry-run` prints every command that
   would change something and runs none of them; `scrubmac status` shows cache
-  sizes and pending updates without touching anything.
+  sizes and pending updates without touching your tools. (Both still do
+  scrubmac's own first-run setup and one-time migrations.)
 - **One failure never stops the rest.** Each cleaner runs in its own
-  process, with a time limit (a hung tool is stopped along with everything
-  it started) and no stdin; the summary says exactly what happened, and
-  every real run leaves a log.
-- **Auditable.** About 6,500 lines of shellcheck-clean bash (about 4,900
-  without comments and blank lines) plus a 500-line dependency-free node
+  process, with a time limit (a hung tool is stopped together with the
+  processes it started) and no stdin; the summary says exactly what
+  happened, and every real run leaves a log.
+- **Auditable.** About 7,600 lines of shellcheck-clean bash (about 5,800
+  without comments and blank lines) plus a 700-line dependency-free node
   resolver for the cooldown, a [threat model](docs/security.md), and a test
-  suite of ~450 hermetic tests plus a live end-to-end run on real macOS —
+  suite of ~580 hermetic tests plus a live end-to-end run on real macOS —
   every command checked against its tool's documentation.
 
 ## Install
@@ -89,7 +95,7 @@ runs never prompt.
 
 ```
 scrubmac                     run every enabled cleaner
-scrubmac --dry-run           preview: print every command, change nothing
+scrubmac --dry-run           preview: print every command, change none of your tools
 scrubmac -q                  quiet: one line per cleaner + summary; failures still show output
 scrubmac homebrew npm        run exactly these cleaners (even if disabled; also: scrubmac run …)
 scrubmac --skip docker,go    leave cleaners out of this run
@@ -129,14 +135,14 @@ writes a per-user launchd agent that carries your `PATH` (cron's is just
 missed schedule at the next wake. Scheduled runs never prompt, skip GUI app
 upgrades unless you allow them, can skip on battery or when a run succeeded
 recently, notify you when something fails, and stop any cleaner that hangs
-— with everything it started (`TIMEOUT`, default an hour). Offline, updates
-are skipped and cleanup still runs. Details: [docs/configuration.md](docs/configuration.md#scheduling).
+— together with the processes it started (`TIMEOUT`, default an hour).
+Offline, updates are skipped and cleanup still runs. Details: [docs/configuration.md](docs/configuration.md#scheduling).
 
 ## What it cleans
 
 Every cleaner is presence-gated — absent tools skip harmlessly, so the full
 set is safe on any machine. The exact commands each cleaner runs are
-documented — and CI-enforced against the code — in
+documented — and checked against the code in CI — in
 **[docs/cleaners.md](docs/cleaners.md)**:
 
 | Group | Cleaners |
@@ -197,9 +203,12 @@ Automatic, whichever way you installed:
 - **Git install**: run `cleanmymac update` one last time, then re-run
   `install.sh` (the old command tells you this too). Your install dir,
   config, disabled list, and custom cleaners are migrated automatically; a
-  compat symlink keeps old hardcoded cron paths working, and a transitional
-  `cleanmymac` shim (removed in v4) keeps old PATH links alive — nagging you
-  to switch.
+  compat symlink plus a transitional `cleanmymac` shim (removed in v4) keep
+  hardcoded `~/.cleanmymac/bin/cleanmymac` paths working, with a nag.
+  `install.sh` retires old `cleanmymac` links on your PATH — unless your
+  crontab still calls cleanmymac, in which case they stay until you update
+  it — so a bare `cleanmymac` stops working (or finds MacPaw's CLI): update
+  aliases and scripts.
 - **Crontabs/aliases**: update them to `scrubmac` — or replace the crontab
   line with `scrubmac schedule weekly`. Note: `cleanmymac` on PATH may
   eventually resolve to MacPaw's unrelated CLI once our shim is gone.
@@ -223,7 +232,8 @@ Automatic, whichever way you installed:
 
 ```bash
 scrubmac schedule off        # if you set a schedule
-~/.scrubmac/uninstall.sh     # git installs; --purge also removes config and logs
+~/.scrubmac/uninstall.sh     # git installs; --purge also removes ~/.config/scrubmac
+                             # (settings, choices, your own cleaners) and the logs
 brew uninstall scrubmac      # Homebrew installs
 ```
 

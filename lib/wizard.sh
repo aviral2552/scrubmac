@@ -121,10 +121,10 @@ w_tool_mark() {
 w_welcome() {
   w_header 'Welcome to scrubmac'
   note 'This wizard picks which services to maintain and sets security policy.'
-  note 'Safety doctrine: never sudo, never your data — only updates and'
-  note 'regenerable caches. Each screen starts from your current choices'
-  note '(Enter keeps them) and accepts (r)estart and (q)uit; nothing is'
-  note 'written until you confirm the summary.'
+  note 'Safety doctrine: scrubmac never runs sudo itself and never touches'
+  note 'your data — only updates and regenerable caches. Each screen starts'
+  note 'from your current choices (Enter keeps them) and accepts (r)estart'
+  note 'and (q)uit; nothing is written until you confirm the summary.'
   note ''
   w_ask 'Press Enter to begin: '
 }
@@ -366,14 +366,11 @@ EOF
   done <<EOF
 $(cmm_state_names "$CMM_DISABLED_FILE")
 EOF
-  {
-    printf '%s\n' "$CMM__HDR_ON"
-    printf '%s' "$en" | awk 'NF' | sort -u
-  } | cmm_write_file_atomic "$CMM_ENABLED_FILE" || exit 2
-  {
-    printf '%s\n' "$CMM__HDR_OFF"
-    printf '%s' "$dis" | awk 'NF' | sort -u
-  } | cmm_write_file_atomic "$CMM_DISABLED_FILE" || exit 2
+  # (your comments in both files are kept — see cmm_state_write)
+  # shellcheck disable=SC2046  # cleaner names never contain whitespace
+  cmm_state_write "$CMM_ENABLED_FILE" "$CMM__HDR_ON" $(printf '%s' "$en" | awk 'NF' | sort -u) || exit 2
+  # shellcheck disable=SC2046
+  cmm_state_write "$CMM_DISABLED_FILE" "$CMM__HDR_OFF" $(printf '%s' "$dis" | awk 'NF' | sort -u) || exit 2
   note ''
   note "Wrote $CMM_CONFIG_FILE"
   note "Wrote $CMM_ENABLED_FILE and $CMM_DISABLED_FILE"
@@ -408,6 +405,9 @@ wizard_main() {
     note "non-interactive setups can use 'scrubmac config set KEY VALUE' (see docs/configuration.md)"
     exit 2
   fi
+  # nothing it cannot read may be overwritten: its contents would be lost
+  cmm_require_readable "$CMM_CONFIG_FILE"
+  cmm_require_state_readable
   cmm_discover
   while :; do
     w_seed

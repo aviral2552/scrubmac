@@ -8,6 +8,7 @@
 # machine it runs on. Usage: scripts/render-demo.sh [OUTPUT.svg]
 # shellcheck disable=SC2016  # the stub bodies are literal sh, expanded when they run
 set -euo pipefail
+unset CDPATH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/docs/demo.svg}"

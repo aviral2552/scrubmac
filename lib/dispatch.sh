@@ -170,12 +170,14 @@ cmm_settings_export() {
 }
 
 # cmm_config_lint — warn about config lines the strict KEY=value grammar
-# ignores (a typo there would otherwise be silently dropped), and about a
-# config file that cannot be read. Once per process.
+# ignores, and about keys one typo away from a built-in setting (either
+# would otherwise be silently dropped), and about a config file that cannot
+# be read. CRLF line ends and a byte-order mark are fine (config_get reads
+# through them). Once per process.
 cmm_config_lint() {
   [ -n "${CMM__LINTED:-}" ] && return 0
   CMM__LINTED=1
-  local f="$CMM_CONFIG_FILE" line n=0 bad
+  local f="$CMM_CONFIG_FILE" line n=0 bad key hint
   [ -e "$f" ] || return 0
   if [ ! -r "$f" ] || [ -d "$f" ]; then
     warn "cannot read $f — using the default settings"
@@ -183,6 +185,8 @@ cmm_config_lint() {
   fi
   while IFS= read -r line || [ -n "$line" ]; do
     n=$((n + 1))
+    line="${line%$'\r'}"
+    [ "$n" = 1 ] && line="${line#$'\357\273\277'}"
     case "${line#"${line%%[![:space:]]*}"}" in
       '' | '#'*) continue ;;
     esac
@@ -194,8 +198,17 @@ cmm_config_lint() {
         ;;
       *) bad=1 ;;
     esac
-    [ "$bad" = 1 ] &&
-      warn "ignoring line $n of $f: '${line//$'\r'/}' (expected KEY=value; values may use only A-Z a-z 0-9 . _ / -)"
+    if [ "$bad" = 1 ]; then
+      warn "ignoring line $n of $f: '$line' (expected KEY=value; values may use only A-Z a-z 0-9 . _ / -)"
+      continue
+    fi
+    key="${line%%=*}"
+    cmm_setting_info "$key" && continue
+    # shellcheck disable=SC2046  # keys never contain whitespace
+    hint="$(CMM__SUGGEST_MAX=1 cmm_suggest "$key" $(cmm_setting_keys))"
+    if [ -n "$hint" ]; then
+      warn "line $n of $f: $key is not a setting — did you mean $hint? (as written, it is ignored)"
+    fi
   done <"$f"
   return 0
 }
@@ -434,12 +447,12 @@ cmm__split_names() {
 # ---------- did-you-mean ----------
 # cmm_suggest WORD CANDIDATE… — print the closest candidate (edit distance,
 # with a swap of two adjacent letters counting as one edit, ≤ max(1,
-# len/3)), or nothing.
+# len/3)), or nothing. CMM__SUGGEST_MAX=N tightens the limit to N edits.
 cmm_suggest() {
   local word="$1"
   shift
   [ "$#" -gt 0 ] || return 0
-  printf '%s\n' "$@" | awk -v w="$word" '
+  printf '%s\n' "$@" | awk -v w="$word" -v max="${CMM__SUGGEST_MAX:-0}" '
     function min3(a, b, c) { m = a; if (b < m) m = b; if (c < m) m = c; return m }
     function dist(s, t,    i, j, ls, lt, d, cost) {
       ls = length(s); lt = length(t)
@@ -458,6 +471,7 @@ cmm_suggest() {
     { dd = dist(w, $0); if (dd < bd) { bd = dd; best = $0 } }
     END {
       lim = int(length(w) / 3); if (lim < 1) lim = 1
+      if (max > 0) lim = max
       if (best != "" && bd <= lim) print best
     }'
 }
@@ -533,6 +547,23 @@ cmm_listed() {
   awk -v n="$2" '{ sub(/#.*/, ""); gsub(/^[ \t]+|[ \t\r]+$/, "") } $0 == n { f = 1; exit } END { exit !f }' "$1" 2>/dev/null
 }
 
+# cmm_require_state_readable — refuse (exit 2) to guess which cleaners are
+# on when a state file is there but cannot be read — its permissions, or a
+# symlink into a folder this process may not open (launchd jobs cannot read
+# ~/Documents, say): falling back to the defaults would silently re-enable
+# what you turned off.
+cmm_require_state_readable() {
+  local f
+  for f in "$CMM_DISABLED_FILE" "$CMM_ENABLED_FILE"; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    if [ ! -f "$f" ] || ! { : <"$f"; } 2>/dev/null; then
+      err "cannot read $f — refusing to guess which cleaners you turned on or off; fix its permissions (or remove it)"
+      exit 2
+    fi
+  done
+  return 0
+}
+
 # cmm_is_enabled NAME DEFAULT
 cmm_is_enabled() {
   cmm_listed "$CMM_DISABLED_FILE" "$1" && return 1
@@ -540,26 +571,42 @@ cmm_is_enabled() {
   [ "$2" != off ]
 }
 
-# cmm__state_rewrite FILE HEADER DROP [ADD] — rewrite a state file with its
-# header, without DROP, with ADD appended; other comments are kept and
-# duplicate names collapse.
-cmm__state_rewrite() {
-  local f="$1" hdr="$2" drop="$3" add="${4:-}"
+# cmm_state_write FILE HEADER NAME… — rewrite a state file so that it lists
+# exactly NAME…, keeping what you wrote: comment lines stay where they are,
+# a name that stays keeps its own line (inline comment and all, surrounding
+# whitespace trimmed), and new names are appended. Fails when the file cannot be written; exits 2 when it
+# exists but cannot be read (rewriting it would lose its contents).
+cmm_state_write() {
+  local f="$1" hdr="$2" src=/dev/null
+  shift 2
   cmm_require_readable "$f"
+  [ -f "$f" ] && src="$f"
   {
     printf '%s\n' "$hdr"
-    if [ -f "$f" ]; then
-      awk -v d="$drop" -v a="$add" '
-        /^# scrubmac:/ { next }
-        /^[ \t]*#/ { print; next }
-        { n = $0; sub(/#.*/, "", n); gsub(/^[ \t]+|[ \t\r]+$/, "", n) }
-        n == "" || n == d || n == a || seen[n]++ { next }
-        { print n }' "$f"
-    fi
-    if [ -n "$add" ]; then
-      printf '%s\n' "$add"
-    fi
+    awk -v names="$*" '
+      BEGIN { n = split(names, want, " "); for (i = 1; i <= n; i++) keep[want[i]] = 1 }
+      /^# scrubmac:/ { next }
+      /^[ \t]*#/ { sub(/\r$/, ""); print; next }
+      { k = $0; sub(/#.*/, "", k); gsub(/^[ \t]+|[ \t\r]+$/, "", k) }
+      k == "" || !(k in keep) || done[k]++ { next }
+      { gsub(/^[ \t]+|[ \t\r]+$/, ""); print }
+      END { for (i = 1; i <= n; i++) if (want[i] != "" && !done[want[i]]++) print want[i] }' "$src"
   } | cmm_write_file_atomic "$f"
+}
+
+# cmm__state_rewrite FILE HEADER DROP [ADD] — FILE's names without DROP,
+# with ADD (see cmm_state_write: comments are kept).
+cmm__state_rewrite() {
+  local f="$1" hdr="$2" drop="$3" add="${4:-}" n names=''
+  cmm_require_readable "$f"
+  while IFS= read -r n; do
+    [ -n "$n" ] && [ "$n" != "$drop" ] && names="$names $n"
+  done <<EOF
+$(cmm_state_names "$f")
+EOF
+  [ -n "$add" ] && names="$names $add"
+  # shellcheck disable=SC2086  # cleaner names never contain whitespace
+  cmm_state_write "$f" "$hdr" $names
 }
 
 # cmm_set_state NAME on|off — record an explicit choice (exit 2 when the
@@ -590,12 +637,21 @@ cmm_pid_is_ours() {
   return 1
 }
 
-# cmm_proc_start PID — the process's start time as one word ("Sat_Oct_4_
-# 09:00:01_2026"), or nothing when it cannot be read. With the pid it
-# identifies a process across pid reuse.
+# cmm_proc_start PID — when the process started, as one word, or nothing
+# when that cannot be read; with the pid it identifies a process across pid
+# reuse. It must read the same from any run: on Linux the start tick since
+# boot (immune to clock steps, which shift ps's computed start time),
+# elsewhere ps's start time in UTC and the C locale ("Sat_Oct_4_09:00:01_
+# 2026") — never local time, which differs between a launchd job and a shell
+# with TZ set.
 cmm_proc_start() {
   local s
-  s="$(ps -o lstart= -p "$1" 2>/dev/null)" || s=''
+  if [ -r "/proc/$1/stat" ]; then
+    s="$(awk '{ sub(/.*\) /, ""); print $20 }' "/proc/$1/stat" 2>/dev/null)" || s=''
+    [ -n "$s" ] && printf 't%s\n' "$s"
+    return 0
+  fi
+  s="$(TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null)" || s=''
   s="$(printf '%s' "$s" | tr -s ' \t\n' '___')"
   s="${s#_}"
   printf '%s\n' "${s%_}"
@@ -623,11 +679,12 @@ cmm_lock_holder_alive() {
 
 # The run lock is a symlink whose target identifies the holder ("PID:START"):
 # creating it is a single atomic syscall that fails when the lock exists, and
-# the content arrives with it. A stale lock is broken by an atomic rename,
-# and the renamed link is checked so a racing run's fresh lock is never
-# stolen.
+# the content arrives with it. A stale lock is broken by one run at a time
+# (a mkdir mutex), which re-reads it first, so a lock that a racing run just
+# created is never removed; then every contender races to create it again,
+# and exactly one wins.
 cmm_lock_acquire() {
-  local held moved me
+  local held again me
   if ! mkdir -p "$CMM_STATE_DIR" 2>/dev/null || [ ! -w "$CMM_STATE_DIR" ]; then
     err "cannot write to $CMM_STATE_DIR (the run lock and logs live there) — check its ownership and permissions"
     exit 2
@@ -656,17 +713,18 @@ cmm_lock_acquire() {
     err "another scrubmac run is already in progress (pid ${held%%:*})"
     exit 2
   fi
+  # Break the stale lock by moving it aside, then look at what moved: when
+  # a run raced in and took the lock since the check above, it is that run's
+  # lock that moved — put back, never removed. (Only one mover can win a
+  # given lock, so two runs breaking the same stale lock cannot both pass.)
   if mv "$CMM_LOCK" "$CMM_LOCK.stale.$$" 2>/dev/null; then
-    moved="$(readlink "$CMM_LOCK.stale.$$" 2>/dev/null || true)"
-    if [ "$moved" != "$held" ]; then
-      # we grabbed a racing run's fresh lock: hand it back and stand down
-      ln -sn "$moved" "$CMM_LOCK" 2>/dev/null || true
-      rm -f "$CMM_LOCK.stale.$$"
-      err "another scrubmac run is already in progress (pid ${moved%%:*})"
-      exit 2
+    again="$(readlink "$CMM_LOCK.stale.$$" 2>/dev/null || true)"
+    if [ -n "$again" ] && [ "$again" != "$held" ]; then
+      ln -sn "$again" "$CMM_LOCK" 2>/dev/null || true
+    else
+      warn "removed a stale lock left by pid ${held%%:*}"
     fi
     rm -f "$CMM_LOCK.stale.$$"
-    warn "removed a stale lock left by pid ${held%%:*}"
   fi
   if ln -sn "$me" "$CMM_LOCK" 2>/dev/null; then
     CMM__LOCK_HELD="$me"
@@ -684,7 +742,8 @@ cmm_lock_acquire() {
 # (someone else's, in a shared /tmp) is ignored, never fatal — the scrubmac
 # lock above already protects this run.
 cmm_legacy_lock_acquire() {
-  local base="${TMPDIR:-/tmp}" lock pid
+  local base lock pid
+  base="$(cmm__abs "${TMPDIR:-/tmp}")" # absolute: runs cd to $HOME before releasing it
   base="${base%/}"
   CMM__LEGACY_LOCK=''
   [ -d "$base" ] && [ -w "$base" ] || return 0
@@ -888,8 +947,10 @@ R_CACHE=()
 CMM_TMP=''
 CMM_LOG_FILE=''
 CMM__CUR_PID=''
+CMM__CUR_EXITED=0
 CMM__WD_PID=''
 CMM__CUR_NAME=''
+CMM__SKIPPED=''
 CMM__CUR_SRC=''
 CMM__CUR_START=0
 CMM__RUN_STARTED=''
@@ -897,6 +958,7 @@ CMM__RUN_START_EPOCH=0
 CMM__RUN_START_SECS=0
 CMM__INTERRUPTED=0
 CMM__GROUP=0
+CMM__LEFTOVERS=0
 CMM__SNAP=''
 
 cmm_log() {
@@ -955,6 +1017,17 @@ cmm__snapshot_cleaner() {
   fi
 }
 
+# cmm__watchdog_fire PID GROUP MARKER — the TIMEOUT watchdog's deadline: a
+# cleaner still running is marked (MARKER) and stopped; one that finished
+# right at the deadline is not a timeout and is left alone. Once marked, the
+# stop ignores TERM: it must run through to the KILL stage.
+cmm__watchdog_fire() {
+  cmm__alive - "$1" || return 0
+  : >"$3"
+  trap '' TERM
+  cmm_stop_cleaner "$1" "$2"
+}
+
 # cmm__exec_cleaner PATH NAME — run one cleaner as a child process with stdin
 # from /dev/null (a cleaner must never read the dispatcher's input or wait for
 # a prompt answer), fd 3 closed (it carries --json output, and a daemon that
@@ -964,18 +1037,28 @@ cmm__exec_cleaner() {
   local path="$1" name="$2" i=0
   local out="$CMM_TMP/$name.out" tomark="$CMM_TMP/$name.timeout"
   rm -f "${out:?}" "${out:?}.done" "${tomark:?}"
-  [ "$CMM__GROUP" = 1 ] && set -m # its own process group (see cmm_stop_cleaner)
-  case "$CMM__OUTMODE" in
-    direct) "$path" </dev/null 3>&- & ;;
-    capture) "$path" </dev/null >"$out" 2>&1 3>&- & ;;
-    *) "$path" </dev/null 3>&- > >(
+  CMM__LEFTOVERS=0
+  CMM__CUR_EXITED=0
+  # tee is started by the dispatcher, on fd 9, before the cleaner exists: as
+  # the cleaner's own process substitution it would be the cleaner's child
+  # (bash forks before it expands redirections), stopped along with it.
+  if [ "$CMM__OUTMODE" = tee ]; then
+    exec 9> >(
       exec 3>&-
       tee "$out"
-      : >"$out.done"
-    ) 2>&1 & ;;
+      # (a daemon the cleaner left behind can keep tee alive past the run)
+      { : >"$out.done"; } 2>/dev/null
+    )
+  fi
+  [ "$CMM__GROUP" = 1 ] && set -m # its own process group (see cmm_stop_cleaner)
+  case "$CMM__OUTMODE" in
+    direct) "$path" </dev/null 3>&- 9>&- & ;;
+    capture) "$path" </dev/null >"$out" 2>&1 3>&- 9>&- & ;;
+    *) "$path" </dev/null >&9 2>&1 3>&- 9>&- & ;;
   esac
   CMM__CUR_PID=$!
   set +m
+  [ "$CMM__OUTMODE" = tee ] && exec 9>&-
   CMM__WD_PID=''
   if [ "${CMM_TIMEOUT:-0}" -gt 0 ]; then
     # The watchdog sleeps in the background and waits on it, so a TERM from
@@ -986,18 +1069,24 @@ cmm__exec_cleaner() {
       trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM
       sleep "$CMM_TIMEOUT" &
       wait $!
-      : >"$tomark"
-      trap '' TERM
-      cmm_stop_cleaner "$CMM__CUR_PID" "$CMM__GROUP"
-    ) </dev/null >/dev/null 2>&1 3>&- &
+      cmm__watchdog_fire "$CMM__CUR_PID" "$CMM__GROUP" "$tomark"
+    ) </dev/null >/dev/null 2>&1 3>&- 9>&- &
     CMM__WD_PID=$!
   fi
   CMM__RC=0
   wait "$CMM__CUR_PID" 2>/dev/null || CMM__RC=$?
+  CMM__CUR_EXITED=1 # (an interrupt from here on must not call it "stopped")
   if [ -n "$CMM__WD_PID" ]; then
     # timed out: let the watchdog finish the stop instead of cutting it short
     [ -e "$tomark" ] || kill -TERM "$CMM__WD_PID" 2>/dev/null || true
     wait "$CMM__WD_PID" 2>/dev/null || true
+  fi
+  # In its own process group, what a cleaner leaves running would escape
+  # launchd's end-of-job cleanup (launchd stops only the job's own group):
+  # stop it here, as launchd would have.
+  if [ "$CMM__GROUP" = 1 ] && [ ! -e "$tomark" ] && cmm__alive "$CMM__CUR_PID"; then
+    CMM__LEFTOVERS=1
+    cmm_stop_cleaner "$CMM__CUR_PID" 1
   fi
   if [ "$CMM__OUTMODE" = tee ]; then
     # tee exits once every writer is gone; give it a moment to flush
@@ -1008,6 +1097,7 @@ cmm__exec_cleaner() {
   fi
   CMM__CUR_PID=''
   CMM__WD_PID=''
+  CMM__CUR_EXITED=0
   CMM__TIMED_OUT=0
   [ -e "$tomark" ] && CMM__TIMED_OUT=1
   return 0
@@ -1143,6 +1233,11 @@ cmm__json_run() {
   printf '  "interactive": %s,\n' "$([ "${CMM_INTERACTIVE:-0}" = 1 ] && echo true || echo false)"
   printf '  "offline": %s,\n' "$([ "${CMM_OFFLINE:-0}" = 1 ] && echo true || echo false)"
   printf '  "interrupted": %s,\n' "$([ "$CMM__INTERRUPTED" = 1 ] && echo true || echo false)"
+  if [ -n "$CMM__SKIPPED" ]; then
+    printf '  "skipped": %s,\n' "$(cmm_json_str "$CMM__SKIPPED")"
+  else
+    printf '  "skipped": null,\n'
+  fi
   printf '  "exit_code": %s,\n' "$rc"
   printf '  "totals": {"ok": %s, "skipped": %s, "failed": %s},\n' "$CMM__N_OK" "$CMM__N_SKIP" "$CMM__N_FAIL"
   printf '  "disk_freed_kb": %s,\n' "${freed:-null}"
@@ -1190,9 +1285,16 @@ cmm__log_files() {
 # cmm__rotate_logs — keep the newest LOG_KEEP logs (at least one: the run
 # that just finished points at its own log).
 cmm__rotate_logs() {
-  local keep="${CMM_LOG_KEEP:-20}" f n=0
+  local keep="${CMM_LOG_KEEP:-20}" f n=0 cur=''
   [ "$keep" -ge 1 ] 2>/dev/null || keep=1
+  # this run's own log always stays, and counts as one: after a clock change
+  # older logs can carry "newer" names
+  if [ -n "${CMM_LOG_FILE:-}" ] && [ -f "$CMM_LOG_FILE" ]; then
+    cur="${CMM_LOG_FILE##*/}"
+    n=1
+  fi
   for f in $(cmm__log_files); do
+    [ "$f" = "$cur" ] && continue
     n=$((n + 1))
     [ "$n" -gt "$keep" ] && rm -f "${CMM_LOG_DIR:?}/${f:?}"
   done
@@ -1222,32 +1324,34 @@ cmm__open_log() {
 }
 
 # cmm__finish_run EXIT_CODE — summary, disk delta, logs, JSON, notification.
+# What it prints goes through subshells (see cmm__on_int): the run record
+# and the log must still be written when the terminal is gone.
 cmm__finish_run() {
   local rc="$1" freed='' df_after
   cmm__counts
   if [ "${#R_NAMES[@]}" -eq 0 ] && [ "$CMM__INTERRUPTED" != 1 ]; then
-    note "nothing to run — every cleaner is disabled or left out ('scrubmac list' shows them)"
+    (note "nothing to run — every cleaner is disabled or left out ('scrubmac list' shows them)") || true
   fi
-  print_summary
+  (print_summary) || true
   if [ -n "${CMM__DF_BEFORE:-}" ] && [ "$CMM_DRY_RUN" != 1 ] && [ "$CMM_MODE" != status ]; then
     df_after="$(cmm__df_free)"
     # other processes move free space too: below 1 MB the delta is noise
     if [ -n "$df_after" ] && [ "$df_after" -ge $((CMM__DF_BEFORE + 1024)) ]; then
       freed=$((df_after - CMM__DF_BEFORE))
-      note "approx. disk space freed: $(cmm_human_kb "$freed")"
+      (note "approx. disk space freed: $(cmm_human_kb "$freed")") || true
     fi
   fi
   if [ -n "${CMM__N_FREED_SUM:-}" ]; then
-    note "measured by cleaners: $(cmm_human_kb "$CMM__N_FREED_SUM") freed"
+    (note "measured by cleaners: $(cmm_human_kb "$CMM__N_FREED_SUM") freed") || true
   fi
   if [ "${#R_NAMES[@]}" -ge 3 ] && [ "$CMM__N_OK" -eq 0 ] && [ "$CMM__N_FAIL" -eq 0 ]; then
-    warn "every cleaner skipped — if this was a scheduled run, its PATH may be missing your tools (cron's default PATH is /usr/bin:/bin); run 'scrubmac doctor'"
+    (warn "every cleaner skipped — if this was a scheduled run, its PATH may be missing your tools (cron's default PATH is /usr/bin:/bin); run 'scrubmac doctor'") || true
   fi
   if [ -n "$CMM_LOG_FILE" ]; then
     { print_summary plain >>"$CMM_LOG_FILE"; } 2>/dev/null || true
     [ -n "$freed" ] && cmm_log "approx. disk space freed: $(cmm_human_kb "$freed")"
     cmm_log "exit $rc"
-    note "log: $CMM_LOG_FILE"
+    (note "log: $CMM_LOG_FILE") || true
   fi
   if [ "$CMM_DRY_RUN" != 1 ] && [ "$CMM_MODE" != status ]; then
     cmm__json_run "$rc" "$freed" | cmm_write_file_atomic "$CMM_LAST_RUN_FILE" || true
@@ -1283,23 +1387,54 @@ cmm__finish_run() {
   return 0
 }
 
+# The interrupt handler must finish whatever happens around it: a second
+# Ctrl-C during the stop, a closed terminal (writes fail with EIO), a pipe
+# reader that is gone (EPIPE). So further signals are ignored, errexit is
+# off, and everything printed goes through subshells — a failed write then
+# leaves nothing stuck in this shell's output buffer.
 cmm__on_int() {
-  trap - INT TERM HUP
+  trap '' INT TERM HUP PIPE
+  set +e
+  local st
   CMM__INTERRUPTED=1
   # stop the watchdog first, so it cannot fire while we stop the cleaner
   if [ -n "$CMM__WD_PID" ]; then
-    kill -TERM "$CMM__WD_PID" 2>/dev/null || true
+    kill -TERM "$CMM__WD_PID" 2>/dev/null
   fi
+  (
+    echo
+    warn "interrupted — stopping ${CMM__CUR_NAME:-the run}; partial summary follows"
+  )
   if [ -n "$CMM__CUR_PID" ]; then
     cmm_stop_cleaner "$CMM__CUR_PID" "$CMM__GROUP"
+    # reap it, so bash prints no "Terminated" job notice later (only when it
+    # is gone: a process stuck in the kernel would hang the wait)
+    cmm__alive - "$CMM__CUR_PID" || wait "$CMM__CUR_PID" 2>/dev/null
   fi
-  echo
-  warn "interrupted — partial summary follows"
-  if [ -n "$CMM__CUR_NAME" ]; then
-    cmm__record "$CMM__CUR_NAME" stopped $((SECONDS - CMM__CUR_START)) 130 "$CMM__CUR_SRC" '' '' ''
-    cmm_log "== $CMM__CUR_NAME: STOPPED (interrupted)"
+  # (unless the signal came just after it was recorded)
+  if [ -n "$CMM__CUR_NAME" ] && { [ "${#R_NAMES[@]}" -eq 0 ] || [ "${R_NAMES[$((${#R_NAMES[@]} - 1))]}" != "$CMM__CUR_NAME" ]; }; then
+    if [ "$CMM__CUR_EXITED" = 1 ]; then
+      # it had already finished (the signal came while what it left running
+      # was being stopped): its own result stands
+      cmm__read_report "$CMM_TMP/$CMM__CUR_NAME.report"
+      if [ -e "$CMM_TMP/$CMM__CUR_NAME.timeout" ]; then
+        st=timeout
+      elif [ "$CMM__RC" -eq 0 ]; then
+        st=ok
+      elif [ "$CMM__RC" -eq "$CMM_EXIT_SKIP" ]; then
+        st=skip
+        [ -n "$CMM__SKIPMSG" ] && CMM__NOTES="$CMM__SKIPMSG$CMM_US$CMM__NOTES"
+      else
+        st=fail
+      fi
+      cmm__record "$CMM__CUR_NAME" "$st" $((SECONDS - CMM__CUR_START)) "$CMM__RC" "$CMM__CUR_SRC" "$CMM__NOTES" "$CMM__FREED" "$CMM__CACHE"
+    else
+      cmm__record "$CMM__CUR_NAME" stopped $((SECONDS - CMM__CUR_START)) 130 "$CMM__CUR_SRC" '' '' ''
+    fi
+    cmm__label "${R_STATUS[$((${#R_STATUS[@]} - 1))]}"
+    cmm_log "== $CMM__CUR_NAME: $CMM__LABEL (interrupted)"
     if [ -n "$CMM_LOG_FILE" ] && [ -s "$CMM_TMP/$CMM__CUR_NAME.out" ]; then
-      { cat "$CMM_TMP/$CMM__CUR_NAME.out" >>"$CMM_LOG_FILE"; } 2>/dev/null || true
+      { cat "$CMM_TMP/$CMM__CUR_NAME.out" >>"$CMM_LOG_FILE"; } 2>/dev/null
     fi
   fi
   cmm__finish_run 130
@@ -1362,6 +1497,7 @@ cmm_run_cleaners() {
   cmm_log "PATH=$PATH"
 
   # Select, then snapshot the built-ins (see cmm__snapshot_lib).
+  [ "$#" -gt 0 ] || cmm_require_state_readable
   cmm_discover
   while IFS="$TAB" read -r name _ path src _ _ def _; do
     [ -n "$name" ] || continue
@@ -1436,6 +1572,9 @@ EOF
     secs=$((SECONDS - CMM__CUR_START))
     cmm__read_report "$CMM_REPORT_FILE"
 
+    if [ "$CMM__LEFTOVERS" = 1 ]; then
+      CMM__NOTES="${CMM__NOTES}left processes running after it finished — stopped them$CMM_US"
+    fi
     if [ "$CMM__TIMED_OUT" = 1 ]; then
       status=timeout
       CMM__NOTES="stopped after ${CMM_TIMEOUT}s (TIMEOUT)$CMM_US$CMM__NOTES"
@@ -1478,7 +1617,11 @@ EOF
     fi
   done
 
-  trap - INT TERM HUP
+  # Every cleaner is done: a signal now must not cut the summary and the run
+  # record short, nor leave them saying one exit code while the process
+  # dies with another. (A no-op trap, not an ignored signal: commands run
+  # from here — the notification — can still be interrupted themselves.)
+  trap : INT TERM HUP
   unset CMM_REPORT_FILE CMM_CLEANER_NAME CMM_SCRATCH_DIR
   cmm__counts
   local rc=0

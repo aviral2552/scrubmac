@@ -5,36 +5,38 @@
 # gate: bun
 # group: JavaScript
 # default: on
-# summary: self-update standalone Bun (held during a cooldown), update global packages (cooldown-aware), clear the cache
+# summary: self-update standalone Bun and update global packages within their saved ranges (cooldown-aware), clear the cache
 # Bun: self-update standalone installs (`bun upgrade` replaces the binary in
-# place, so Homebrew/npm-managed copies are left to their managers; it can
-# only install the newest release, so it is held while the supply-chain
-# cooldown is on), update global packages — under the cooldown each to the
-# newest release its saved range allows that is at least COOLDOWN_DAYS old,
-# never backwards — and clear the global cache. Bun's own
-# --minimum-release-age is deliberately not used: `bun update -g` with it
-# fails whenever an installed release is newer than the cutoff, and
-# downgrades packages when a range allows it.
+# place, so Homebrew/npm-managed copies are left to their managers), update
+# global packages, and clear the global cache. Under the supply-chain
+# cooldown (or your own stricter bunfig install.minimumReleaseAge), each
+# global moves to the newest release its saved range allows that is old
+# enough — never backwards — with `bun update -g NAME@VERSION
+# --minimum-release-age`, which holds its dependencies to the cutoff too;
+# `bun upgrade` (which cannot be told a version) runs only when Bun's newest
+# release is itself old enough. Without either, plain `bun update -g`.
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 . "${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
 
 TAB=$'\t'
-# lib/registry.js (the registry resolver) sits next to the lib/common.sh above
-REGISTRY_JS="${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
-REGISTRY_JS="${REGISTRY_JS%/*}/registry.js"
+# lib/registry.cjs (the registry resolver) sits next to the lib/common.sh above
+REGISTRY_CJS="${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
+REGISTRY_CJS="${REGISTRY_CJS%/*}/registry.cjs"
 
 # reg_resolve NAME CURRENT CUTOFF MODE — the registry verdict for NAME (the
-# rules are in lib/registry.js) in REG_VERDICT — pick, held, none, unsuitable,
-# or error when the registry could not be read — and REG_VERSION. Releases
-# that are deprecated, or whose engines.node excludes this node, are passed
-# over (at most three times) with a note.
+# rules are in lib/registry.cjs) in REG_VERDICT — pick, held, none,
+# unsuitable, foreign (CURRENT is no release of NAME there), missing (the
+# registry does not know NAME), or error when it could not be read — and
+# REG_VERSION. Releases that are deprecated, or whose engines.node excludes
+# this node, are passed over (at most three times) with a note.
 reg_resolve() {
-  local name="$1" info out cands kind v why
+  local name="$1" cur="$2" info out cands kind v why
   REG_VERDICT=error
   REG_VERSION=''
-  info="$(npm view "$name" time versions dist-tags --json 2>/dev/null)" || return 0
-  out="$(printf '%s' "$info" | node "$REGISTRY_JS" pick "$name" "$2" "$3" "$4")" || return 0
+  # npm prints an E404 as a JSON error object (exit 1): pick tells it apart
+  info="$(npm view "$name" time versions dist-tags --json 2>/dev/null)" || true
+  out="$(printf '%s' "$info" | node "$REGISTRY_CJS" pick "$name" "$cur" "$3" "$4")" || return 0
   case "$out" in
     pick"$TAB"*) cands="${out#pick"$TAB"}" ;;
     held"$TAB"*)
@@ -42,13 +44,14 @@ reg_resolve() {
       REG_VERSION="${out#held"$TAB"}"
       return 0
       ;;
-    *)
-      REG_VERDICT=none
+    none | foreign | missing)
+      REG_VERDICT="$out"
       return 0
       ;;
+    *) return 0 ;;
   esac
-  info="$(npm view "$name@${cands//$TAB/ || }" name version deprecated engines --json 2>/dev/null)" || info=''
-  out="$(printf '%s' "$info" | node "$REGISTRY_JS" verify "${cands//$TAB/,}" --npm "$(command -v npm)")" ||
+  info="$(npm view "$name@${cands//$TAB/ || } || $cur" name version deprecated engines --json 2>/dev/null)" || info=''
+  out="$(printf '%s' "$info" | node "$REGISTRY_CJS" verify "${cands//$TAB/,}" --current "$cur" --npm "$(command -v npm)")" ||
     out="ok$TAB${cands%%"$TAB"*}"
   REG_VERDICT=unsuitable
   while IFS="$TAB" read -r kind v why; do
@@ -57,6 +60,7 @@ reg_resolve() {
       ok)
         REG_VERDICT=pick
         REG_VERSION="$v"
+        [ -z "$why" ] || note "- $name $v: $why"
         ;;
     esac
   done <<EOF
@@ -65,29 +69,64 @@ EOF
   return 0
 }
 
-# can_resolve — node, npm and lib/registry.js are there for registry lookups.
-can_resolve() { have node && have npm && [ -f "$REGISTRY_JS" ]; }
+# can_resolve — node, npm and lib/registry.cjs are there for registry lookups.
+can_resolve() { have node && have npm && [ -f "$REGISTRY_CJS" ]; }
 
-# bun_self_update DAYS — `bun upgrade` (standalone installs only) cannot be
-# told a version: it always installs the newest release, so while the
-# cooldown is on it is held — with a note only when a newer Bun exists.
+# bun_policy DAYS — BUN_VER; BUN_POLICY: the minimum release age (seconds)
+# asked for — the cooldown, or install.minimumReleaseAge from your global
+# bunfig ($XDG_CONFIG_HOME/.bunfig.toml, ~/.bunfig.toml) when stricter
+# (passing a smaller value on the command line would relax it); BUN_WHY:
+# where it comes from.
+bun_policy() {
+  local cfg=0
+  BUN_VER="$(bun --version 2>/dev/null)" || BUN_VER=0
+  if have node && [ -f "$REGISTRY_CJS" ]; then
+    cfg="$(node "$REGISTRY_CJS" bunfig-age ${XDG_CONFIG_HOME:+"$XDG_CONFIG_HOME/.bunfig.toml"} "$HOME/.bunfig.toml")" || cfg=0
+  fi
+  case "$cfg" in '' | *[!0-9]*) cfg=0 ;; esac
+  BUN_POLICY=$(($1 * 86400))
+  BUN_WHY=''
+  [ "$1" -gt 0 ] && BUN_WHY="the ${1}-day cooldown"
+  if [ "$cfg" -gt 0 ]; then
+    BUN_WHY="${BUN_WHY:+$BUN_WHY; }bunfig minimumReleaseAge=$cfg"
+    [ "$cfg" -gt "$BUN_POLICY" ] && BUN_POLICY="$cfg"
+  fi
+  return 0
+}
+
+# bun_self_update — `bun upgrade` for standalone installs. It cannot be told
+# a version: it installs the newest release from the GitHub feed it reads
+# itself (api.github.com/repos/Jarred-Sumner/bun-releases-for-updater), so
+# under the cooldown that feed decides — upgrade when the newest release is
+# old enough, hold while it is too fresh (or cannot be read).
 bun_self_update() {
-  local days="$1" cur info verdict
-  if [ "$days" -eq 0 ] || [ "$(install_kind bun)" != standalone ]; then
+  local json verdict
+  if [ "$BUN_POLICY" -eq 0 ] || [ "$(install_kind bun)" != standalone ]; then
     ai_self_update bun bun upgrade
     return 0
   fi
-  cur="$(bun --version 2>/dev/null)" || cur=''
-  if [ -n "$cur" ] && can_resolve; then
-    info="$(npm view bun time versions dist-tags --json 2>/dev/null)" || info=''
-    verdict="$(printf '%s' "$info" | node "$REGISTRY_JS" pick bun "$cur" "$(cmm_now_iso)" latest 2>/dev/null)" || verdict=''
-    if [ "$verdict" = none ]; then
-      note "- bun $cur is up to date"
-      return 0
-    fi
+  verdict=''
+  if have curl && can_resolve; then
+    json="$(curl -fsSL --max-time 30 -H 'Accept: application/vnd.github.v3+json' \
+      "https://${GITHUB_API_DOMAIN:-api.github.com}/repos/Jarred-Sumner/bun-releases-for-updater/releases/latest" 2>/dev/null)" || json=''
+    verdict="$(printf '%s' "$json" | node "$REGISTRY_CJS" bun-release "$BUN_VER" "$BUN_CUTOFF" 2>/dev/null)" || verdict=''
   fi
-  note "- bun upgrade skipped during the ${days}-day cooldown: it always installs the newest release — run 'bun upgrade' yourself"
-  summary_note "bun upgrade held by the ${days}-day cooldown — run 'bun upgrade' yourself"
+  case "$verdict" in
+    upgrade"$TAB"*) ai_self_update bun bun upgrade ;;
+    held"$TAB"*)
+      note "- bun upgrade held: Bun ${verdict#held"$TAB"} is too fresh ($BUN_WHY)"
+      summary_note "bun upgrade held by the cooldown ($BUN_WHY)"
+      ;;
+    none) note "- bun $BUN_VER is up to date" ;;
+    canary)
+      note "- bun $BUN_VER is a canary build: 'bun upgrade' would install the newest canary, never old enough for the cooldown — held"
+      summary_note "bun upgrade held (canary build, $BUN_WHY)"
+      ;;
+    *)
+      note "- bun upgrade held: could not check the age of Bun's newest release (needs curl, node and GitHub's API)"
+      summary_note "bun upgrade held (newest release could not be checked)"
+      ;;
+  esac
 }
 
 # bun_global_dir — where `bun add -g` installs (the header of `bun pm ls -g`
@@ -105,27 +144,65 @@ bun_skip_note() {
     range:*) note "- $1: its saved range '${2#range:}' cannot be moved by version — left to 'bun update -g'" ;;
     alias) note "- skipping $1: an aliased install (npm:…) — updating it by name would install a different package" ;;
     local | linked) note "- skipping $1: linked/local install (bun link, a path, file:, git)" ;;
+    foreign) note "- skipping $1: its version is not a release of $1 on the registry (installed from git, a tarball, a fork or another registry?)" ;;
+    missing) note "- skipping $1: not found on npm's configured registry (a registry set only in bunfig?)" ;;
     *) note "- skipping $1 ($2)" ;;
   esac
 }
 
-# bun_cooldown_update DAYS — each global package to the newest release its
-# saved range allows that is at least DAYS old, via `bun update -g
-# NAME@VERSION` (which keeps the range's ^ or ~ operator).
-bun_cooldown_update() {
-  local days="$1" cutoff rows kind name cur mode held=0
-  if ! can_resolve; then
-    note "- cooldown active (${days}d) but node/npm (needed for registry lookups) not found: global updates are held"
-    summary_note "global updates held (node/npm not found for the cooldown)"
+# bun_update_gated NAME@VERSION — `bun update -g NAME@VERSION
+# --minimum-release-age N`, announced like `step`. Bun 1.3 re-checks every
+# global's saved range against the age gate and fails ("blocked by
+# minimum-release-age") while one of them has no release old enough; that
+# holds the remaining updates (BUN_BLOCKED) instead of failing the run.
+bun_update_gated() {
+  local out rc=0
+  if cmm_version_ge "$BUN_VER" 1.4; then
+    step bun update -g "$1" --minimum-release-age "$BUN_POLICY"
     return 0
   fi
-  cutoff="$(date_days_ago "$days")"
-  note "- cooldown: updating global packages only to releases published before $cutoff (${days}d)"
-  if ! rows="$(node "$REGISTRY_JS" bun-globals "$(bun_global_dir)")"; then
+  [ "${CMM_MODE:-run}" = status ] && return 0
+  printf '%s+ %s%s\n' "$CMM_DIM" "bun update -g $1 --minimum-release-age $BUN_POLICY" "$CMM_RESET"
+  [ "${CMM_DRY_RUN:-0}" = 1 ] && return 0
+  out="$(bun update -g "$1" --minimum-release-age "$BUN_POLICY" 2>&1)" || rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] && return 0
+  case "$out" in
+    *"blocked by minimum-release-age"*)
+      BUN_BLOCKED=1
+      note "- this Bun ($BUN_VER) checks every global against the age gate, and one of them has no release old enough yet: the remaining global updates are held (Bun 1.4 checks only the package being updated)"
+      summary_note "global updates held: Bun < 1.4 blocks them while any global is newer than the cooldown"
+      ;;
+    *)
+      warn "'bun' exited $rc — continuing with the remaining steps"
+      cmm_fail_later
+      ;;
+  esac
+}
+
+# bun_outdated_filter — BUN_OUTDATED: the globals `bun outdated -g` shows a
+# newer release for (" name … "), or "" when it could not be read (then
+# every global is looked up).
+bun_outdated_filter() {
+  local text names
+  BUN_OUTDATED=''
+  text="$(bun outdated -g 2>/dev/null)" || return 0
+  names="$(printf '%s\n' "$text" | node "$REGISTRY_CJS" bun-outdated 2>/dev/null)" || return 0
+  BUN_OUTDATED=" $(printf '%s\n' "$names" | tr '\n' ' ')"
+}
+
+# bun_cooldown_update GLOBAL_DIR — each global package to the newest release
+# its saved range allows that is published before BUN_CUTOFF.
+bun_cooldown_update() {
+  local rows kind name cur mode held=0 unsuitable=0
+  note "- cooldown: updating global packages only to releases published before $BUN_CUTOFF ($BUN_WHY)"
+  if ! rows="$(node "$REGISTRY_CJS" bun-globals "$1")"; then
     warn "could not read Bun's global packages"
     cmm_fail_later
     return 0
   fi
+  bun_outdated_filter
+  BUN_BLOCKED=0
   while IFS="$TAB" read -r kind name cur mode <&3; do
     case "$kind" in
       skip)
@@ -135,18 +212,29 @@ bun_cooldown_update() {
       pkg) ;;
       *) continue ;;
     esac
-    reg_resolve "$name" "$cur" "$cutoff" "$mode"
+    if [ -n "$BUN_OUTDATED" ] && [ "${BUN_OUTDATED#* "$name" }" = "$BUN_OUTDATED" ]; then
+      continue # already the newest release
+    fi
+    reg_resolve "$name" "$cur" "$BUN_CUTOFF" "$mode"
     case "$REG_VERDICT" in
-      pick) step bun update -g "$name@$REG_VERSION" ;;
+      pick)
+        if [ "$BUN_BLOCKED" = 1 ]; then
+          held=$((held + 1))
+        else
+          bun_update_gated "$name@$REG_VERSION"
+        fi
+        ;;
       held)
         held=$((held + 1))
-        note "- $name $cur: every newer release its range allows is under ${days} days old — held"
+        note "- $name $cur: every newer release its range allows is too fresh ($name $REG_VERSION) — held"
         ;;
       unsuitable)
-        held=$((held + 1))
-        note "- $name $cur: the newest releases old enough are deprecated or need a newer Node.js — left as is"
+        unsuitable=$((unsuitable + 1))
+        note "- $name $cur: not suitable — the newer releases old enough are deprecated or need a newer Node.js; left as is"
         ;;
-      error)
+      foreign | missing) bun_skip_note "$name" "$REG_VERDICT" ;;
+      none) ;;
+      *)
         warn "registry lookup failed for $name"
         cmm_fail_later
         ;;
@@ -154,25 +242,65 @@ bun_cooldown_update() {
   done 3<<EOF
 $rows
 EOF
-  [ "$held" -gt 0 ] && summary_note "$held global update(s) held by the ${days}-day cooldown"
+  [ "$held" -gt 0 ] && summary_note "$held global update(s) held by the cooldown ($BUN_WHY)"
+  [ "$unsuitable" -gt 0 ] && summary_note "$unsuitable global update(s) not suitable (deprecated, or need a newer Node.js)"
   return 0
 }
 
 skip_unless bun
 
-cache_dir_cmd bun pm cache -g
+# Bun's cache commands want a package.json in the current directory (and
+# their -g forms one in the global directory, which is missing until a
+# global package is installed), so the cleaner works from a scratch
+# directory holding an empty {} package.json — no project settings either.
+here="$PWD"
+scratch="$(cmm_scratch_dir)" || scratch=''
+if [ -n "$scratch" ] && printf '{}\n' >"$scratch/package.json" 2>/dev/null; then
+  cd "$scratch"
+else
+  scratch=''
+fi
 
+if [ -n "$scratch" ]; then
+  cache_dir_cmd bun pm cache
+else
+  cache_dir_cmd bun pm cache -g
+fi
+
+gdir="$(bun_global_dir)"
 if updating; then
   days="$(cooldown_days)"
-  bun_self_update "$days"
-  if [ "$days" -eq 0 ]; then
+  bun_policy "$days"
+  if [ "$BUN_POLICY" -gt 0 ] && can_resolve; then
+    BUN_CUTOFF="$(node "$REGISTRY_CJS" cutoff --seconds "$BUN_POLICY")"
+  fi
+  bun_self_update
+  if [ ! -f "$gdir/package.json" ]; then
+    note "- no global Bun packages ($gdir has no package.json)"
+  elif [ "$BUN_POLICY" -eq 0 ]; then
     step bun update -g
+  elif ! can_resolve; then
+    note "- cooldown active ($BUN_WHY) but node/npm (needed for registry lookups) not found: global updates are held"
+    summary_note "global updates held (node/npm not found for the cooldown)"
+  elif ! cmm_version_ge "$BUN_VER" 1.3; then
+    note "- this Bun ($BUN_VER) predates --minimum-release-age (1.3), so the cooldown cannot hold dependencies back: global updates are held"
+    summary_note "global updates held by the cooldown (Bun < 1.3)"
   else
-    bun_cooldown_update "$days"
+    bun_cooldown_update "$gdir"
   fi
 fi
 
 if cleaning; then
-  # -g: without it Bun wants a package.json in the current directory
-  step bun pm cache rm -g
+  if [ -n "$scratch" ]; then
+    step bun pm cache rm # from the scratch directory: needs no global package.json
+  elif [ -f "$gdir/package.json" ]; then
+    step bun pm cache rm -g
+  else
+    note "- the cache was not cleared: no scratch directory, and 'bun pm cache rm -g' needs a global package"
+  fi
+fi
+
+if [ -n "$scratch" ]; then
+  cd "$here" 2>/dev/null || cd /
+  rm -rf "$scratch"
 fi

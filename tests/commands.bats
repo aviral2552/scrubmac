@@ -124,6 +124,24 @@ valid_json() {
   [ "$(state_names "$(CFGDIR)/enabled")" = "alpha beta" ]
 }
 
+@test "a name's inline comment survives enable/disable of other cleaners" {
+  make_cleaner 10-alpha.sh 'echo ALPHA'
+  make_cleaner 20-beta.sh 'echo BETA'
+  make_cleaner 30-gamma.sh 'echo GAMMA'
+  run "$CMM" list
+  mkdir -p "$(CFGDIR)"
+  printf '# scrubmac: disabled cleaners\n# why these are off:\nalpha   # managed by company tooling\r\n' >"$(CFGDIR)/disabled"
+  run "$CMM" disable beta
+  [ "$status" -eq 0 ]
+  grep -Fxq 'alpha   # managed by company tooling' "$(CFGDIR)/disabled"
+  grep -Fxq '# why these are off:' "$(CFGDIR)/disabled"
+  grep -Fxq 'beta' "$(CFGDIR)/disabled"
+  [ "$(grep -c '^# scrubmac:' "$(CFGDIR)/disabled")" -eq 1 ]
+  run "$CMM" enable beta
+  grep -Fxq 'alpha   # managed by company tooling' "$(CFGDIR)/disabled"
+  refute grep -q beta "$(CFGDIR)/disabled"
+}
+
 @test "a hand-edited state line with spaces still counts" {
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   mkdir -p "$(CFGDIR)"
@@ -216,6 +234,27 @@ valid_json() {
   run "$CMM" config get MY_KEY
   [ "$status" -eq 0 ]
   [ "$output" = hello ]
+}
+
+@test "config: custom keys merely resembling a built-in are fine; one typo away is refused" {
+  run "$CMM" config set LOG_LEVEL debug
+  [ "$status" -eq 0 ]
+  run "$CMM" config set MY_TIMEOUT 5
+  [ "$status" -eq 0 ]
+  run "$CMM" config set COLORS never
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"did you mean 'COLOR'?"* ]] || false
+}
+
+@test "config keys lists built-in then custom keys, without side effects" {
+  mkdir -p "$(CFGDIR)"
+  printf 'COOLDOWN_DAYS=3\nMY_KEY=1\nMY_KEY=2\nbad line\n' >"$(CFGDIR)/config"
+  run "$CMM" config keys
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | head -n 1)" = COOLDOWN_DAYS ]
+  [ "$(printf '%s\n' "$output" | grep -c '^MY_KEY$')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^COOLDOWN_DAYS$')" -eq 1 ]
+  [[ "$output" != *"ignoring line"* ]] || false # no lint noise for completion
 }
 
 @test "config: values pass through as given (a value may start with -), numbers are stored canonically" {
@@ -556,6 +595,18 @@ EOF
   [[ "$output" == *ALPHA-RAN* ]] || false
 }
 
+@test "--json on a scheduled run that is skipped still prints a run record" {
+  make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
+  mkdir -p "$STATE_DIR"
+  date '+%s' >"$STATE_DIR/last-success"
+  CMM_MIN_HOURS_BETWEEN_RUNS=5 "$CMM" --scheduled --json >"$SANDBOX/out.json" 2>"$SANDBOX/err"
+  refute grep -q ALPHA-RAN "$SANDBOX/err"
+  [ -n "$REAL_PYTHON" ] || skip "no python3 to read the JSON"
+  "$REAL_PYTHON" -c 'import json, sys; d = json.load(open(sys.argv[1])); sys.exit(0 if "MIN_HOURS_BETWEEN_RUNS" in d["skipped"] and d["cleaners"] == [] and d["exit_code"] == 0 else 1)' "$SANDBOX/out.json"
+  "$CMM" --json >"$SANDBOX/run.json" 2>/dev/null
+  "$REAL_PYTHON" -c 'import json, sys; d = json.load(open(sys.argv[1])); sys.exit(0 if d["skipped"] is None else 1)' "$SANDBOX/run.json"
+}
+
 @test "--scheduled honors MIN_HOURS_BETWEEN_RUNS after a successful full run" {
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   run "$CMM" # a successful full run records last-success
@@ -605,11 +656,60 @@ EOF
   [ ! -e "$SANDBOX/xdgstate2/scrubmac" ]
 }
 
+@test "last-success records the run's start (not its end), and mode runs never write it" {
+  make_cleaner 10-slow.sh 'sleep 2'
+  local before after stamp
+  before="$(date +%s)"
+  run "$CMM"
+  after="$(date +%s)"
+  [ "$status" -eq 0 ]
+  stamp="$(cat "$STATE_DIR/last-success")"
+  [ "$stamp" -le $((before + 1)) ]
+  [ "$stamp" -lt $((after - 1)) ]
+  rm -f "$STATE_DIR/last-success"
+  run "$CMM" --update-only
+  [ ! -e "$STATE_DIR/last-success" ]
+  run "$CMM" --clean-only
+  [ ! -e "$STATE_DIR/last-success" ]
+}
+
+@test "the config-dir migration note never lands on stdout (\$(scrubmac config get K) stays clean)" {
+  mkdir -p "$XDG_CONFIG_HOME/cleanmymac"
+  printf 'COOLDOWN_DAYS=3\n' >"$XDG_CONFIG_HOME/cleanmymac/config"
+  [ "$("$CMM" config get COOLDOWN_DAYS 2>/dev/null)" = 3 ]
+  [ -L "$XDG_CONFIG_HOME/cleanmymac" ] # it did migrate
+}
+
+@test "no usable TMPDIR or /tmp: the run's scratch dir falls back to the state dir" {
+  make_stub_script mktemp <<EOF
+case "\$*" in *"$SANDBOX/state-fallback"*) exec "$SYSBIN/mktemp" "\$@" ;; esac
+exit 1
+EOF
+  export CMM_STATE_DIR="$SANDBOX/state-fallback"
+  make_lib_cleaner 10-where.sh 'echo "SCRATCH=$(cmm_scratch_dir)"'
+  TMPDIR="$SANDBOX/does-not-exist" run "$CMM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SCRATCH=$SANDBOX/state-fallback/scrubmac.run."* ]] || false
+}
+
 @test "last-success is not written when every cleaner skipped (nothing was maintained)" {
   make_lib_cleaner 10-gone.sh 'skip "skipping: not installed"'
   run "$CMM"
   [ "$status" -eq 0 ]
   [ ! -e "$STATE_DIR/last-success" ]
+}
+
+@test "scheduled runs keep launchd.log bounded (one .old generation)" {
+  make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
+  mkdir -p "$STATE_DIR"
+  dd if=/dev/zero of="$STATE_DIR/launchd.log" bs=1024 count=600 2>/dev/null
+  run "$CMM" --scheduled
+  [ "$status" -eq 0 ]
+  [ -f "$STATE_DIR/launchd.log.old" ]
+  [ ! -e "$STATE_DIR/launchd.log" ]
+  printf 'small\n' >"$STATE_DIR/launchd.log"
+  run "$CMM" --scheduled
+  [ -f "$STATE_DIR/launchd.log" ] # under the limit: untouched
 }
 
 @test "a last-success stamp from the future (clock change) never suppresses a run" {

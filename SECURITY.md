@@ -29,9 +29,12 @@ gh attestation verify scrubmac-X.Y.Z.tar.gz -R aviral2552/scrubmac
 ## Security model in one paragraph
 
 scrubmac is a user-level bash tool that shells out to the package managers
-you already trust. It never runs `sudo` (nor tools that escalate on their
-own), refuses to run as root, never deletes user data (only regenerable
-caches), executes only cleaner files that are owned by you and not writable
+you already trust. It never runs `sudo` itself and skips tools that always
+escalate (Homebrew may ask for your password to upgrade a pkg-based cask,
+by default only in runs you start in a terminal), refuses to run as root,
+never deletes user data (regenerable caches, plus Homebrew's removal of
+unneeded dependencies and old formula versions), executes only cleaner
+files that are owned by you and not writable
 by anyone else (a refusal fails the run), gives cleaners no stdin, parses
 (never sources) its config file, applies a supply-chain cooldown by default,
 self-updates only by fast-forwarding to a release tag (signature-checked

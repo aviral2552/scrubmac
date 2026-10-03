@@ -36,12 +36,20 @@ unlistable() {
 # environments only those configs use. With sqlite3, the configs recorded in
 # pre-commit's db.db are checked: one that is missing while its nearest
 # existing folder cannot be listed, or that lives on an unmounted volume, is
-# unknown rather than deleted. Without sqlite3 (or a readable db), any
-# unreadable privacy-protected folder blocks gc.
+# unknown rather than deleted — and a db that cannot be read (pre-commit
+# holding a lock past the 5 s busy timeout) blocks gc too. Without sqlite3,
+# any unreadable privacy-protected folder blocks gc.
 pc_blind_spot() {
-  local db="$pc_home/db.db" paths p a vol
+  local db="$pc_home/db.db" paths p a vol n
   [ -f "$db" ] || return 1 # nothing recorded: gc has nothing to misjudge
-  if have sqlite3 && paths="$(sqlite3 -readonly "$db" 'SELECT path FROM configs' 2>/dev/null)"; then
+  if have sqlite3; then
+    if ! paths="$(sqlite3 -readonly -cmd '.timeout 5000' "$db" 'SELECT path FROM configs' 2>/dev/null)"; then
+      # a store that has never recorded a config has no configs table yet
+      n="$(sqlite3 -readonly -cmd '.timeout 5000' "$db" "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'configs'" 2>/dev/null)" || n=''
+      [ "$n" = 0 ] && return 1
+      printf '%s\n' "pre-commit's database ($db) could not be read"
+      return 0
+    fi
     while IFS= read -r p; do
       case "$p" in /?*) ;; *) continue ;; esac
       [ -e "$p" ] && continue
@@ -78,9 +86,11 @@ EOF
 cache_dir "$pc_home"
 skip_unless_cleaning
 
-if why="$(pc_blind_spot)"; then
-  note "- skipping 'pre-commit gc': $why — gc would count its configs as deleted and remove their hook environments; run 'pre-commit gc' yourself from a terminal that can read it"
-  summary_note "pre-commit gc skipped: $why"
-else
-  step pre-commit gc
+if cleaning; then # (not in `scrubmac status`)
+  if why="$(pc_blind_spot)"; then
+    note "- skipping 'pre-commit gc': $why — gc would count its configs as deleted and remove their hook environments; run 'pre-commit gc' yourself from a terminal that can read it"
+    summary_note "pre-commit gc skipped: $why"
+  else
+    step pre-commit gc
+  fi
 fi

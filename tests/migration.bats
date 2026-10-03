@@ -10,12 +10,14 @@
 
 load helpers/setup
 
+setup_file() { build_src_cache; }
+
 setup() {
   setup_sandbox
   export CMM_PREFIX="$SANDBOX/app"
   export CMM_OLD_PREFIX="$SANDBOX/oldapp"
   export CMM_BIN_DIR="$SANDBOX/bindir"
-  INSTALL="$REPO_ROOT/install.sh"
+  INSTALL="$(make_src_tree)/install.sh"
   NEWCFG="$XDG_CONFIG_HOME/scrubmac"
   OLDCFG="$XDG_CONFIG_HOME/cleanmymac"
 }
@@ -105,8 +107,11 @@ seed_old_config() {
 # ---------- install-dir migration (§3.2) ----------
 
 @test "install.sh migrates an external legacy dir: move, git kept, compat symlink, links swapped" {
-  mkdir -p "$CMM_OLD_PREFIX/.git" "$SANDBOX/bindir"
+  mkdir -p "$CMM_OLD_PREFIX/.git" "$CMM_OLD_PREFIX/lib" "$CMM_OLD_PREFIX/bin" "$SANDBOX/bindir"
   printf 'gitstate\n' >"$CMM_OLD_PREFIX/.git/HEAD"
+  printf '2.0.1\n' >"$CMM_OLD_PREFIX/VERSION" # a minimal 2.x layout
+  printf '# lib\n' >"$CMM_OLD_PREFIX/lib/common.sh"
+  printf '#!/bin/sh\n' >"$CMM_OLD_PREFIX/bin/cleanmymac"
   ln -s "$CMM_OLD_PREFIX/bin/cleanmymac" "$SANDBOX/bindir/cleanmymac"
   run "$INSTALL"
   [ "$status" -eq 0 ]
@@ -171,6 +176,15 @@ seed_old_config() {
   [[ "$output" == *"finish migrating: run $SANDBOX/y/.cleanmymac/install.sh"* ]] || false
 }
 
+@test "shim: an old copy next to an existing ~/.scrubmac is told to step aside, not to run its install.sh" {
+  mkdir -p "$HOME/.scrubmac" "$HOME/.cleanmymac"
+  rsync -a --exclude=.git "$REPO_ROOT/" "$HOME/.cleanmymac/"
+  run bash -c "\"$HOME/.cleanmymac/bin/cleanmymac\" version 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"this is an old copy; scrubmac is installed at ~/.scrubmac"* ]] || false
+  [[ "$output" != *"run $HOME/.cleanmymac/install.sh"* ]] || false
+}
+
 @test "shim: exit code passes through" {
   run bash -c "\"$REPO_ROOT/bin/cleanmymac\" definitely-not-a-cleaner 2>/dev/null"
   [ "$status" -eq 2 ]
@@ -215,10 +229,17 @@ seed_old_config() {
 
 @test "no legacy lock is taken when TMPDIR points nowhere (and the run still works)" {
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
+  # the run's scratch dir falls back to /tmp: keep that inside the sandbox
+  mkdir -p "$SANDBOX/fake-tmp"
+  make_stub_script mktemp <<EOF
+case "\$*" in *" /tmp/scrubmac.run."*) exec "$SYSBIN/mktemp" -d "$SANDBOX/fake-tmp/scrubmac.run.XXXXXX" ;; esac
+exec "$SYSBIN/mktemp" "\$@"
+EOF
   TMPDIR="$SANDBOX/does-not-exist" run "$CMM"
   [ "$status" -eq 0 ]
   [[ "$output" == *ALPHA-RAN* ]] || false
   [ ! -e "$SANDBOX/does-not-exist" ]
+  grep -q '^mktemp -d /tmp/scrubmac.run.' "$CALL_LOG" # (the fallback was taken, in the sandbox)
 }
 
 # ---------- uninstall (both names) ----------
@@ -238,8 +259,11 @@ seed_old_config() {
 
 # ---------- lib literal pins (§1) ----------
 
-@test "cmm_config_dir points at scrubmac; the migration knows the old literal" {
+@test "cmm_config_dir points at scrubmac; the migration adopts the old cleanmymac dir" {
   [ "$(lib 'cmm_config_dir')" = "$XDG_CONFIG_HOME/scrubmac" ]
-  grep -q 'config/cleanmymac\|base/cleanmymac\|\$base/cleanmymac' "$CMM_LIB_PATH" ||
-    grep -q 'cleanmymac' "$CMM_LIB_PATH"
+  mkdir -p "$XDG_CONFIG_HOME/cleanmymac"
+  printf 'QUIET=1\n' >"$XDG_CONFIG_HOME/cleanmymac/config"
+  lib 'cmm_migrate_config_dir' 2>/dev/null
+  [ -f "$XDG_CONFIG_HOME/scrubmac/config" ]
+  [ -L "$XDG_CONFIG_HOME/cleanmymac" ]
 }

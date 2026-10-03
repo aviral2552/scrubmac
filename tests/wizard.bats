@@ -39,6 +39,19 @@ KEEP_ALL=$'\n\n\n\n\n\n\n\ny\n'
   [[ "$output" == *ALPHA-RAN* ]] && [[ "$output" != *HEAVY-RAN* ]] || false
 }
 
+@test "configure keeps your comments in the state files (and each kept name's own line)" {
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  printf '# scrubmac: disabled cleaners\n# off since the work VM needs it:\nalpha   # see ticket 42\n' >"$DIS"
+  printf '# scrubmac: enabled cleaners\n# my note\nheavy\n' >"$EN"
+  run "$CMM" configure <<<"$KEEP_ALL"
+  [ "$status" -eq 0 ]
+  grep -Fxq '# off since the work VM needs it:' "$DIS"
+  grep -Fxq 'alpha   # see ticket 42' "$DIS"
+  grep -Fxq '# my note' "$EN"
+  grep -Fxq 'heavy' "$EN"
+  [ "$(grep -c '^# scrubmac:' "$DIS")" -eq 1 ]
+}
+
 @test "configure: screens come from metadata, with summaries, tool marks and opt-in flags" {
   run "$CMM" configure <<<"$KEEP_ALL"
   [[ "$output" == *"Package managers"* ]] || false
@@ -128,6 +141,32 @@ KEEP_ALL=$'\n\n\n\n\n\n\n\ny\n'
   [[ "$output" == *"(enter y, r, or q)"* ]] || false
   [[ "$output" == *"nothing was written"* ]] || false
   [ ! -f "$CFG" ]
+}
+
+@test "configure: the summary lists what will be disabled and which opt-ins are on" {
+  run "$CMM" configure <<<$'\n1\n\n\n1\n\n\n\n\n\nq'
+  [[ "$output" == *"disabled cleaners:    alpha"* ]] || false
+  [[ "$output" == *"opt-in cleaners on:   heavy"* ]] || false
+}
+
+@test "configure: a config dir it cannot write to is an error (exit 2), not a silent loss" {
+  mkdir -p "$(dirname "$CFG")"
+  chmod 500 "$(dirname "$CFG")"
+  run "$CMM" configure <<<$'\n\n\n\n\n\n\n\n'
+  chmod 700 "$(dirname "$CFG")"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"cannot write"* ]] || false
+}
+
+@test "configure refuses to overwrite a config or state file it cannot read" {
+  mkdir -p "$(dirname "$CFG")"
+  printf 'COOLDOWN_DAYS=14\nMY_CUSTOM=1\n' >"$CFG"
+  chmod 000 "$CFG"
+  run "$CMM" configure <<<$'\n\n\n\n\n\n\n\n'
+  chmod 644 "$CFG"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"cannot read $CFG"* ]] || false
+  grep -qx 'MY_CUSTOM=1' "$CFG"
 }
 
 @test "configure: Enter at the summary writes (the prompt's default is yes)" {

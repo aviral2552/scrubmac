@@ -1,6 +1,6 @@
 # Architecture
 
-About 6,500 lines of bash 3.2-compatible shell (and one small node script, the registry resolver), structured as a thin
+About 7,600 lines of bash 3.2-compatible shell (and one node script, the registry resolver), structured as a thin
 dispatcher, a small set of libraries, and independent cleaner processes.
 
 ```
@@ -10,8 +10,8 @@ bin/scrubmac ──sources──▶ lib/common.sh     helpers shared with every 
       │                      lib/schedule.sh   schedule (launchd)
       │                      lib/update.sh     update (release tags, signatures)
       │                      lib/doctor.sh     doctor
-      │        (lib/registry.js  the cooldown resolver, run with node by the
-      │                          npm, pnpm and bun cleaners)
+      │        (lib/registry.cjs  the cooldown resolver, run with node by the
+      │                           npm, pnpm and bun cleaners)
       │
       ├─ discovers ▶ cleaners/NN-name.sh                    (built-in)
       │              ~/.config/scrubmac/cleaners.d/*.sh     (yours; shadows built-ins by name)
@@ -28,8 +28,8 @@ bin/scrubmac ──sources──▶ lib/common.sh     helpers shared with every 
 2. **Refuse root**, set `LC_ALL=C`, parse arguments (options that would be
    ignored by the command are errors), point stdout at stderr for `--json`
    (fd 3 keeps the JSON document), then migrate a pre-rename config dir — so
-   its note never lands in the JSON — except for `list --names`, which shell
-   completion calls and which must have no side effects.
+   its note never lands in the JSON — except for `list --names` and `config
+   keys`, which shell completion calls and which must have no side effects.
 3. **Resolve settings** — every key in the registry (`CMM_SETTINGS` in
    `lib/dispatch.sh`) is resolved *flag → environment (`CMM_<KEY>`) →
    config file → default*, validated by type, normalized (`08` → `8`), and
@@ -43,17 +43,21 @@ bin/scrubmac ──sources──▶ lib/common.sh     helpers shared with every 
    or a successful full run within `MIN_HOURS_BETWEEN_RUNS`, ends the run
    early (exit 0, logged).
 6. **Lock** — `$STATE_DIR/run.lock` is a symlink whose target names the
-   holder, `PID:START` (its pid and its start time from `ps -o lstart`):
+   holder, `PID:START` (its pid, and its start time: on Linux the start tick
+   since boot, elsewhere `ps -o lstart` in UTC and the C locale — never local
+   time, which differs between a launchd job and a shell with `TZ` set):
    `ln -sn` creates it atomically, with its content. A lock whose pid is dead,
-   or alive with a different start time (pid reuse after a reboot), is stale
-   and broken by an atomic rename that is verified, so a racing run's fresh
-   lock is never stolen; a holder whose start time cannot be read is assumed
-   alive. A state dir that cannot be written is reported as such (exit 2),
-   not as "already in progress". The lock never lives in `$TMPDIR`, which
+   or alive with a different start time (pid reuse after a reboot), is stale.
+   Breaking it moves the lock aside (`mv`, which only one contender can win
+   for a given lock) and then looks at what moved: a lock that a racing run
+   created since the check is put back, never removed. Then every contender
+   races to create it again — exactly one wins. A holder whose start time
+   cannot be read is assumed alive. A state dir that cannot be written is
+   reported as such (exit 2), not as "already in progress". The lock never lives in `$TMPDIR`, which
    differs between cron, launchd and terminal sessions. (A transitional
    second lock in `${TMPDIR:-/tmp}`, exactly as 2.x takes it, keeps an
-   untouched 2.x copy and 3.x apart — honored only when it is a real
-   directory you own; it goes in v4.)
+   untouched 2.x copy and 3.x apart when they share a `TMPDIR` — honored only
+   when it is a real directory you own; it goes in v4.)
 7. **Probe** — offline = no default network route (`route -n get default`'s
    output on macOS, `ip route` on Linux; no traffic is sent).
 8. **Discover** — executable `*.sh` regular files, user dir first, deduped by
@@ -70,23 +74,30 @@ bin/scrubmac ──sources──▶ lib/common.sh     helpers shared with every 
    (checked just before they run; one that vanished mid-run is a failure).
 10. **Run loop** — per cleaner: banner (or, in quiet mode, one result line
     afterwards) → child process started in `$HOME` with the `CMM_*`
-    environment, stdin from `/dev/null`, fd 3 closed, and a watchdog → record
-    status, duration, and the cleaner's report (notes, skip reason, cache
-    size, freed space) → **continue regardless**. Output goes straight to a
-    terminal (tools keep their TTY behavior); otherwise it is captured for
-    the log (and streamed unless quiet; `status` always streams). After
-    `TIMEOUT` the watchdog sends `TERM`, waits up to 5 s, then sends `KILL` —
-    to the cleaner's own process group in runs without a terminal (monitor
-    mode gives each cleaner one, which reaches orphaned and daemonized
-    descendants too), or to a snapshot of its process tree in runs attached
-    to a terminal, where a `sudo` or `git` prompt must still be able to read
-    it. INT/TERM/HUP stops the current cleaner the same way, prints a partial
-    summary, exits 130.
+    environment, stdin from `/dev/null`, fd 3 closed, a private scratch dir
+    (`cmm_scratch_dir`) and a watchdog → record status, duration, and the
+    cleaner's report (notes, skip reason, cache size, freed space) →
+    **continue regardless**. Output goes straight to a terminal (tools keep
+    their TTY behavior); otherwise it is captured for the log (and streamed
+    unless quiet; `status` always streams) — through a `tee` the dispatcher
+    starts on fd 9 before the cleaner, so stopping the cleaner never stops
+    the logging. After `TIMEOUT` (if the cleaner is still running) the
+    watchdog sends `TERM`, waits up to 5 s, then sends `KILL` — to the
+    cleaner's own process group in runs without a terminal (monitor mode
+    gives each cleaner one, which reaches orphaned descendants too; a
+    process that `setsid`s away does not), or to a snapshot of its process
+    tree in runs attached to a terminal, where a `sudo` or `git` prompt must
+    still be able to read it. In group mode, anything a cleaner leaves
+    running after it finishes is stopped too (launchd would stop it at the
+    end of the job). INT/TERM/HUP stops the current cleaner the same way,
+    prints a partial summary, records the run and exits 130 — ignoring
+    further signals and failed writes (a closed terminal, a dead pipe)
+    meanwhile.
 11. **Summary** — ok/skip/FAIL/TIMEOUT/REFUSED/STOPPED per cleaner with
     notes, totals and total time, approximate disk freed (df delta, shown
     from 1 MB up — smaller deltas are noise from other processes) and, with
-    `--measure`, what each cleaner freed; "nothing to run" when every cleaner
-    was disabled or skipped. Then: the log, `last-run.json`, `last-success`
+    `--measure`, what each cleaner freed; "nothing to run" when no cleaner
+    was selected at all (every one disabled or `--skip`ped). Then: the log, `last-run.json`, `last-success`
     (the start time of a successful, full, online run in which something
     ran), log rotation, `--json` on fd 3, and a notification for unattended
     runs. Exit 1 if anything failed.
@@ -107,8 +118,8 @@ A cleaner is an executable script that:
 | `run CMD…` | mutating; a failure fails the cleaner immediately (`set -e`) and names the command in the summary |
 | `step CMD…` | mutating; a failure is recorded (and named in the summary), the remaining independent steps still run, the cleaner exits 1 at the end |
 | `try CMD…` | advisory; a failure is reported and tolerated |
-| `preview CMD…` | read-only; executed only under `--dry-run` |
-| `report CMD…` | read-only; executed only by `scrubmac status` |
+| `preview [--ok=N] CMD…` | read-only; executed only under `--dry-run` (a failure is a warning; `--ok=N`: exit N is an answer, e.g. `npm outdated` exits 1 when something is outdated) |
+| `report [--ok=N] CMD…` | read-only; executed only by `scrubmac status` (same rules as `preview`) |
 | `cache_dir DIR…` / `cache_dir_cmd CMD…` | declare cache dirs: sized by `status`, measured with `--measure` |
 | `updating` / `cleaning` | predicates for the current mode (and offline) |
 | `skip_unless_updating` / `skip_unless_cleaning` | for update-only / clean-only cleaners (in `status`, `skip_unless_updating` ends the cleaner as ok — put `report` lines before it) |
@@ -120,8 +131,8 @@ A cleaner is an executable script that:
 | `setting KEY DEFAULT` | read a setting (environment, then config) |
 | `cooldown_days` | the validated supply-chain cooldown |
 
-- never prompts (stdin is `/dev/null`), never sudo, never user data, never
-  secrets in argv
+- never prompts (stdin is `/dev/null`), never runs sudo, never touches user
+  data, never puts secrets in argv
 
 Exit codes: `0` ok · `75` skipped · anything else failed. The dispatcher maps
 these to the summary; the CLI itself exits `0/1/2/130`. A *tool* that exits
@@ -179,7 +190,11 @@ or the network (silent default stubs guard `launchctl`, `osascript` and
 `crontab`). Stubs record exact argv into a call log. Because bash < 4.1
 ignores a failing `[[ ]]` that is not a test's last command, and errexit
 ignores every member of an `&&` chain but the last, such assertions end in
-`|| false` (`make lint` enforces it, along with the no-`! cmd` rule).
+`|| false` (`scripts/lint-bats.sh`, run by `make lint`, enforces it, along
+with the no-`! cmd` rule). The sandbox clears inherited `GIT_*`/`CMM_*`
+variables and `BASH_ENV`, and never searches the host's `/usr/local/bin`
+for launcher links (`CMM_LINK_DIRS`). Interrupt behavior is tested on a real
+pty (`tests/helpers/ptyrun.py`): Ctrl-C, a second Ctrl-C, a closed terminal.
 Suites: `runner` (dispatcher semantics: timeouts in both process-group
 modes, snapshots, interrupts), `commands` (list/config/status/last/JSON/
 logs/notifications/scheduled guards), `lib` (helpers and guards),

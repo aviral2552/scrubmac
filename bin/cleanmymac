@@ -8,6 +8,7 @@
 # rename. It is never linked onto PATH by the installer or the Homebrew
 # formula, and will be removed in v4.
 set -euo pipefail
+unset CDPATH # (cd would search it, and print where it went)
 
 SELF="${BASH_SOURCE[0]}"
 while [ -L "$SELF" ]; do
@@ -24,7 +25,12 @@ done
 ROOT="$(cd -P "$(dirname "$SELF")/.." && pwd -P)"
 case "$ROOT" in
   */.cleanmymac | */cleanmymac)
-    hint="finish migrating: run $ROOT/install.sh"
+    if [ -d "$HOME/.scrubmac" ]; then
+      # (its install.sh would mirror this older copy over the real install)
+      hint="this is an old copy; scrubmac is installed at ~/.scrubmac — point crontabs and aliases there, then delete $ROOT"
+    else
+      hint="finish migrating: run $ROOT/install.sh"
+    fi
     ;;
   *)
     hint="call 'scrubmac' instead (update crontabs, aliases and scripts)"

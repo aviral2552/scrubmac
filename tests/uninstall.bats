@@ -7,12 +7,14 @@
 
 load helpers/setup
 
+setup_file() { build_src_cache; }
+
 setup() {
   setup_sandbox
   export CMM_PREFIX="$SANDBOX/app"
   export CMM_BIN_DIR="$SANDBOX/bindir"
-  INSTALL="$REPO_ROOT/install.sh"
-  UNINSTALL="$REPO_ROOT/uninstall.sh"
+  INSTALL="$(make_src_tree)/install.sh"
+  UNINSTALL="$SANDBOX/src/uninstall.sh"
 }
 teardown() { teardown_sandbox; }
 
@@ -127,6 +129,143 @@ EOF
   CMM_PREFIX="$HOME/." run "$UNINSTALL"
   [ "$status" -eq 2 ]
   [ -f "$HOME/keep-me" ]
+}
+
+@test "a wrong CMM_PREFIX is refused before anything is touched (the real install keeps its launcher and schedule)" {
+  install_first
+  mkdir -p "$HOME/Library/LaunchAgents"
+  printf '<plist><dict><key>ProgramArguments</key><array><string>%s/bin/scrubmac</string></array></dict></plist>\n' "$CMM_PREFIX" \
+    >"$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist"
+  CMM_PREFIX="$HOME" run "$UNINSTALL"
+  [ "$status" -eq 1 ]
+  [ -L "$CMM_BIN_DIR/scrubmac" ]
+  [ -f "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" ]
+  mkdir -p "$SANDBOX/notmine"
+  touch "$SANDBOX/notmine/file"
+  CMM_PREFIX="$SANDBOX/notmine" run "$UNINSTALL"
+  [ "$status" -eq 1 ]
+  [ -L "$CMM_BIN_DIR/scrubmac" ]
+}
+
+@test "a wrong CMM_PREFIX inside the real install is refused before its launcher or schedule is touched" {
+  install_first
+  make_stub launchctl
+  write_plist "$CMM_PREFIX/bin/scrubmac"
+  CMM_PREFIX="$CMM_PREFIX/bin" run "$UNINSTALL"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not look like a scrubmac install (nothing was removed)"* ]] || false
+  [ -L "$CMM_BIN_DIR/scrubmac" ]
+  [ -f "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" ]
+  refute grep -q bootout "$CALL_LOG"
+  [ -x "$CMM_PREFIX/bin/scrubmac" ]
+}
+
+@test "--purge with a mistyped CMM_PREFIX removes nothing — not even the configuration" {
+  install_first
+  CMM_CLEANERS_DIR="" "$CMM_BIN_DIR/scrubmac" disable npm >/dev/null
+  CMM_PREFIX="$CMM_PREFIX-typo" run "$UNINSTALL" --purge
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"nothing at $CMM_PREFIX-typo — check CMM_PREFIX"* ]] || false
+  [ -f "$XDG_CONFIG_HOME/scrubmac/disabled" ]
+  [ -x "$CMM_PREFIX/bin/scrubmac" ]
+  [ -L "$CMM_BIN_DIR/scrubmac" ]
+}
+
+@test "nothing installed at all: says so (and still exits 0)" {
+  run "$UNINSTALL"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to uninstall"* ]] || false
+  [[ "$output" != *"has been uninstalled"* ]] || false
+}
+
+@test "an install path linked to another copy that is not an install: only the link goes" {
+  mkdir -p "$SANDBOX/other/bin" "$CMM_BIN_DIR"
+  printf '#!/bin/sh\necho other\n' >"$SANDBOX/other/bin/scrubmac"
+  chmod 755 "$SANDBOX/other/bin/scrubmac"
+  ln -s "$SANDBOX/other/bin/scrubmac" "$CMM_BIN_DIR/scrubmac"
+  ln -s "$SANDBOX/other" "$CMM_PREFIX"
+  make_stub launchctl
+  write_plist "$SANDBOX/other/bin/scrubmac"
+  run "$UNINSTALL"
+  [[ "$output" == *"which is not a scrubmac install — only the link will be removed"* ]] || false
+  [ ! -L "$CMM_PREFIX" ]
+  [ -x "$SANDBOX/other/bin/scrubmac" ]
+  [ -L "$CMM_BIN_DIR/scrubmac" ]
+  [ -f "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" ]
+  refute grep -q bootout "$CALL_LOG"
+}
+
+@test "--purge never deletes your home, even when it is the state dir and named scrubmac" {
+  install_first
+  export HOME="$SANDBOX/scrubmac"
+  mkdir -p "$HOME"
+  touch "$HOME/precious"
+  export CMM_STATE_DIR="$HOME"
+  run "$UNINSTALL" --purge
+  [ "$status" -eq 1 ]
+  [ -f "$HOME/precious" ]
+  [[ "$output" == *"not a scrubmac config or state directory"* ]] || false
+}
+
+@test "a schedule saved as a binary plist is still recognized as this install's, and removed" {
+  command -v plutil >/dev/null || skip "plutil (macOS) converts the plist"
+  install_first
+  make_stub launchctl
+  write_plist "$CMM_PREFIX/bin/scrubmac"
+  plutil -convert binary1 "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist"
+  run "$UNINSTALL"
+  [ "$status" -eq 0 ]
+  [ ! -e "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" ]
+  grep -q "^launchctl bootout gui/$(id -u)/com.github.aviral2552.scrubmac$" "$CALL_LOG"
+}
+
+@test "a schedule whose program cannot be read is kept, with a note on removing it" {
+  install_first
+  make_stub launchctl
+  mkdir -p "$HOME/Library/LaunchAgents"
+  printf 'not a plist\n' >"$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist"
+  run "$UNINSTALL"
+  [ -f "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" ]
+  [[ "$output" == *"could not tell which program it runs"* ]] || false
+}
+
+@test "a symlinked install path: launcher, schedule and link go; the target goes unless it is a git checkout" {
+  local real="$SANDBOX/vol/scrubmac"
+  mkdir -p "$real"
+  ln -s "$real" "$CMM_PREFIX"
+  install_first # install.sh follows the link and installs into $real
+  [ -x "$real/bin/scrubmac" ]
+  mkdir -p "$HOME/Library/LaunchAgents"
+  printf '<plist><dict><key>ProgramArguments</key><array><string>%s/bin/scrubmac</string></array></dict></plist>\n' "$real" \
+    >"$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist"
+  run "$UNINSTALL"
+  [ "$status" -eq 0 ]
+  [ ! -L "$CMM_PREFIX" ]
+  [ ! -e "$real" ]
+  [ ! -e "$CMM_BIN_DIR/scrubmac" ]
+  [ ! -f "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" ]
+  # a link to a dev clone: the clone is kept
+  mkdir -p "$real"
+  rsync -a "$SANDBOX/src/" "$real/" # a clone, .git included
+  ln -s "$real" "$CMM_PREFIX"
+  run "$UNINSTALL"
+  [ "$status" -eq 1 ]
+  [ ! -L "$CMM_PREFIX" ]
+  [ -d "$real/.git" ]
+  [[ "$output" == *"install.sh did not create it"* ]] || false
+}
+
+@test "a legacy dir that is not a cleanmymac install is not ours: left alone, and links into it are kept" {
+  install_first
+  export CMM_OLD_PREFIX="$SANDBOX/oldthing"
+  mkdir -p "$CMM_OLD_PREFIX/bin"
+  printf '#!/bin/sh\n' >"$CMM_OLD_PREFIX/bin/cleanmymac"
+  chmod 755 "$CMM_OLD_PREFIX/bin/cleanmymac"
+  ln -s "$CMM_OLD_PREFIX/bin/cleanmymac" "$CMM_BIN_DIR/cleanmymac"
+  run "$UNINSTALL"
+  [ "$status" -eq 0 ]
+  [ -d "$CMM_OLD_PREFIX" ]
+  [ -L "$CMM_BIN_DIR/cleanmymac" ]
 }
 
 @test "leaves a directory that is not a scrubmac install alone" {

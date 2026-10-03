@@ -14,6 +14,10 @@
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 export REPO_ROOT
+# A test that hangs (a process-handling regression) fails on its own after
+# this many seconds instead of stalling the whole run (bats >= 1.7).
+: "${BATS_TEST_TIMEOUT:=120}"
+export BATS_TEST_TIMEOUT
 export CMM="$REPO_ROOT/bin/scrubmac"
 export CMM_LIB_PATH="$REPO_ROOT/lib/common.sh"
 # Captured before setup_sandbox narrows PATH: suites that exercise logic
@@ -29,9 +33,22 @@ CMM_TEST_UTILS='awk basename bash cat chmod cmp comm cp cut date dd df diff dirn
   env expr false find grep gzip head id join kill ln logname ls mkdir mkfifo mktemp
   mv nice nohup od paste perl pgrep pkill printf ps pwd readlink rm rmdir rsync sed
   seq sh shasum sleep sort split stat tail tar tee test touch tr true tty uname uniq
-  wc xargs yes git ssh-keygen plutil sw_vers sysctl'
+  wc xargs yes git ssh-keygen plutil sw_vers sysctl iconv'
 
 setup_sandbox() {
+  local u p v
+  # Nothing inherited may steer git or scrubmac: an exported GIT_DIR (git
+  # sets one for hooks in a linked worktree) would make the update tests
+  # commit into the developer's own repository, a stray CMM_OLD_PREFIX would
+  # point the installer at real files, and BASH_ENV runs code in every bash.
+  for v in $(compgen -v); do
+    case "$v" in
+      GIT_* | CMM__* | BASH_ENV | ENV | CDPATH) unset "$v" ;;
+      CMM_LIB_PATH | CMM_TEST_UTILS) ;; # the harness's own
+      CMM_*) unset "$v" ;;
+    esac
+  done
+  export GIT_CONFIG_NOSYSTEM=1 # GIT_CONFIG_GLOBAL is set below, into the sandbox
   SANDBOX="$(mktemp -d)"
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   export SANDBOX
@@ -43,9 +60,9 @@ setup_sandbox() {
   export FIXTURES="$SANDBOX/cleaners"
   mkdir -p "$HOME" "$TMPDIR" "$STUB_BIN" "$FIXTURES"
   : >"$CALL_LOG"
+  export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
   export SYSBIN="$SANDBOX/sysbin"
   mkdir -p "$SYSBIN"
-  local u p v
   for u in $CMM_TEST_UTILS; do
     p="$(PATH=/usr/bin:/bin:/usr/sbin:/sbin type -P "$u" 2>/dev/null)" || continue
     [ -n "$p" ] && ln -s "$p" "$SYSBIN/$u"
@@ -58,7 +75,8 @@ setup_sandbox() {
     case "$v" in
       PIP_* | PIPX_* | UV_* | COMPOSER* | CONDA* | MAMBA* | POETRY_* | npm_config_* | NPM_CONFIG_* | \
         PNPM_* | BUN_* | DENO_* | HOMEBREW_* | MISE_* | ASDF_* | VOLTA_* | NVM_* | CARGO_* | \
-        RUSTUP_* | GOPATH | GOCACHE | GOMODCACHE | GOFLAGS | GEM_* | VIRTUAL_ENV | DEVELOPER_DIR) unset "$v" ;;
+        RUSTUP_* | GOPATH | GOCACHE | GOMODCACHE | GOFLAGS | GEM_* | VIRTUAL_ENV | DEVELOPER_DIR | \
+        NODE_OPTIONS | NODE_PATH | NODE_EXTRA_CA_CERTS | PYTHON*) unset "$v" ;;
     esac
   done
   # MINI_BIN holds only bash: with PATH="$STUB_BIN:$MINI_BIN" a test proves a
@@ -77,8 +95,14 @@ setup_sandbox() {
   export CMM_NOTIFY=never
   export CMM_APPLE_STUB_DIR="$SANDBOX/applestubs"
   export CMM_BREW_LOCATIONS="$SANDBOX/no-homebrew/bin/brew"
+  export CMM_LINK_DIRS="$HOME/.local/bin" # never the host's /usr/local/bin
   export STATE_DIR="$HOME/.local/state/scrubmac"
   export LOCK="$STATE_DIR/run.lock"
+  # A TIMEOUT for tests that look for its watchdog (`sleep WD_SECS`) after
+  # the run: a duration picked per test, so a test running in parallel
+  # elsewhere is unlikely to match it.
+  WD_SECS=$((3000 + RANDOM % 997))
+  export WD_SECS
   # Safety net: no test may ever reach the host's launchd, notification
   # center or crontab. These silent defaults (no call-log lines) answer
   # "not loaded" / "no crontab"; tests that assert on them install logging
@@ -103,7 +127,12 @@ teardown_sandbox() {
   for p in ${HOLDER_PIDS:-}; do
     kill "$p" 2>/dev/null || true
   done
-  [ -n "${SANDBOX:-}" ] && rm -rf "$SANDBOX"
+  if [ -n "${SANDBOX:-}" ]; then
+    # nothing a test started from its sandbox outlives it (a regression
+    # that leaks a hung process must not leak it onto the host)
+    pkill -KILL -f "$SANDBOX/" 2>/dev/null || true
+    rm -rf "$SANDBOX"
+  fi
 }
 
 # make_stub NAME [EXIT_CODE] [OUTPUT] — a fake tool that records its argv.
@@ -161,13 +190,29 @@ refute() {
   return 0
 }
 
-# refute_sh SCRIPT — like refute, for a shell snippet (pipelines etc.).
+# refute_sh SCRIPT — like refute, for a shell snippet (pipelines etc.). One
+# argument only: `refute_sh grep x f` would run a bare `grep` (which fails)
+# and so could never catch anything.
 refute_sh() {
+  if [ "$#" -ne 1 ]; then
+    echo "refute_sh takes one script string (got $#: $*) — use refute for a plain command" >&2
+    return 1
+  fi
   if bash -c "$1"; then
     echo "expected to fail: $1" >&2
     return 1
   fi
   return 0
+}
+
+# wait_for CMD… — poll (up to 10 s) until CMD succeeds; fails if it never does.
+wait_for() {
+  local i=0
+  until "$@" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -lt 100 ] || return 1
+    sleep 0.1
+  done
 }
 
 # start_holder NAME — a live background process whose command line contains
@@ -187,10 +232,16 @@ start_holder() {
 # dead_pid — a pid that is guaranteed not to be running.
 dead_pid() { sh -c 'echo $$'; }
 
-# proc_start PID — the start-time word scrubmac records in its run lock.
+# proc_start PID — the start-time word scrubmac records in its run lock
+# (the same rules as cmm_proc_start in lib/dispatch.sh).
 proc_start() {
   local s
-  s="$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' \t\n' '___')"
+  if [ -r "/proc/$1/stat" ]; then
+    s="$(awk '{ sub(/.*\) /, ""); print $20 }' "/proc/$1/stat" 2>/dev/null)"
+    [ -n "$s" ] && printf 't%s\n' "$s"
+    return 0
+  fi
+  s="$(TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' \t\n' '___')"
   s="${s#_}"
   printf '%s\n' "${s%_}"
 }
@@ -204,21 +255,53 @@ hold_lock() {
 }
 
 # hang_child [SHELL-LINE] — $SANDBOX/hangchild: a process unique to this
-# test (pgrep can't match anything else on the host) that hangs, after
-# running SHELL-LINE (e.g. a trap that ignores TERM).
+# test (pgrep can't match anything else on the host) that runs SHELL-LINE
+# (e.g. a trap that ignores TERM), then touches $SANDBOX/hangchild.ready,
+# then hangs for an hour — in $SANDBOX/hangsleep, so the sleep is just as
+# recognizable, and no test can pass by waiting it out.
 hang_child() {
-  printf '#!/bin/sh\n%s\nsleep 300\n' "${1:-:}" >"$SANDBOX/hangchild"
+  ln -sf "$(PATH=/usr/bin:/bin type -P sleep)" "$SANDBOX/hangsleep"
+  printf '#!/bin/sh\n%s\n: >"%s.ready"\n"%s" 3600\n' "${1:-:}" "$SANDBOX/hangchild" "$SANDBOX/hangsleep" >"$SANDBOX/hangchild"
   chmod 755 "$SANDBOX/hangchild"
 }
 
-# no_hang_child — the child is gone (give a KILLed process a moment to go).
+# no_hang_child — the child (and its sleep) are gone (give a KILLed process
+# a moment to go).
 no_hang_child() {
   local i=0
-  while pgrep -f "$SANDBOX/hangchild" >/dev/null; do
+  while pgrep -f "$SANDBOX/hang" >/dev/null; do
     i=$((i + 1))
     [ "$i" -lt 20 ] || return 1
     sleep 0.1
   done
+}
+
+# build_src_cache — once per test file (from setup_file): this working tree
+# (uncommitted changes included, never the developer's own .git) committed
+# to a fresh repository with a pushed "origin". Install tests use copies of
+# it, so they never depend on how the checkout running them is set up (a
+# worktree's .git is a file; a dirty tree; a developer's unpushed work).
+build_src_cache() {
+  local c="$BATS_FILE_TMPDIR/src-cache"
+  [ -d "$c/src/.git" ] && return 0
+  rm -rf "$c"
+  mkdir -p "$c"
+  rsync -a --exclude=/.git "$REPO_ROOT/" "$c/src/"
+  (
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+    g() { git -C "$c/src" -c user.email=t@example.invalid -c user.name=tester -c commit.gpgSign=false "$@"; }
+    g init -q && g add -A && g commit -qm src &&
+      git init -q --bare "$c/origin.git" &&
+      g remote add origin "$c/origin.git" && g push -q origin HEAD && g fetch -q origin
+  ) >/dev/null 2>&1
+}
+
+# make_src_tree — $SANDBOX/src: a fresh copy of the build_src_cache tree
+# (whose origin is shared and read-only); prints its path.
+make_src_tree() {
+  [ -d "$SANDBOX/src" ] || cp -Rp "$BATS_FILE_TMPDIR/src-cache/src" "$SANDBOX/src"
+  printf '%s\n' "$SANDBOX/src"
 }
 
 # plain_copy — a copy of scrubmac with no .git (install mode "copy") at
@@ -228,6 +311,21 @@ plain_copy() {
   mkdir -p "$SANDBOX/copy/cleaners"
   cp -R "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/VERSION" "$SANDBOX/copy/"
   printf '%s\n' "$SANDBOX/copy/bin/scrubmac"
+}
+
+# no_watchdog_left SECS — no TIMEOUT watchdog (`sleep SECS`, a duration the
+# test picked to be recognizable) outlived the run.
+no_watchdog_left() {
+  local i=0
+  while pgrep -f "sleep $1\$" >/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -ge 20 ]; then
+      pkill -f "sleep $1\$" 2>/dev/null || true
+      echo "a watchdog (sleep $1) outlived the run" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
 }
 
 # state_names FILE — the cleaner names in an enabled/disabled state file,

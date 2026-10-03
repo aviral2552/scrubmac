@@ -27,6 +27,12 @@
 [ -n "${CMM_COMMON_LOADED:-}" ] && return 0
 CMM_COMMON_LOADED=1
 
+# bash ≥ 5.2 expands "&" in a ${var//pattern/replacement} replacement to the
+# matched text (patsub_replacement, on by default); keep 3.2's literal "&".
+shopt -u patsub_replacement 2>/dev/null || true
+# A CDPATH makes `cd DIR` search elsewhere and print where it went.
+unset CDPATH
+
 CMM_EXIT_SKIP=75
 CMM_OS="${CMM_OS:-$(uname -s 2>/dev/null || echo unknown)}"
 
@@ -223,11 +229,12 @@ cmm__exec() {
 }
 
 # cmm__failed_note RC CMD ARGS… — name the failing command in the summary.
+# (LC_ALL=C cuts bytes: a character split at the cut is dropped.)
 cmm__failed_note() {
   local rc="$1" cmd
   shift
   cmd="$*"
-  [ "${#cmd}" -le 80 ] || cmd="${cmd:0:77}..."
+  [ "${#cmd}" -le 80 ] || cmd="$(printf '%s' "${cmd:0:77}" | cmm__valid_utf8)..."
   summary_note "failed: $cmd (exit $rc)"
 }
 
@@ -293,23 +300,41 @@ cmm__on_exit() {
   exit "$rc"
 }
 
-# preview CMD ARGS… — a READ-ONLY command that shows what a run would change
-# (e.g. `brew upgrade --dry-run`). Executed only under --dry-run.
-preview() {
-  [ "${CMM_DRY_RUN:-0}" = 1 ] || return 0
-  [ "${CMM_MODE:-run}" = status ] && return 0
+# cmm__readonly KIND [--ok=N] CMD ARGS… — show and execute a read-only
+# command (the core of preview/report). A non-zero exit is a warning, never
+# a failure; with --ok=N, exit N is an answer rather than an error (`npm
+# outdated` exits 1 whenever something is outdated).
+cmm__readonly() {
+  local kind="$1" ok='' rc=0
+  shift
+  case "${1:-}" in
+    --ok=*)
+      ok="${1#--ok=}"
+      shift
+      ;;
+  esac
   printf '%s~ %s%s\n' "$CMM_DIM" "$*" "$CMM_RESET"
-  "$@" || warn "preview '$1' exited $? (continuing)"
+  "$@" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" != "$ok" ]; then
+    warn "$kind '$1' exited $rc (continuing)"
+  fi
   return 0
 }
 
-# report CMD ARGS… — a READ-ONLY command for `scrubmac status` (e.g.
-# `brew outdated`). Executed only in status mode.
+# preview [--ok=N] CMD ARGS… — a READ-ONLY command that shows what a run
+# would change (e.g. `brew upgrade --dry-run`). Executed only under
+# --dry-run.
+preview() {
+  [ "${CMM_DRY_RUN:-0}" = 1 ] || return 0
+  [ "${CMM_MODE:-run}" = status ] && return 0
+  cmm__readonly preview "$@"
+}
+
+# report [--ok=N] CMD ARGS… — a READ-ONLY command for `scrubmac status`
+# (e.g. `brew outdated`). Executed only in status mode.
 report() {
   [ "${CMM_MODE:-run}" = status ] || return 0
-  printf '%s~ %s%s\n' "$CMM_DIM" "$*" "$CMM_RESET"
-  "$@" || warn "report '$1' exited $? (continuing)"
-  return 0
+  cmm__readonly report "$@"
 }
 
 # cmm_scratch_dir — a private directory for this cleaner's temporary files:
@@ -425,6 +450,8 @@ cmm_canon_path() {
     [ -n "$p" ] || p="/"
   done
   p="$(cd -P "$p" 2>/dev/null && pwd -P)" || return 1
+  # a symlink to / can leave a leading "//" (POSIX keeps it distinct)
+  while [ "${p#//}" != "$p" ]; do p="${p#/}"; done
   [ "$p" = "/" ] && p=''
   out="$p$rest"
   printf '%s\n' "${out:-/}"
@@ -484,6 +511,31 @@ cmm_unsafe_target() {
   return 1
 }
 
+# cmm_link_dirs — where launcher links may live besides Homebrew's bin, one
+# per line: /usr/local/bin and ~/.local/bin, or the colon-separated
+# CMM_LINK_DIRS (tests: never the host's /usr/local/bin).
+cmm_link_dirs() {
+  local rest="${CMM_LINK_DIRS-/usr/local/bin:$HOME/.local/bin}" d
+  while [ -n "$rest" ]; do
+    d="${rest%%:*}"
+    case "$rest" in
+      *:*) rest="${rest#*:}" ;;
+      *) rest='' ;;
+    esac
+    [ -n "$d" ] && printf '%s\n' "$d"
+  done
+  return 0
+}
+
+# cmm_launcher_dirs DIR… — DIR… (empty ones dropped), then cmm_link_dirs,
+# each once, one per line: every place a launcher link may be.
+cmm_launcher_dirs() {
+  {
+    [ "$#" -gt 0 ] && printf '%s\n' "$@"
+    cmm_link_dirs
+  } | awk 'NF && !seen[$0]++'
+}
+
 # points_into LINK DIR — LINK is a symlink whose target lives under DIR
 # (including dangling links left by older layouts).
 points_into() {
@@ -494,6 +546,57 @@ points_into() {
     "$2" | "$2"/*) return 0 ;;
   esac
   return 1
+}
+
+# cmm_old_name_ours TOKEN DIR… — TOKEN (how a crontab entry calls
+# cleanmymac) reaches one of DIR… — a path under one, or a link into one —
+# rather than MacPaw's CleanMyMac command of the same name. A bare name
+# counts unless your PATH resolves it to something else.
+cmm_old_name_ours() {
+  local p="$1" real d
+  shift
+  # shellcheck disable=SC2016,SC2088  # the literal text of a crontab entry
+  case "$p" in
+    '~/'*) p="$HOME/${p#\~/}" ;;
+    '$HOME/'*) p="$HOME/${p#\$HOME/}" ;;
+    '${HOME}/'*) p="$HOME/${p#\$\{HOME\}/}" ;;
+  esac
+  case "$p" in
+    */*) ;;
+    *) p="$(command -v "$p" 2>/dev/null)" || return 0 ;;
+  esac
+  real="$(resolve_self "$p" 2>/dev/null)" || real="$p"
+  for d in "$@"; do
+    [ -n "$d" ] || continue
+    case "$p" in "$d"/*) return 0 ;; esac
+    case "$real" in "$d"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+# cmm_cron_old_name DIR… — your crontab still runs cleanmymac (as a command
+# word, in an entry that is not commented out) in a way that leads to one of
+# DIR… (see cmm_old_name_ours).
+cmm_cron_old_name() {
+  local tok
+  have crontab || return 1
+  while IFS= read -r tok; do
+    [ -n "$tok" ] && cmm_old_name_ours "$tok" "$@" && return 0
+  done <<EOF
+$({ crontab -l 2>/dev/null || true; } | grep -v '^[[:space:]]*#' |
+    grep -oE '(^|[[:space:]"'"'"'(;&|`])[^[:space:]"'"'"'(;&|<>`]*cleanmymac([[:space:]"'"'"';&|<>)`]|$)' |
+    sed -E 's/^[[:space:]"'"'"'(;&|`]+//; s/[[:space:]"'"'"';&|<>)`]+$//')
+EOF
+  return 1
+}
+
+# cmm_plist_xml FILE — FILE as XML text; a property list saved in binary
+# (or JSON) form is converted with plutil, where there is one.
+cmm_plist_xml() {
+  if command -v plutil >/dev/null 2>&1 && plutil -convert xml1 -o - "$1" 2>/dev/null; then
+    return 0
+  fi
+  cat "$1" 2>/dev/null
 }
 
 # ---------- dates ----------
@@ -563,10 +666,15 @@ cmm_migrate_config_dir() {
 # command substitution, spaces) is ignored, so the config file can never
 # execute code. Last valid occurrence wins.
 config_get() {
-  local file="${CMM_CONFIG_FILE:-$(cmm_config_dir)/config}" line
-  line="$({ grep -E "^$1=[A-Za-z0-9._/-]*$" "$file" 2>/dev/null || true; } | tail -n 1)"
-  if [ -n "$line" ]; then
-    printf '%s\n' "${line#*=}"
+  local file="${CMM_CONFIG_FILE:-$(cmm_config_dir)/config}" v
+  case "$1" in '' | *[!A-Za-z0-9_]*) printf '%s\n' "${2:-}" && return 0 ;; esac
+  # (a file saved with CRLF line ends or a byte-order mark reads the same)
+  if v="$(LC_ALL=C awk -v k="$1=" '
+    NR == 1 { sub(/^\357\273\277/, "") }
+    { sub(/\r$/, "") }
+    index($0, k) == 1 && substr($0, length(k) + 1) ~ /^[A-Za-z0-9._\/-]*$/ { v = substr($0, length(k) + 1); f = 1 }
+    END { if (f) print v; else exit 1 }' "$file" 2>/dev/null)"; then
+    printf '%s\n' "$v"
   else
     printf '%s\n' "${2:-}"
   fi
@@ -748,6 +856,18 @@ cooldown_days() {
 }
 
 # ---------- JSON ----------
+# cmm__valid_utf8 — stdin with invalid UTF-8 dropped (JSON must be valid
+# UTF-8; a cleaner's note may not be). By way of UTF-16, which has no room
+# for code points past U+10FFFF: macOS's iconv lets those through a UTF-8 to
+# UTF-8 pass. Unchanged where iconv is missing.
+cmm__valid_utf8() {
+  if command -v iconv >/dev/null 2>&1; then
+    { iconv -c -f UTF-8 -t UTF-16LE | iconv -c -f UTF-16LE -t UTF-8; } 2>/dev/null || true
+  else
+    cat
+  fi
+}
+
 # cmm_json_str STRING — print STRING as a JSON string literal.
 cmm_json_str() {
   local s="$1"
@@ -756,7 +876,7 @@ cmm_json_str() {
   s="${s//$'\n'/\\n}"
   s="${s//$'\r'/\\r}"
   s="${s//$'\t'/\\t}"
-  s="$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177')"
+  s="$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | cmm__valid_utf8)"
   printf '"%s"' "$s"
 }
 

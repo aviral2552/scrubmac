@@ -8,30 +8,38 @@
 # summary: upgrade GitHub CLI extensions (gh itself is updated by its manager)
 # GitHub CLI: upgrade every installed extension. gh itself is usually
 # brew-managed and updated by the homebrew cleaner. Extension commands need a
-# logged-in gh (without one they exit 4), so a gh that is not logged in, or
-# has no extensions, is skipped.
+# logged-in gh: `gh extension list` exits 4 without one (then the cleaner is
+# skipped, as it is when no extension is installed). `gh auth status` is not
+# the test: it exits 1 when ANY account on any host has a problem (an
+# inactive account, an Enterprise host off the VPN), even with github.com
+# logged in.
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 . "${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
 
 skip_unless gh
 
-# gh_logged_in — `gh auth status` exits 1 when no host is logged in or a
-# token no longer works.
-gh_logged_in() { gh auth status >/dev/null 2>&1; }
+# gh_extensions — GH_EXTS (the installed extensions) and GH_RC (the exit
+# status of `gh extension list`: 4 when gh is not logged in).
+gh_extensions() {
+  GH_RC=0
+  GH_EXTS="$(gh extension list 2>/dev/null)" || GH_RC=$?
+}
 
 if [ "${CMM_MODE:-run}" = status ]; then
-  if gh_logged_in; then
-    report gh extension list
-  else
-    note "- gh is not logged in: run 'gh auth login'"
-  fi
+  gh_extensions
+  case "$GH_RC" in
+    0) [ -n "$GH_EXTS" ] && report gh extension list ;;
+    4) note "- gh is not logged in: run 'gh auth login'" ;;
+    *) note "- 'gh extension list' exited $GH_RC" ;;
+  esac
 fi
 skip_unless_updating
 
-gh_logged_in || skip "skipping: gh is not logged in ('gh auth status' failed) — extension upgrades need 'gh auth login'"
-if exts="$(gh extension list 2>/dev/null)" && [ -z "$exts" ]; then
-  skip "skipping: no gh extensions installed"
-fi
+gh_extensions
+case "$GH_RC" in
+  4) skip "skipping: gh is not logged in ('gh extension list' exited 4) — extension upgrades need 'gh auth login'" ;;
+  0) [ -n "$GH_EXTS" ] || skip "skipping: no gh extensions installed" ;;
+esac
 
 step gh extension upgrade --all # exits 0 when there is nothing to upgrade

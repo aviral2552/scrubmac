@@ -28,9 +28,12 @@ and a time limit; a failing cleaner never stops the rest. Cleaners whose tool
 is not installed skip themselves. A summary table ends every run, and every
 real run leaves a log.
 .PP
-Safety doctrine: never
-.BR sudo ,
-never user data \(em only updates and regenerable caches. Opt-in cleaners
+Safety doctrine: scrubmac never runs
+.B sudo
+itself (Homebrew may, to upgrade a pkg-based cask in a run you start in a
+terminal), never touches user data \(em only updates, regenerable caches,
+and Homebrew's removal of unneeded dependencies and old formula versions.
+Opt-in cleaners
 (docker, xcode, go, rubygems) are disabled until explicitly enabled. Updates
 honor a supply-chain cooldown (default 7 days) wherever it can be enforced.
 See
@@ -77,7 +80,7 @@ Names may also be given as a comma-separated list.
 Turn cleaners off (recorded in
 .IR ~/.config/scrubmac/disabled ).
 .TP
-.B config \fR[\fBget\fR|\fBset\fR|\fBunset\fR|\fBpath\fR] [\fIKEY\fR [\fIVALUE\fR]]
+.B config \fR[\fBget\fR|\fBset\fR|\fBunset\fR|\fBpath\fR|\fBkeys\fR] [\fIKEY\fR [\fIVALUE\fR]]
 With no arguments, list every setting with its value and where it comes from
 (flag, env, config, default). The other forms read, validate-and-write, or
 remove a key, keeping comments and other lines intact; arguments pass
@@ -85,8 +88,10 @@ through as given, so a value may begin with a dash.
 .B get
 of a key that is neither a setting nor in the file exits 1;
 .B set
-of a near-miss of a built-in key (a likely typo) is refused with a
-suggestion.
+of a key one edit away from a built-in key (a likely typo) is refused with
+a suggestion;
+.B keys
+prints every key name, for shell completion.
 .TP
 .B schedule \fR[\fBdaily\fR [\fIHH:MM\fR] | \fBweekly\fR [\fIDAY\fR] [\fIHH:MM\fR] | \fBstatus\fR | \fBoff\fR]
 Run scrubmac automatically through a per-user launchd agent
@@ -96,8 +101,9 @@ full name); without one, weekly runs on Monday; without HH:MM, at 09:00. A
 run missed while the Mac slept happens at the next wake. With no argument,
 or
 .BR status ,
-it reports the schedule, whether launchd has it loaded, and the exact
-command that recreates it;
+it reports the schedule and whether launchd has it loaded \(em and, when it
+is not loaded or its launcher is gone, the exact command that recreates
+it;
 .B off
 removes it.
 .TP
@@ -129,7 +135,8 @@ Show the help page.
 Print every mutating command without executing it; read-only previews (such
 as
 .BR "brew upgrade \-\-dry\-run" )
-do run, to show the real impact.
+do run, to show the real impact, and so do scrubmac's own first-run setup
+and one-time migrations.
 .TP
 .BR \-q ", " \-\-quiet
 Print one result line per cleaner instead of its output; a failing
@@ -167,14 +174,18 @@ Show the help page.
 .BR \-V ", " \-\-version
 Print the version.
 .PP
-An option that does not apply to the command is an error, not silently
-ignored (for example
+An option that would change what a command does, or that it cannot honor,
+is an error, not silently ignored (for example
 .B \-\-dry\-run
 with
 .BR update ,
 which has
 .B \-\-check
-instead).
+instead);
+.B \-q
+and
+.B \-n
+are accepted and ignored by read-only commands.
 .SH SETTINGS
 Settings live in
 .I ~/.config/scrubmac/config
@@ -244,9 +255,13 @@ also exits 0)
 at least one cleaner failed, timed out, or was refused by the
 execution-safety guard; also
 .B config get
-of an unknown key, and
+of an unknown key,
 .B last \-\-json
-before any run
+before any run, an
+.B update
+that failed or was refused, and a
+.B schedule
+that launchd could not load
 .TP
 .B 2
 usage or environment error (for example an unwritable state directory),
@@ -274,8 +289,12 @@ cleaners you turned on, one per line
 your own cleaners; a same-named cleaner overrides the built-in
 .TP
 .I ~/.local/state/scrubmac/
-run logs, the last-run JSON record, and the run lock (a symlink naming the
-holder's pid and start time)
+run logs, the last-run JSON record, the last-success stamp, the run lock (a
+symlink naming the holder's pid and start time), and
+.I launchd.log
+(what scheduled runs printed; kept to about 512 KB plus one
+.I .old
+generation)
 .SH ENVIRONMENT
 .TP
 .BI CMM_ KEY
@@ -314,7 +333,9 @@ Opt in to the Docker cache pruner:
 Run every Monday at 09:00:
 .B scrubmac schedule weekly
 .SH SEE ALSO
-Project documentation in
-.IR docs/ ;
+The
+.I docs/
+directory of the source tree, and the
 .UR https://github.com/aviral2552/scrubmac
-.UE
+project page
+.UE .

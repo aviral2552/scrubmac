@@ -15,9 +15,12 @@ setup() { setup_sandbox; }
 teardown() { teardown_sandbox; }
 
 # cron_run ARGS… — run scrubmac the way cron would (plus the fixture dir).
+# cron's PATH is /usr/bin:/bin; the sandbox's own utility dir stands in for
+# it, so no host tool (python3, git shims, osascript…) is reachable.
 cron_run() {
-  env -i HOME="$HOME" TMPDIR="$TMPDIR" LOGNAME=tester SHELL=/bin/sh PATH=/usr/bin:/bin \
+  env -i HOME="$HOME" TMPDIR="$TMPDIR" LOGNAME=tester SHELL=/bin/sh PATH="$SYSBIN" \
     CMM_CLEANERS_DIR="$FIXTURES" CMM_NOTIFY=never CMM_OFFLINE=0 \
+    CMM_BREW_LOCATIONS="$CMM_BREW_LOCATIONS" CMM_LINK_DIRS="$CMM_LINK_DIRS" \
     "$CMM" "$@"
 }
 
@@ -28,7 +31,7 @@ cron_run() {
   run cron_run --scheduled --quiet
   [ "$status" -eq 0 ]
   [[ "$output" == *"every cleaner skipped"* ]] || false
-  [[ "$output" == *"/usr/bin:/bin"* ]] || false
+  [[ "$output" == *"cron's default PATH is /usr/bin:/bin"* ]] || false
   [ -f "$HOME/.local/state/scrubmac/last-run.json" ]
   ls "$HOME"/.local/state/scrubmac/logs/run-*.log >/dev/null
   [ ! -L "$HOME/.local/state/scrubmac/run.lock" ] # released
