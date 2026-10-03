@@ -61,19 +61,83 @@ teardown() { teardown_sandbox; }
   [ -e "$CMM_PREFIX/.git" ]
 }
 
-@test "seeds heavy-pruner opt-out only on a fresh setup" {
+@test "seeds no cleaner state; names the opt-in cleaners instead" {
   run "$INSTALL"
   [ "$status" -eq 0 ]
-  diff "$XDG_CONFIG_HOME/scrubmac/disabled" - <<'EOF'
-docker
-xcode
-EOF
-  # an existing choice is never overwritten
-  printf 'docker\n' >"$XDG_CONFIG_HOME/scrubmac/disabled"
+  [ ! -e "$XDG_CONFIG_HOME/scrubmac/disabled" ]
+  [ ! -e "$XDG_CONFIG_HOME/scrubmac/enabled" ]
+  [[ "$output" == *"Opt-in cleaners (off until you enable them):"*docker*xcode* ]]
+  # existing choices are never touched
+  mkdir -p "$XDG_CONFIG_HOME/scrubmac"
+  printf 'npm\n' >"$XDG_CONFIG_HOME/scrubmac/disabled"
   run "$INSTALL"
   diff "$XDG_CONFIG_HOME/scrubmac/disabled" - <<'EOF'
-docker
+npm
 EOF
+}
+
+@test "refuses to mirror into a directory that holds anything but scrubmac" {
+  mkdir -p "$CMM_PREFIX"
+  printf 'precious\n' >"$CMM_PREFIX/thesis.tex"
+  run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not a scrubmac install"* ]]
+  [ -f "$CMM_PREFIX/thesis.tex" ]
+}
+
+@test "refuses \$HOME or / as the install dir" {
+  CMM_PREFIX="$HOME" run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to install into"* ]]
+  CMM_PREFIX=/ run "$INSTALL"
+  [ "$status" -eq 2 ]
+}
+
+@test "refuses when the source tree sits inside the install dir (the mirror would delete it)" {
+  mkdir -p "$CMM_PREFIX/bin"
+  touch "$CMM_PREFIX/bin/scrubmac"
+  rsync -a --exclude=.git "$REPO_ROOT/" "$CMM_PREFIX/src/"
+  run "$CMM_PREFIX/src/install.sh"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"inside the install dir"* ]]
+  [ -x "$CMM_PREFIX/src/install.sh" ]
+}
+
+@test "leaves a launcher that is not ours alone (e.g. Homebrew's scrubmac)" {
+  mkdir -p "$CMM_BIN_DIR" "$SANDBOX/Cellar/scrubmac/9/bin"
+  printf '#!/bin/sh\necho brew-scrubmac\n' >"$SANDBOX/Cellar/scrubmac/9/bin/scrubmac"
+  chmod 755 "$SANDBOX/Cellar/scrubmac/9/bin/scrubmac"
+  ln -s "$SANDBOX/Cellar/scrubmac/9/bin/scrubmac" "$CMM_BIN_DIR/scrubmac"
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"is not from this installer"* ]]
+  [ "$(readlink "$CMM_BIN_DIR/scrubmac")" = "$SANDBOX/Cellar/scrubmac/9/bin/scrubmac" ]
+}
+
+@test "replaces its own (even dangling) launcher link" {
+  mkdir -p "$CMM_BIN_DIR"
+  ln -s "$CMM_PREFIX/bin/old-name" "$CMM_BIN_DIR/scrubmac" # dangling, but ours
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$CMM_BIN_DIR/scrubmac")" = "$CMM_PREFIX/bin/scrubmac" ]
+}
+
+@test "links the man page and shell completions into a writable brew prefix" {
+  local pfx="$SANDBOX/brewpfx"
+  mkdir -p "$pfx/bin" "$pfx/share/man/man1" "$pfx/share/zsh/site-functions" \
+    "$pfx/etc/bash_completion.d" "$pfx/share/fish/vendor_completions.d"
+  printf '#!/bin/sh\n[ "$1" = --prefix ] && echo "%s"\nexit 0\n' "$pfx" >"$STUB_BIN/brew"
+  chmod 755 "$STUB_BIN/brew"
+  printf 'foreign\n' >"$pfx/share/fish/vendor_completions.d/scrubmac.fish" # not ours: kept
+  unset CMM_BIN_DIR
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$pfx/bin/scrubmac")" = "$CMM_PREFIX/bin/scrubmac" ]
+  [ "$(readlink "$pfx/share/man/man1/scrubmac.1")" = "$CMM_PREFIX/man/scrubmac.1" ]
+  [ "$(readlink "$pfx/share/zsh/site-functions/_scrubmac")" = "$CMM_PREFIX/completions/_scrubmac" ]
+  [ "$(readlink "$pfx/etc/bash_completion.d/scrubmac")" = "$CMM_PREFIX/completions/scrubmac.bash" ]
+  [ ! -L "$pfx/share/fish/vendor_completions.d/scrubmac.fish" ]
+  grep -qx foreign "$pfx/share/fish/vendor_completions.d/scrubmac.fish"
 }
 
 @test "a sandboxed install never writes outside its sandbox (man-link leak regression)" {
@@ -91,7 +155,7 @@ EOF
   run "$INSTALL"
   [ "$status" -eq 0 ]
   [[ "$output" == *"no writable bin directory"* ]]
-  ! grep -q sudo "$CALL_LOG"
+  refute grep -q sudo "$CALL_LOG"
 }
 
 @test "refuses to run from a directory that is not a scrubmac source tree" {
@@ -109,8 +173,8 @@ EOF
   [ "$status" -eq 0 ]
   [ -d "$REPO_ROOT" ]
   [ -x "$REPO_ROOT/install.sh" ]
-  ! grep -q 'rm -rf.*SRC_DIR' "$REPO_ROOT/install.sh"
-  ! grep -Eq 'trap.*rm' "$REPO_ROOT/install.sh"
+  refute grep -q 'rm -rf.*SRC_DIR' "$REPO_ROOT/install.sh"
+  refute grep -Eq 'trap.*rm' "$REPO_ROOT/install.sh"
 }
 
 @test "choose_bin_dir walks candidates in order, then falls back to ~/.local/bin" {

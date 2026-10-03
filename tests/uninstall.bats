@@ -24,21 +24,67 @@ install_first() {
   export PATH="$CMM_BIN_DIR:$PATH"
 }
 
-@test "removes the app dir and launcher, keeps config by default" {
+@test "removes the app dir and launcher, keeps config and logs by default" {
   install_first
+  CMM_CLEANERS_DIR="" "$CMM_BIN_DIR/scrubmac" disable npm >/dev/null
+  mkdir -p "$STATE_DIR/logs"
+  touch "$STATE_DIR/logs/run-20260101T000000Z-1.log"
   run "$UNINSTALL"
   [ "$status" -eq 0 ]
   [ ! -d "$CMM_PREFIX" ]
   [ ! -e "$CMM_BIN_DIR/scrubmac" ]
   [ -f "$XDG_CONFIG_HOME/scrubmac/disabled" ]
+  [ -d "$STATE_DIR/logs" ]
   [[ "$output" == *"Kept your configuration"* ]]
 }
 
-@test "--purge also removes the configuration" {
+@test "--purge also removes the configuration and the state dir" {
   install_first
+  CMM_CLEANERS_DIR="" "$CMM_BIN_DIR/scrubmac" disable npm >/dev/null
+  mkdir -p "$STATE_DIR/logs"
   run "$UNINSTALL" --purge
   [ "$status" -eq 0 ]
   [ ! -d "$XDG_CONFIG_HOME/scrubmac" ]
+  [ ! -d "$STATE_DIR" ]
+}
+
+write_plist() { # write_plist PROGRAM
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat >"$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.github.aviral2552.scrubmac</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$1</string>
+    <string>--scheduled</string>
+  </array>
+</dict>
+</plist>
+EOF
+}
+
+@test "removes a launchd schedule that runs this install" {
+  install_first
+  make_stub launchctl
+  write_plist "$CMM_PREFIX/bin/scrubmac"
+  run "$UNINSTALL"
+  [ "$status" -eq 0 ]
+  [ ! -e "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" ]
+  grep -q "^launchctl bootout gui/$(id -u)/com.github.aviral2552.scrubmac$" "$CALL_LOG"
+}
+
+@test "keeps a launchd schedule that runs a different install (e.g. Homebrew's)" {
+  install_first
+  make_stub launchctl
+  write_plist "/opt/homebrew/opt/scrubmac/bin/scrubmac"
+  run "$UNINSTALL"
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist" ]
+  [[ "$output" == *"kept the launchd schedule"* ]]
+  refute grep -q bootout "$CALL_LOG"
 }
 
 @test "removes a dangling legacy 1.x launcher symlink" {

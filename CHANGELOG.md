@@ -4,6 +4,144 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [semver](https://semver.org).
 
+## [3.1.0] - 2026-10-04
+
+The "unattended runs" release: everything a scheduled run needs to be
+trustworthy, a supply-chain cooldown that is on by default and actually
+enforced, ten new cleaners, and a pile of correctness fixes — each with a
+regression test, and every external command checked against its tool's
+official documentation.
+
+### Fixed
+
+- A cleaner that read stdin silently consumed the rest of the run: the run
+  loop fed the cleaner list through stdin, so the next cleaner vanished from
+  the run *and* the summary while the run reported success. Cleaners now get
+  `/dev/null` as stdin (which also guarantees no prompt can be answered for
+  them).
+- `CMM_COOLDOWN_DAYS` / `CMM_DERIVEDDATA_AGE_DAYS` (and `CMM_COLOR`) in the
+  environment were overwritten by the config file, contrary to the
+  documented precedence. Every setting now resolves flag → environment →
+  config → default, with type validation.
+- A cleaner refused by the execution-safety guard disappeared and the run
+  exited 0. It is now reported as `REFUSED` and fails the run (exit 1).
+- Cron and terminal runs did not exclude each other: the lock lived in
+  `$TMPDIR`, which cron does not set. The lock now lives in
+  `~/.local/state/scrubmac`, is created atomically (a symlink naming the
+  holder), survives pid reuse, and cannot be stolen by a racing run.
+- The documented crontab line skipped nearly every cleaner (cron's PATH is
+  `/usr/bin:/bin`) and still reported success. scrubmac now warns when every
+  cleaner skipped, `doctor` flags a crontab without `PATH`, and
+  `scrubmac schedule` replaces cron with a launchd agent that carries your
+  PATH.
+- `scrubmac configure` reset every answer — including `DERIVEDDATA_AGE_DAYS`,
+  which it overwrote with 30 — instead of starting from the current config.
+  It now seeds every screen from the config on disk and preserves every key
+  it does not manage.
+- The xcode cleaner judged DerivedData age by the folder's own mtime, which
+  does not change during builds, so it could delete caches of projects in
+  active use. It now reads Xcode's own `LastAccessedDate` (and purges folders
+  whose project is gone), and leaves everything alone while Xcode runs.
+- On a Mac without the Command Line Tools, probing `/usr/bin/python3` (or
+  git, swift, …) popped the "install developer tools" dialog — even from a
+  scheduled run. Apple's inert developer-tool shims now count as absent, and
+  `xcodebuild` requires a full Xcode.
+- `install.sh` could overwrite a Homebrew-installed `scrubmac` link, and its
+  `rsync --delete` would mirror into any `CMM_PREFIX` (even `$HOME`). It now
+  mirrors only into an empty directory or an existing scrubmac install,
+  refuses `$HOME`, `/`, and source/destination nesting, and replaces only
+  links that are its own.
+- `uv cache prune` could still wait up to uv's 5-minute lock timeout on a
+  cache held by uvx-served tools; it now gives up after 15 s and says so.
+- `conda update --all -y` churned every package in the base environment; the
+  conda cleaner now updates conda itself (`conda update -n base conda`), the
+  documented way, and leaves a frozen base alone.
+
+### Added
+
+- **Timeouts:** every cleaner runs under a watchdog (`TIMEOUT`, default 3600 s)
+  that stops it and its child processes; the summary says `TIMEOUT`.
+- **`scrubmac schedule daily|weekly [DAY] [HH:MM] | status | off`** — a
+  per-user launchd agent (runs missed schedules after sleep), with
+  `--scheduled` guards: `ON_BATTERY`, `MIN_HOURS_BETWEEN_RUNS`.
+- **Run logs** (`~/.local/state/scrubmac/logs`, rotated to `LOG_KEEP`),
+  **`scrubmac last [--json]`**, a `last-run.json` record, and **`--json`**
+  output for monitoring.
+- **Desktop notifications** after unattended runs (`NOTIFY=failures`).
+- **`scrubmac status`** — read-only cache sizes and outdated packages.
+- **`--update-only` / `--clean-only`**, **`--skip <cleaner>`**, and
+  **`--measure`** (space freed per cleaner).
+- **Offline detection** from the routing table: updates are skipped, cleanup
+  still runs.
+- **`scrubmac config [get|set|unset|path]`**, did-you-mean suggestions for
+  mistyped cleaners and commands, total run time and per-cleaner notes in the
+  summary, and a much richer `doctor` (settings, install kinds, schedule,
+  crontab, last run, network and power).
+- **`scrubmac update --check`**; git installs follow **release tags** by
+  default (`UPDATE_CHANNEL=release|branch`), and verify **SSH tag
+  signatures** against keys pinned in the installed copy once releases ship
+  `share/allowed_signers`.
+- **New cleaners:** deno, poetry, copilot (the new standalone GitHub Copilot
+  CLI), cargo (cargo-update), krew, vscode (extensions), pre-commit,
+  cocoapods, swiftpm, micromamba (in the conda cleaner), and opt-in rubygems.
+- **Shell completions** for bash, zsh, and fish (installed by the formula and
+  linked by `install.sh` into a writable Homebrew prefix).
+- Cleaner **metadata headers** (`# group:`, `# default:`, `# summary:`) drive
+  `list`, the wizard's screens, and defaults; cleaners report notes, cache
+  sizes, and freed space back to the dispatcher.
+- New cleaner helpers: `step` (record a failure, keep going), `preview`,
+  `report`, `cache_dir`, `updating`/`cleaning`, `app_updates_allowed`,
+  `summary_note`, `brew_cask_upgrade_self`, `has_subcommand`, `setting`.
+
+### Changed
+
+- **The supply-chain cooldown is on by default (7 days)** and enforced for
+  npm (a resolver that installs the newest release old enough, never
+  downgrading), uv (a relative `--exclude-newer` span), pipx (`--cooldown`),
+  pnpm (`minimumReleaseAge`), and Bun (`--minimum-release-age`); Yarn classic
+  global upgrades are held. `COOLDOWN_DAYS=0` opts out.
+- **Homebrew casks are upgraded only when a person is watching**
+  (`APP_UPDATES=interactive`; Homebrew 6 quits running apps and pkg casks ask
+  for a password). `brew upgrade` is split into `--formula` and `--cask`, a
+  failed upgrade no longer skips `brew cleanup`, and Homebrew's confirmation
+  prompt is disabled explicitly.
+- **mas only reports App Store updates**: mas installs them as root via
+  sudo, which scrubmac never triggers.
+- **The go cleaner is opt-in** (Go already trims its build cache); existing
+  installs keep it enabled. New cleaner state model: `enabled` + `disabled`
+  lists of explicit choices, header defaults otherwise — converted once from
+  the ≤ 3.0 format.
+- AI CLIs: `codex update` runs only when the installed Codex has it (older
+  releases would take "update" as a prompt); binary-only casks (Claude Code,
+  Codex, Copilot, Cursor) are upgraded by name, so they update in scheduled
+  runs too; `gemini` is never invoked (it has no updater).
+- docker prunes build cache older than `DOCKER_KEEP_HOURS` (default a week)
+  instead of all of it; `gh extension upgrade --all` failures now fail the
+  cleaner (it exits 0 when there is nothing to do); `mise prune` is
+  available behind `MISE_PRUNE=1`; xcode also prunes old device-support
+  symbols (`DEVICESUPPORT_AGE_DAYS`, newest kept).
+- `install.sh` no longer seeds a `disabled` file and no longer suggests a
+  `cleanmymac` alias; `uninstall.sh` also removes a schedule that runs the
+  install it removes, completion links, and (with `--purge`) the state dir.
+
+### Security
+
+- Release workflow: build-provenance attestations for the tarball; CI
+  actions pinned to commit SHAs (Dependabot keeps them current), read-only
+  tokens by default, checksum-verified linters, OpenSSF Scorecard.
+- Notifications pass text to `osascript` as arguments; cleaner names are
+  restricted to a safe character set; the launchd agent's PATH drops `.`
+  and relative entries.
+
+### Documentation
+
+- Every cleaner's commands, defaults, and rationale in docs/cleaners.md —
+  now CI-enforced against the code (every command a cleaner runs must be
+  named there), along with every setting and command in the configuration
+  docs, README, and man page. New: a demo, a topgrade comparison, a
+  roadmap (docs/roadmap.md), and a "considered and declined" list. The
+  executed rename plan moved to docs/history/.
+
 ## [3.0.1] - 2026-08-10
 
 ### Fixed

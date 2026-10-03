@@ -9,11 +9,14 @@
 #   - never runs sudo, refuses to run as root
 #   - resolves its own location from BASH_SOURCE, never from $PWD
 #   - never deletes the directory it was run from
+#   - mirrors (rsync --delete) only into an empty directory or an existing
+#     scrubmac install — never into a directory that holds anything else
+#   - replaces a launcher, man page or completion link only when it is ours;
+#     anything else at those paths (e.g. Homebrew's scrubmac) is left alone
 #   - idempotent: re-running refreshes the install in place
 #
 # 2026 rename migration (cleanmymac → scrubmac), in this order:
-#   1. config dir migrated BEFORE the fresh-config seeding below — otherwise
-#      seeding would create ~/.config/scrubmac and block the migration forever
+#   1. config dir migrated first, so ~/.config/cleanmymac is adopted
 #   2. ~/.cleanmymac moved to ~/.scrubmac with a compat symlink left behind
 #      (old hardcoded cron paths keep working through the in-tree shim)
 #   3. handles being re-run from INSIDE the old install dir (the normal case:
@@ -64,24 +67,63 @@ choose_bin_dir() {
   return 0
 }
 
-# points_into LINK DIR — symlink whose target lives under DIR (incl. dangling).
-points_into() {
-  local target
-  [ -L "$1" ] || return 1
-  target="$(readlink "$1")"
-  case "$target" in
-    "$2"/*) return 0 ;;
-    *) return 1 ;;
-  esac
+# abs_dir PATH — PATH made absolute without requiring it to exist.
+abs_dir() {
+  local p="$1"
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  printf '%s\n' "$p"
 }
+
+# is_install_dir DIR — DIR is empty, or is (or was) a scrubmac/cleanmymac
+# install: safe to mirror into with --delete.
+is_install_dir() {
+  local d="$1" entry
+  [ -d "$d" ] || return 0
+  for entry in "$d"/* "$d"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    # non-empty: it must carry a scrubmac (or legacy cleanmymac) marker
+    [ -e "$d/bin/scrubmac" ] || [ -e "$d/bin/cleanmymac" ] ||
+      [ -e "$d/cleanmymac.sh" ] || [ -e "$d/scrubmac.sh" ] || [ -e "$d/setup/install.sh" ]
+    return
+  done
+  return 0
+}
+
+# ours LINK — a symlink into this install (or the legacy one), dangling ok.
+ours() { points_into "$1" "$DEST_DIR" || points_into "$1" "$OLD_DEST"; }
+
+# link_ours TARGET LINK LABEL — create LINK -> TARGET unless something that
+# is not ours already sits at LINK.
+link_ours() {
+  local target="$1" link="$2" label="$3"
+  if [ -e "$link" ] || [ -L "$link" ]; then
+    if ! ours "$link"; then
+      echo "note: $link already exists and is not from this installer (Homebrew's scrubmac?) — left alone; skipped the $label link"
+      return 1
+    fi
+  fi
+  ln -fs "$target" "$link"
+}
+
+DEST_DIR="$(abs_dir "$DEST_DIR")"
+OLD_DEST="$(abs_dir "$OLD_DEST")"
+case "$DEST_DIR" in
+  / | "$(abs_dir "$HOME")")
+    printf 'error: refusing to install into %s — choose a dedicated directory\n' "$DEST_DIR" >&2
+    exit 2
+    ;;
+esac
 
 echo "Installing scrubmac $(cat "$SRC_DIR/VERSION" 2>/dev/null || echo '') into $DEST_DIR"
 
-# --- rename migration step 1: config dir (BEFORE any seeding) ---
+# --- rename migration step 1: config dir ---
 cmm_migrate_config_dir
 
 # --- rename migration steps 2+3: install dir, incl. self-hosted re-run ---
+MIGRATED=0
 if [ -d "$OLD_DEST" ] && [ ! -L "$OLD_DEST" ] && [ ! -e "$DEST_DIR" ]; then
+  MIGRATED=1
   mv "$OLD_DEST" "$DEST_DIR"
   ln -s "$DEST_DIR" "$OLD_DEST"
   echo "Migrated $OLD_DEST -> $DEST_DIR (compat symlink left for old cron paths)"
@@ -93,21 +135,42 @@ fi
 if [ "$SRC_DIR" = "$DEST_DIR" ]; then
   echo "(already running from $DEST_DIR — refreshing links only)"
 else
+  case "$SRC_DIR/" in
+    "$DEST_DIR"/*)
+      printf 'error: the source tree %s is inside the install dir %s — the mirror would delete it\n' "$SRC_DIR" "$DEST_DIR" >&2
+      exit 2
+      ;;
+  esac
+  case "$DEST_DIR/" in
+    "$SRC_DIR"/*)
+      printf 'error: the install dir %s is inside the source tree %s\n' "$DEST_DIR" "$SRC_DIR" >&2
+      exit 2
+      ;;
+  esac
+  # (a dir just moved here from the legacy install path is ours by definition)
+  if [ "$MIGRATED" = 0 ] && ! is_install_dir "$DEST_DIR"; then
+    printf 'error: %s exists and is not a scrubmac install — refusing to mirror into it (that would delete its contents)\n' "$DEST_DIR" >&2
+    exit 2
+  fi
   mkdir -p "$DEST_DIR"
   # --delete keeps the app dir an exact mirror: files removed upstream (and
   # legacy layouts) disappear. User state is never here — it lives in
-  # ~/.config/scrubmac.
+  # ~/.config/scrubmac and ~/.local/state/scrubmac.
   rsync -a --delete "$SRC_DIR/" "$DEST_DIR/"
 fi
 
-BREW_BIN=""
+BREW_PREFIX=""
 if command -v brew >/dev/null 2>&1; then
-  BREW_BIN="$(brew --prefix 2>/dev/null)/bin"
+  BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
 fi
+BREW_BIN=""
+[ -n "$BREW_PREFIX" ] && BREW_BIN="$BREW_PREFIX/bin"
 BIN_DIR="$(choose_bin_dir "$BREW_BIN" /usr/local/bin)"
 
-if [ -n "$BIN_DIR" ]; then
-  ln -fs "$DEST_DIR/bin/scrubmac" "$BIN_DIR/scrubmac"
+if [ -z "$BIN_DIR" ]; then
+  echo "note: no writable bin directory found; run it directly:"
+  echo "  $DEST_DIR/bin/scrubmac"
+elif link_ours "$DEST_DIR/bin/scrubmac" "$BIN_DIR/scrubmac" launcher; then
   echo "Linked: $BIN_DIR/scrubmac -> $DEST_DIR/bin/scrubmac"
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
@@ -117,33 +180,41 @@ if [ -n "$BIN_DIR" ]; then
       ;;
   esac
 else
-  echo "note: no writable bin directory found; run it directly:"
-  echo "  $DEST_DIR/bin/scrubmac"
+  echo "  run this copy directly: $DEST_DIR/bin/scrubmac"
 fi
 
 # --- rename migration step 4: retire old-name links (bin + man) ---
 for d in "${CMM_BIN_DIR:-}" "$BREW_BIN" /usr/local/bin "$HOME/.local/bin"; do
   [ -n "$d" ] || continue
   link="$d/cleanmymac"
-  if { points_into "$link" "$DEST_DIR" || points_into "$link" "$OLD_DEST"; } && [ -w "$d" ]; then
+  if ours "$link" && [ -w "$d" ]; then
     rm -f "$link"
     echo "removed old-name link $link (the command is now 'scrubmac')"
   fi
 done
 
-# Link the man page into brew's manpath when possible (never sudo) — only
-# when the launcher itself went into brew's bin, so overridden installs
-# (CMM_BIN_DIR sandboxes, tests) never write outside their own tree.
-if [ -n "$BREW_BIN" ] && [ "$BIN_DIR" = "$BREW_BIN" ] && [ -f "$DEST_DIR/man/scrubmac.1" ]; then
-  MAN_DIR="${BREW_BIN%/bin}/share/man/man1"
-  if [ -d "$MAN_DIR" ] && [ -w "$MAN_DIR" ]; then
-    ln -fs "$DEST_DIR/man/scrubmac.1" "$MAN_DIR/scrubmac.1"
-    echo "Linked man page into $MAN_DIR"
+# Link the man page and shell completions into brew's tree when possible
+# (never sudo) — only when the launcher itself went into brew's bin, so
+# overridden installs (CMM_BIN_DIR sandboxes, tests) never write outside
+# their own tree.
+if [ -n "$BREW_BIN" ] && [ "$BIN_DIR" = "$BREW_BIN" ]; then
+  MAN_DIR="$BREW_PREFIX/share/man/man1"
+  if [ -f "$DEST_DIR/man/scrubmac.1" ] && [ -d "$MAN_DIR" ] && [ -w "$MAN_DIR" ]; then
+    link_ours "$DEST_DIR/man/scrubmac.1" "$MAN_DIR/scrubmac.1" "man page" &&
+      echo "Linked man page into $MAN_DIR"
     oldman="$MAN_DIR/cleanmymac.1"
-    if points_into "$oldman" "$DEST_DIR" || points_into "$oldman" "$OLD_DEST"; then
-      rm -f "$oldman"
-    fi
+    ours "$oldman" && rm -f "$oldman"
   fi
+  for spec in "share/zsh/site-functions:_scrubmac" "etc/bash_completion.d:scrubmac.bash" "share/fish/vendor_completions.d:scrubmac.fish"; do
+    cdir="$BREW_PREFIX/${spec%%:*}"
+    file="${spec##*:}"
+    name="$file"
+    [ "$file" = scrubmac.bash ] && name=scrubmac
+    if [ -f "$DEST_DIR/completions/$file" ] && [ -d "$cdir" ] && [ -w "$cdir" ]; then
+      link_ours "$DEST_DIR/completions/$file" "$cdir/$name" "completion" &&
+        echo "Linked shell completion into $cdir"
+    fi
+  done
 fi
 
 # --- rename migration step 5: tell the user about anything left behind ---
@@ -162,16 +233,10 @@ if [ -n "$leftover" ]; then
   esac
 fi
 
-# Seed the opt-in default for heavy pruners (docker, xcode) so the state is
-# visible and editable — only on a truly fresh setup (D3). Runs AFTER the
-# config migration above, so an existing cleanmymac config is never shadowed.
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/scrubmac"
-if [ ! -f "$CONFIG_DIR/config" ] && [ ! -f "$CONFIG_DIR/disabled" ]; then
-  mkdir -p "$CONFIG_DIR"
-  printf 'docker\nxcode\n' >"$CONFIG_DIR/disabled"
-  echo "Heavy pruners (docker, xcode) start disabled — 'scrubmac enable docker' or the wizard opts in."
-fi
-
+# Opt-in cleaners (heavier pruners) are off until enabled; name them so the
+# state is never a surprise.
+optin="$({ grep -l '^# default: off' "$DEST_DIR"/cleaners/*.sh 2>/dev/null || true; } | sed 's|.*/||; s/^[0-9]*-//; s/\.sh$//' | tr '\n' ' ')"
 echo
-echo "Done. The command is 'scrubmac' (alias cleanmymac=scrubmac if your fingers insist)."
-echo "Run 'scrubmac' to start, or 'scrubmac help' for the command reference."
+[ -n "$optin" ] && echo "Opt-in cleaners (off until you enable them): ${optin}— 'scrubmac enable <name>' or the wizard."
+echo "Done. Run 'scrubmac' to start, 'scrubmac help' for the command reference,"
+echo "and 'scrubmac schedule weekly' to keep things tidy automatically."

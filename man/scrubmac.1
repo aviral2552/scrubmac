@@ -1,10 +1,15 @@
-.TH SCRUBMAC 1 "August 2026" "scrubmac 3.0.1" "User Commands"
+.TH SCRUBMAC 1 2026-10-04 "scrubmac 3.1.0" "User Commands"
 .SH NAME
 scrubmac \- update and clean your dev tools with one command
 .SH SYNOPSIS
 .B scrubmac
 .RB [ \-n | \-\-dry\-run ]
 .RB [ \-q | \-\-quiet ]
+.RB [ \-\-update\-only | \-\-clean\-only ]
+.RB [ \-\-skip
+.IR cleaner ]
+.RB [ \-\-measure ]
+.RB [ \-\-json ]
 .RI [ cleaner .\|.\|.]
 .br
 .B scrubmac
@@ -14,41 +19,75 @@ scrubmac \- update and clean your dev tools with one command
 .B scrubmac
 runs a set of drop-in "cleaner" scripts, each of which updates and cleans one
 development tool (Homebrew, npm, uv, Claude Code, Docker, ...). Each cleaner
-runs in its own process; a failing cleaner never stops the rest. Cleaners
-whose tool is not installed skip themselves. A summary table ends every run.
+runs in its own process, with stdin from
+.I /dev/null
+and a time limit; a failing cleaner never stops the rest. Cleaners whose tool
+is not installed skip themselves. A summary table ends every run, and every
+real run leaves a log.
 .PP
 Safety doctrine: never
 .BR sudo ,
-never user data \(em only updates and regenerable caches. Heavy pruners
-(docker, xcode) are disabled until explicitly enabled. See
+never user data \(em only updates and regenerable caches. Opt-in cleaners
+(docker, xcode, go, rubygems) are disabled until explicitly enabled. Updates
+honor a supply-chain cooldown (default 7 days) wherever it can be enforced.
+See
 .I docs/security.md
 for the threat model.
 .SH COMMANDS
 .TP
-.B list
-Show every cleaner with its state (enabled/disabled), whether its tool is
-present, and whether it is built-in or yours.
+.B list \fR[\fB\-\-names\fR]
+Show every cleaner: state (enabled/disabled), default, whether its tool is
+present, source (built-in or yours), and summary.
+.B \-\-names
+prints names only (for shell completion).
+.TP
+.B status \fR[\fIcleaner\fR ...]
+Read-only report: each cleaner's cache sizes and outdated packages. Changes
+nothing and does not take the run lock.
 .TP
 .B doctor
-Environment and security report: install mode, config, tool presence,
-cleaner-file permission audit, PATH audit.
+Environment and security report: install mode, settings that differ from
+their defaults, cleaner-file permission audit, tools and how they were
+installed, schedule and crontab, last run, network and power, PATH audit.
 .TP
 .B configure
-(Re)run the interactive setup wizard: pick services, set the update cooldown
-and output preferences. Offered automatically on the first interactive run.
+(Re)run the interactive setup wizard. Every screen starts from the current
+configuration; settings it does not manage are kept. Offered automatically on
+the first interactive run.
 .TP
-.BI "enable " cleaner
-Re-enable a disabled cleaner.
+.B enable \fIcleaner\fR ...
+Turn cleaners on (recorded in
+.IR ~/.config/scrubmac/enabled ).
 .TP
-.BI "disable " cleaner
-Disable a cleaner.
+.B disable \fIcleaner\fR ...
+Turn cleaners off (recorded in
+.IR ~/.config/scrubmac/disabled ).
 .TP
-.B update
-Update scrubmac itself: fast-forward
-.B git pull
-for git installs,
-.B brew upgrade
-for Homebrew installs.
+.B config \fR[\fBget\fR|\fBset\fR|\fBunset\fR|\fBpath\fR] [\fIKEY\fR [\fIVALUE\fR]]
+With no arguments, list every setting with its value and where it comes from
+(flag, env, config, default). The other forms read, validate-and-write, or
+remove a key, keeping comments and other lines intact.
+.TP
+.B schedule \fR[\fBdaily\fR [\fIHH:MM\fR] | \fBweekly\fR [\fIDAY\fR] [\fIHH:MM\fR] | \fBstatus\fR | \fBoff\fR]
+Run scrubmac automatically through a per-user launchd agent
+.RI ( ~/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist )
+that carries the current PATH. Defaults: weekly on Monday at 09:00. A run
+missed while the Mac slept happens at the next wake.
+.TP
+.B last \fR[\fB\-\-json\fR]
+Print the log of the most recent run (or, with
+.BR \-\-json ,
+its JSON record).
+.TP
+.B update \fR[\fB\-\-check\fR]
+Update scrubmac itself. Git installs follow release tags by default
+(fast-forward only; tags must be signed by a key pinned in the installed
+copy's
+.I share/allowed_signers
+when that file exists); Homebrew installs run
+.BR "brew upgrade" .
+.B \-\-check
+only reports what would change.
 .TP
 .B version
 Print the version (and commit for git installs).
@@ -58,17 +97,101 @@ Show the help page.
 .SH OPTIONS
 .TP
 .BR \-n ", " \-\-dry\-run
-Print every command that would run, execute nothing.
+Print every mutating command without executing it; read-only previews (such
+as
+.BR "brew upgrade \-\-dry\-run" )
+do run, to show the real impact.
 .TP
 .BR \-q ", " \-\-quiet
 Hide cleaner output; a failing cleaner still dumps its full output.
+.TP
+.B \-\-update\-only
+Update tools; leave caches alone.
+.TP
+.B \-\-clean\-only
+Clean caches; change no versions.
+.TP
+.BI \-\-skip " cleaner"
+Leave a cleaner out of this run (repeatable; comma lists allowed).
+.TP
+.B \-\-measure
+Report the space each cleaner frees (slower).
+.TP
+.B \-\-json
+Print the run's summary as JSON on stdout; all other output goes to stderr.
+.TP
+.B \-\-scheduled
+Unattended run, as started by
+.BR "scrubmac schedule" :
+never interactive, honors ON_BATTERY and MIN_HOURS_BETWEEN_RUNS, and
+notifies on failure.
+.SH SETTINGS
+Settings live in
+.I ~/.config/scrubmac/config
+as KEY=value lines (values limited to A\-Z a\-z 0\-9 . _ / \-), and each can
+be overridden for one run as
+.BI CMM_ KEY
+in the environment. Flags beat the environment, which beats the config file,
+which beats the defaults.
+.TP
+.B COOLDOWN_DAYS
+supply-chain cooldown in days, 0 = off (default 7)
+.TP
+.B QUIET
+1 = hide cleaner output unless it fails (default 0)
+.TP
+.B COLOR
+auto, always, or never (default auto)
+.TP
+.B TIMEOUT
+per-cleaner time limit in seconds, 0 = none (default 3600)
+.TP
+.B APP_UPDATES
+Homebrew cask upgrades: interactive (only when run from a terminal),
+always, or never (default interactive)
+.TP
+.B NOTIFY
+desktop notification after unattended runs: failures, always, or never
+(default failures)
+.TP
+.B ON_BATTERY
+scheduled runs on battery power: run or skip (default run)
+.TP
+.B MIN_HOURS_BETWEEN_RUNS
+scheduled runs skip when a full run succeeded within N hours (default 0)
+.TP
+.B LOG_KEEP
+run logs to keep (default 20)
+.TP
+.B MEASURE
+1 = measure space freed per cleaner (default 0)
+.TP
+.B UPDATE_CHANNEL
+release or branch, for git installs (default release)
+.TP
+.B DERIVEDDATA_AGE_DAYS
+xcode: purge DerivedData Xcode has not used for N days (default 30)
+.TP
+.B DEVICESUPPORT_AGE_DAYS
+xcode: purge device-support folders older than N days (default 90)
+.TP
+.B HOMEBREW_DOCTOR
+homebrew: run brew doctor and brew missing (default 1)
+.TP
+.B DOCKER_KEEP_HOURS
+docker: keep build cache used within N hours (default 168)
+.TP
+.B MISE_PRUNE
+mise: also run mise prune (default 0)
 .SH EXIT STATUS
 .TP
 .B 0
-every cleaner succeeded or was skipped
+every cleaner succeeded or was skipped (a scheduled run that skipped itself
+also exits 0)
 .TP
 .B 1
-at least one cleaner failed
+at least one cleaner failed, timed out, or was refused by the
+execution-safety guard
 .TP
 .B 2
 usage or environment error (including a concurrent run holding the lock)
@@ -86,17 +209,26 @@ the installed application (git installs)
 KEY=value configuration \(em parsed, never executed
 .TP
 .I ~/.config/scrubmac/disabled
-disabled cleaner names, one per line
+cleaners you turned off, one per line
+.TP
+.I ~/.config/scrubmac/enabled
+opt-in cleaners you turned on, one per line
 .TP
 .I ~/.config/scrubmac/cleaners.d/
 your own cleaners; a same-named cleaner overrides the built-in
+.TP
+.I ~/.local/state/scrubmac/
+run logs, the last-run JSON record, and the run lock
 .SH ENVIRONMENT
 .TP
-.B CMM_COOLDOWN_DAYS
-skip package versions younger than this many days (see docs/security.md)
+.BI CMM_ KEY
+override any setting for one run (see SETTINGS)
 .TP
-.B CMM_DERIVEDDATA_AGE_DAYS
-Xcode DerivedData age gate (default 30)
+.B CMM_OFFLINE
+1 or 0: force offline/online instead of probing the routing table
+.TP
+.B CMM_STATE_DIR
+relocate logs, the last-run record, and the lock
 .TP
 .B NO_COLOR
 disable colored output
@@ -108,8 +240,14 @@ Preview everything without executing:
 Run only the Homebrew cleaner:
 .B scrubmac homebrew
 .TP
+Free space now, upgrade nothing:
+.B scrubmac \-\-clean\-only
+.TP
 Opt in to the Docker cache pruner:
 .B scrubmac enable docker
+.TP
+Run every Monday at 09:00:
+.B scrubmac schedule weekly
 .SH SEE ALSO
 Project documentation in
 .IR docs/ ;

@@ -11,11 +11,24 @@
 #   0             ok
 #   75            skipped (tool absent / not applicable) — use skip/skip_unless
 #   anything else failed
+#
+# Cleaner helper vocabulary (see docs/writing-cleaners.md):
+#   run CMD…        mutating command; a failure fails the cleaner immediately
+#   step CMD…       mutating command; a failure is recorded, the cleaner carries
+#                   on, and it reports FAIL when it exits
+#   try CMD…        advisory command; a failure is reported and tolerated
+#   preview CMD…    read-only preview, executed only under --dry-run
+#   report CMD…     read-only report, executed only by `scrubmac status`
+#   cache_dir DIR…  declare the cache dirs this cleaner trims (status sizes,
+#                   MEASURE=1 before/after)
+#   updating / cleaning / interactive / app_updates_allowed — predicates
+#   summary_note TEXT — a line shown under this cleaner in the run summary
 
 [ -n "${CMM_COMMON_LOADED:-}" ] && return 0
 CMM_COMMON_LOADED=1
 
 CMM_EXIT_SKIP=75
+CMM_OS="${CMM_OS:-$(uname -s 2>/dev/null || echo unknown)}"
 
 # ---------- colors ----------
 # Color iff stdout is a TTY, NO_COLOR is unset, and CMM_COLOR is not "never"
@@ -47,12 +60,67 @@ banner() {
   printf '\n%s%s%s\n%s\n' "$CMM_BOLD" "$s" "$CMM_RESET" "${s//?/=}"
 }
 
+# cmm_human_kb KB — "512 KB" / "1.5 MB" / "2.25 GB".
+cmm_human_kb() {
+  awk -v k="${1:-0}" 'BEGIN { if (k < 1024) printf "%d KB", k; else if (k < 1048576) printf "%.1f MB", k / 1024; else printf "%.2f GB", k / 1048576 }'
+}
+
 # ---------- detection ----------
-have() { command -v "$1" >/dev/null 2>&1; }
+# Apple's /usr/bin developer-tool shims exist on every Mac, but running one
+# without a developer directory pops the "install Command Line Tools" dialog
+# — which a scheduled run must never do. have() treats them as absent then.
+CMM_APPLE_STUBS=' git python3 pip3 swift swiftc xcodebuild xcrun clang make '
+
+# Populate CMM__DEVDIR once per process ('' when none is selected). Call it
+# directly, never inside $(…): the cache must land in this shell.
+cmm__load_devdir() {
+  [ -n "${CMM__DEVDIR_LOADED:-}" ] && return 0
+  CMM__DEVDIR_LOADED=1
+  CMM__DEVDIR=''
+  if command -v xcode-select >/dev/null 2>&1; then
+    CMM__DEVDIR="$(xcode-select -p 2>/dev/null)" || CMM__DEVDIR=''
+  fi
+  return 0
+}
+
+# cmm_full_xcode — a full Xcode (not just the Command Line Tools) is selected.
+cmm_full_xcode() {
+  cmm__load_devdir
+  case "$CMM__DEVDIR" in
+    '' | */CommandLineTools | */CommandLineTools/) return 1 ;;
+  esac
+  [ -d "$CMM__DEVDIR" ]
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1 || return 1
+  case "$CMM_APPLE_STUBS" in
+    *" $1 "*) ;;
+    *) return 0 ;;
+  esac
+  local p sdir="${CMM_APPLE_STUB_DIR:-}"
+  if [ -z "$sdir" ]; then
+    [ "$CMM_OS" = Darwin ] || return 0
+    sdir=/usr/bin
+  fi
+  p="$(command -v "$1")"
+  [ "$p" = "$sdir/$1" ] || return 0 # a real install elsewhere on PATH
+  cmm__load_devdir
+  if [ -z "$CMM__DEVDIR" ] || [ ! -d "$CMM__DEVDIR" ]; then
+    return 1 # inert shim: running it would pop the CLT install dialog
+  fi
+  if [ "$1" = xcodebuild ]; then
+    cmm_full_xcode # the xcodebuild shim errors out without a full Xcode
+    return
+  fi
+  return 0
+}
 
 # skip [message] — end this cleaner as "skipped" (exit 75).
 skip() {
-  note "- ${*:-skipping}"
+  local msg="${*:-skipping}"
+  note "- $msg"
+  cmm__report_line skip "$msg"
   exit "$CMM_EXIT_SKIP"
 }
 
@@ -60,11 +128,91 @@ skip_unless() {
   have "$1" || skip "skipping: '$1' not found"
 }
 
+# ---------- modes & context ----------
+# CMM_MODE is run (default), update, clean, or status; the dispatcher sets it
+# from --update-only / --clean-only / `scrubmac status`.
+
+# updating — true when this run may change installed versions: the mode
+# allows updates and the machine is online. Offline, it explains itself once.
+updating() {
+  case "${CMM_MODE:-run}" in
+    run | update) ;;
+    *) return 1 ;;
+  esac
+  if [ "${CMM_OFFLINE:-0}" = 1 ]; then
+    if [ -z "${CMM__OFFLINE_NOTED:-}" ]; then
+      CMM__OFFLINE_NOTED=1
+      note "- offline (no network route): skipping updates"
+      summary_note "offline — updates skipped"
+    fi
+    return 1
+  fi
+  return 0
+}
+
+# cleaning — true when this run may trim caches.
+cleaning() {
+  case "${CMM_MODE:-run}" in
+    run | clean) return 0 ;;
+  esac
+  return 1
+}
+
+# skip_unless_updating — for cleaners that only update (nothing to clean).
+skip_unless_updating() {
+  case "${CMM_MODE:-run}" in
+    clean) skip "skipping: nothing to clean (update-only cleaner)" ;;
+    status) skip "skipping: nothing to report" ;;
+  esac
+  if [ "${CMM_OFFLINE:-0}" = 1 ]; then
+    skip "skipping: offline (updates need the network)"
+  fi
+  return 0
+}
+
+# skip_unless_cleaning — for cleaners that only clean (nothing to update).
+skip_unless_cleaning() {
+  case "${CMM_MODE:-run}" in
+    update) skip "skipping: nothing to update (cleanup-only cleaner)" ;;
+  esac
+  return 0
+}
+
+interactive() { [ "${CMM_INTERACTIVE:-0}" = 1 ]; }
+
+# app_updates_allowed — GUI app upgrades (Homebrew casks, App Store) can quit
+# running apps or ask for a password, so by default they only happen when a
+# person is watching (APP_UPDATES=interactive|always|never).
+app_updates_allowed() {
+  case "${CMM_APP_UPDATES:-interactive}" in
+    always) return 0 ;;
+    never) return 1 ;;
+  esac
+  interactive
+}
+
+# ---------- reporting back to the dispatcher ----------
+# Cleaners report notes, skip reasons, cache sizes and freed space as
+# "key<TAB>value" lines in CMM_REPORT_FILE (set per cleaner by the dispatcher;
+# unset when a cleaner runs standalone, which makes these no-ops).
+cmm__report_line() {
+  [ -n "${CMM_REPORT_FILE:-}" ] || return 0
+  local v="$2"
+  v="${v//$'\t'/ }"
+  v="${v//$'\n'/ }"
+  printf '%s\t%s\n' "$1" "$v" >>"$CMM_REPORT_FILE" 2>/dev/null || true
+}
+
+# summary_note TEXT — shown under this cleaner in the run summary and JSON.
+summary_note() { cmm__report_line note "$*"; }
+
 # ---------- command execution ----------
 # run CMD ARGS… — announce and execute a mutating command. Honors dry-run.
 # Failures propagate (cleaners run under `set -e`, so a failed `run` fails the
 # cleaner). Takes an argument vector only — no strings, no eval, no pipelines.
+# `scrubmac status` never mutates: run/step/try are silent no-ops there.
 run() {
+  [ "${CMM_MODE:-run}" = status ] && return 0
   printf '%s+ %s%s\n' "$CMM_DIM" "$*" "$CMM_RESET"
   [ "${CMM_DRY_RUN:-0}" = "1" ] && return 0
   "$@"
@@ -78,6 +226,125 @@ try() {
   run "$@" || rc=$?
   [ "$rc" -ne 0 ] && warn "'$1' exited $rc (continuing)"
   return 0
+}
+
+# step CMD ARGS… — like run, but a failure does not stop the cleaner: the
+# remaining (independent) steps still run, and the cleaner exits non-zero at
+# the end so the summary says FAIL. Use run instead when later commands must
+# not happen after a failure.
+step() {
+  local rc=0
+  run "$@" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    warn "'$1' exited $rc — continuing with the remaining steps"
+    cmm_fail_later
+  fi
+  return 0
+}
+
+# cmm_fail_later — make this cleaner exit non-zero when it finishes.
+cmm_fail_later() {
+  CMM__STEP_FAILED=1
+  cmm__arm_exit
+}
+
+cmm__arm_exit() {
+  [ -n "${CMM__EXIT_ARMED:-}" ] && return 0
+  CMM__EXIT_ARMED=1
+  trap cmm__on_exit EXIT
+}
+
+cmm__on_exit() {
+  local rc=$?
+  cmm__finish_measure
+  if [ "${CMM__STEP_FAILED:-0}" = 1 ]; then
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq "$CMM_EXIT_SKIP" ]; then
+      rc=1
+    fi
+  fi
+  exit "$rc"
+}
+
+# preview CMD ARGS… — a READ-ONLY command that shows what a run would change
+# (e.g. `brew upgrade --dry-run`). Executed only under --dry-run.
+preview() {
+  [ "${CMM_DRY_RUN:-0}" = 1 ] || return 0
+  [ "${CMM_MODE:-run}" = status ] && return 0
+  printf '%s~ %s%s\n' "$CMM_DIM" "$*" "$CMM_RESET"
+  "$@" || warn "preview '$1' exited $? (continuing)"
+  return 0
+}
+
+# report CMD ARGS… — a READ-ONLY command for `scrubmac status` (e.g.
+# `brew outdated`). Executed only in status mode.
+report() {
+  [ "${CMM_MODE:-run}" = status ] || return 0
+  printf '%s~ %s%s\n' "$CMM_DIM" "$*" "$CMM_RESET"
+  "$@" || warn "report '$1' exited $? (continuing)"
+  return 0
+}
+
+# ---------- cache accounting ----------
+# cmm_du_kb PATH — disk usage in KB (0 when absent or unreadable).
+cmm_du_kb() {
+  local out=''
+  if [ -e "$1" ]; then
+    out="$(du -sk "$1" 2>/dev/null | awk 'NR == 1 { print $1 + 0 }')" || out=''
+  fi
+  printf '%s\n' "${out:-0}"
+}
+
+# cache_dir DIR… — declare the regenerable cache directories this cleaner
+# trims: `scrubmac status` reports their size, and with MEASURE=1 a run
+# measures them before and after to report space freed per cleaner.
+cache_dir() {
+  local d kb
+  for d in "$@"; do
+    [ -n "$d" ] || continue
+    if [ "${CMM_MODE:-run}" = status ]; then
+      kb="$(cmm_du_kb "$d")"
+      printf '  cache %s: %s\n' "$d" "$(cmm_human_kb "$kb")"
+      cmm__report_line cache_kb "$kb"
+    elif [ "${CMM_MEASURE:-0}" = 1 ] && [ "${CMM_DRY_RUN:-0}" != 1 ]; then
+      kb="$(cmm_du_kb "$d")"
+      CMM__MEASURE_DIRS="${CMM__MEASURE_DIRS:-}$d"$'\n'
+      CMM__MEASURE_BEFORE=$((${CMM__MEASURE_BEFORE:-0} + kb))
+      cmm__arm_exit
+    fi
+  done
+  return 0
+}
+
+# cache_dir_cmd CMD… — cache_dir with the directory printed by CMD (e.g.
+# `uv cache dir`); CMD only runs when the size is actually needed.
+cache_dir_cmd() {
+  case "${CMM_MODE:-run}" in
+    status) ;;
+    *)
+      [ "${CMM_MEASURE:-0}" = 1 ] && [ "${CMM_DRY_RUN:-0}" != 1 ] || return 0
+      ;;
+  esac
+  local d=''
+  d="$("$@" 2>/dev/null)" || d=''
+  d="${d%%$'\n'*}"
+  [ -n "$d" ] && cache_dir "$d"
+  return 0
+}
+
+cmm__finish_measure() {
+  [ -n "${CMM__MEASURE_DIRS:-}" ] || return 0
+  local d kb after=0 freed
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    kb="$(cmm_du_kb "$d")"
+    after=$((after + kb))
+  done <<EOF
+$CMM__MEASURE_DIRS
+EOF
+  freed=$((${CMM__MEASURE_BEFORE:-0} - after))
+  [ "$freed" -lt 0 ] && freed=0
+  cmm__report_line freed_kb "$freed"
+  CMM__MEASURE_DIRS=''
 }
 
 # ---------- paths ----------
@@ -97,11 +364,40 @@ resolve_self() {
   printf '%s/%s\n' "$dir" "$(basename "$target")"
 }
 
+# points_into LINK DIR — LINK is a symlink whose target lives under DIR
+# (including dangling links left by older layouts).
+points_into() {
+  local target
+  [ -L "$1" ] || return 1
+  target="$(readlink "$1")"
+  case "$target" in
+    "$2" | "$2"/*) return 0 ;;
+  esac
+  return 1
+}
+
 # ---------- dates ----------
 # date_days_ago N — RFC 3339 UTC timestamp N days in the past (BSD, then GNU).
 date_days_ago() {
   date -u -v "-${1}d" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null ||
     date -u -d "$1 days ago" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+cmm_now_iso() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+
+# cmm_iso_to_epoch 2026-01-02T03:04:05Z — seconds since the epoch (BSD, then
+# GNU date); fractional seconds are ignored. Fails on unparseable input.
+cmm_iso_to_epoch() {
+  local s="${1%%.*}"
+  s="${s%Z}"
+  date -j -u -f '%Y-%m-%dT%H:%M:%S' "$s" '+%s' 2>/dev/null ||
+    date -u -d "${s}Z" '+%s' 2>/dev/null
+}
+
+# cmm_mtime PATH — modification time in epoch seconds (GNU stat first; see
+# cmm_mode_uid for why the order matters).
+cmm_mtime() {
+  stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null
 }
 
 # ---------- configuration (S5: parsed, never sourced) ----------
@@ -156,8 +452,24 @@ config_get() {
   fi
 }
 
+# setting KEY DEFAULT — the effective value of a setting for a cleaner:
+# CMM_KEY from the environment (the dispatcher exports validated values for
+# every built-in key), else the config file, else DEFAULT. Custom cleaners can
+# use their own keys the same way.
+setting() {
+  case "$1" in
+    '' | [!A-Z]* | *[!A-Z0-9_]*) printf '%s\n' "${2:-}" && return 0 ;;
+  esac
+  local v="CMM_$1"
+  if [ -n "${!v:-}" ]; then
+    printf '%s\n' "${!v}"
+  else
+    config_get "$1" "${2:-}"
+  fi
+}
+
 # ---------- install-kind classification (D4) ----------
-# install_kind CMD — print npm | brew | standalone | none.
+# install_kind CMD — print npm | pipx | uv | brew | standalone | none.
 # The node_modules test must precede the brew-prefix test: npm globals on a
 # brew-managed node live under the brew prefix but inside node_modules/.
 install_kind() {
@@ -170,6 +482,14 @@ install_kind() {
   case "$path" in
     */node_modules/*)
       printf 'npm\n'
+      return 0
+      ;;
+    */pipx/venvs/*)
+      printf 'pipx\n'
+      return 0
+      ;;
+    */uv/tools/*)
+      printf 'uv\n'
       return 0
       ;;
   esac
@@ -195,22 +515,99 @@ install_kind() {
 
 # ai_self_update TOOL [CMD…] — run TOOL's own updater only when it is a
 # standalone install; package-manager-managed installs are updated by the
-# npm/homebrew cleaners instead (self-updating them fights the manager).
+# npm/python/homebrew cleaners instead (self-updating them fights the manager).
 ai_self_update() {
   local tool="$1"
   shift
+  [ "${CMM_MODE:-run}" = status ] && return 0
   case "$(install_kind "$tool")" in
     npm) note "- $tool is npm-managed; the npm cleaner keeps it updated" ;;
+    pipx) note "- $tool is pipx-managed; the python cleaner keeps it updated" ;;
+    uv) note "- $tool is a uv tool; the python cleaner keeps it updated" ;;
     brew) note "- $tool is Homebrew-managed; the homebrew cleaner keeps it updated" ;;
     none) note "- $tool not found" ;;
     *)
       if [ "$#" -gt 0 ]; then
-        try "$@"
+        step "$@"
       else
         note "- $tool is installed standalone; update it via its own installer"
       fi
       ;;
   esac
+}
+
+# cmm_version_ge A B — true when dotted version A >= B (numeric fields
+# compared left to right; a leading "v" or other prefix text is ignored).
+cmm_version_ge() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    sub(/^[^0-9]+/, "", a); sub(/^[^0-9]+/, "", b)
+    na = split(a, x, /[^0-9]+/); nb = split(b, y, /[^0-9]+/)
+    n = (na > nb) ? na : nb
+    for (i = 1; i <= n; i++) {
+      xi = x[i] + 0; yi = y[i] + 0
+      if (xi > yi) exit 0
+      if (xi < yi) exit 1
+    }
+    exit 0
+  }'
+}
+
+# brew_cask_token TOOL — the Homebrew cask TOOL was installed from
+# (…/Caskroom/<token>/<version>/…); prints nothing when it is not a cask.
+brew_cask_token() {
+  local path
+  path="$(command -v "$1" 2>/dev/null)" || return 0
+  path="$(resolve_self "$path")"
+  case "$path" in
+    */Caskroom/*/*)
+      path="${path#*/Caskroom/}"
+      printf '%s\n' "${path%%/*}"
+      ;;
+  esac
+  return 0
+}
+
+# brew_cask_upgrade_self TOOL — for CLIs shipped as binary-only casks (no
+# app to quit, no installer that wants a password), upgrading just that cask
+# is safe even unattended. Returns 1 when TOOL is not a cask.
+brew_cask_upgrade_self() {
+  local token
+  token="$(brew_cask_token "$1")"
+  [ -n "$token" ] || return 1
+  step brew upgrade --cask "$token"
+}
+
+# has_subcommand TOOL SUB — `TOOL --help` lists SUB as a command. Guards CLIs
+# whose older releases would take an unknown word as a prompt and start an
+# interactive session instead of failing.
+has_subcommand() {
+  local out
+  out="$("$1" --help 2>&1 </dev/null || true)"
+  awk -v s="$2" '$1 == s { f = 1 } END { exit !f }' <<EOF
+$out
+EOF
+}
+
+# ---------- supply-chain cooldown (S4) ----------
+# cooldown_days — validated CMM_COOLDOWN_DAYS (0 when unset or invalid).
+cooldown_days() {
+  case "${CMM_COOLDOWN_DAYS:-0}" in
+    '' | *[!0-9]*) printf '0\n' ;;
+    *) printf '%s\n' "$((10#${CMM_COOLDOWN_DAYS:-0}))" ;;
+  esac
+}
+
+# ---------- JSON ----------
+# cmm_json_str STRING — print STRING as a JSON string literal.
+cmm_json_str() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  s="$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177')"
+  printf '"%s"' "$s"
 }
 
 # ---------- execution-safety guards (S2) ----------

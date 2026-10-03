@@ -1,0 +1,11 @@
+# Keeps the SHA-pinned GitHub Actions (and their "# vX.Y.Z" comments) current.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci

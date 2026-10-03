@@ -1,0 +1,224 @@
+name: Live E2E
+
+# Runs scrubmac FOR REAL on GitHub's macOS and Ubuntu runners against real
+# tools — the check that catches an upstream CLI changing under us, which
+# stub-based tests cannot. Runners are ephemeral VMs, so real upgrades,
+# cache pruning and a real launchd agent are safe here.
+on:
+  pull_request:
+    paths:
+      - bin/**
+      - lib/**
+      - cleaners/**
+      - completions/**
+      - install.sh
+      - uninstall.sh
+      - packaging/**
+      - tests/e2e-live/**
+      - .github/workflows/e2e-live.yml
+  push:
+    branches: [master]
+    paths:
+      - bin/**
+      - lib/**
+      - cleaners/**
+      - completions/**
+      - install.sh
+      - uninstall.sh
+      - packaging/**
+      - tests/e2e-live/**
+      - .github/workflows/e2e-live.yml
+  schedule:
+    - cron: "17 6 * * 1" # Mondays: upstream tools change without our commits
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: live (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Preflight — a GUI login session for launchd agents
+        run: launchctl print "gui/$(id -u)" >/dev/null && echo "gui/$(id -u) is available"
+
+      - name: Install extra real tools to exercise
+        run: |
+          set -euxo pipefail
+          brew install --quiet uv pnpm mise
+          brew install --quiet --cask codex
+          pipx install --quiet poetry
+          pipx install --quiet pre-commit
+          # Claude Code's native (standalone) install, exercised by `claude update`
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # Pin every Homebrew formula so `brew upgrade --formula` exercises the
+          # real command without rebuilding the runner image's toolchain.
+          brew list --formula | xargs brew pin
+
+      - name: install.sh into the real HOME
+        run: |
+          ./install.sh
+          command -v scrubmac
+          scrubmac version
+
+      - name: list, doctor, status, dry-run (read-only, against real tools)
+        run: |
+          set -x
+          scrubmac list
+          scrubmac doctor
+          scrubmac status
+          scrubmac --dry-run --json >dryrun.json
+          python3 tests/e2e-live/assert_run.py dryrun.json --exit 0 --no-fail
+
+      - name: npm cooldown resolver against the real registry (isolated prefix)
+        run: |
+          set -euxo pipefail
+          export npm_config_prefix="$RUNNER_TEMP/npmprefix" npm_config_cache="$RUNNER_TEMP/npmcache"
+          npm install -g --silent semver@7.5.0
+          expected="$(npm view semver time versions dist-tags --json | node -e '
+            const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const cut = Date.now() - 365 * 86400e3;
+            const ok = d.versions.filter(v => !v.includes("-") && Date.parse(d.time[v]) <= cut);
+            console.log(ok[ok.length - 1]);')"
+          CMM_COOLDOWN_DAYS=365 scrubmac npm
+          got="$(npm ls -g semver --depth=0 --json | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).dependencies.semver.version)')"
+          echo "expected $expected, got $got"
+          test "$got" = "$expected"
+
+      - name: launchd schedule (a real agent)
+        run: |
+          set -euxo pipefail
+          label=com.github.aviral2552.scrubmac
+          scrubmac schedule daily 03:17
+          plutil -lint "$HOME/Library/LaunchAgents/$label.plist"
+          launchctl print "gui/$(id -u)/$label" | head -20
+          scrubmac schedule status | tee status.txt
+          grep -q "state:    loaded" status.txt
+          scrubmac schedule off
+          if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then echo "agent still loaded"; exit 1; fi
+
+      - name: Homebrew formula from a local tap (install, test, audit)
+        run: |
+          set -euxo pipefail
+          ver="$(cat VERSION)"
+          git archive --format=tar.gz --prefix="scrubmac-$ver/" -o "$RUNNER_TEMP/scrubmac-$ver.tar.gz" HEAD
+          sha="$(shasum -a 256 "$RUNNER_TEMP/scrubmac-$ver.tar.gz" | cut -d' ' -f1)"
+          brew tap-new --no-git local/e2e
+          tap="$(brew --repository local/e2e)"
+          sed -e "s|^  url \".*\"|  url \"file://$RUNNER_TEMP/scrubmac-$ver.tar.gz\"|" \
+              -e "s|^  sha256 \".*\"|  sha256 \"$sha\"|" \
+              packaging/homebrew/scrubmac.rb >"$tap/Formula/scrubmac.rb"
+          brew install --build-from-source local/e2e/scrubmac
+          brew test local/e2e/scrubmac
+          "$(brew --prefix)/opt/scrubmac/bin/scrubmac" list --names | grep -qx homebrew
+          test -f "$(brew --prefix)/share/zsh/site-functions/_scrubmac"
+          test -f "$(brew --prefix)/etc/bash_completion.d/scrubmac"
+          test -f "$(brew --prefix)/share/man/man1/scrubmac.1"
+
+      - name: brew audit --strict (the local tap's file:// URL may be flagged)
+        continue-on-error: true
+        run: brew audit --strict local/e2e/scrubmac
+
+      - name: remove the Homebrew copy again
+        if: always()
+        run: brew uninstall local/e2e/scrubmac || true
+
+      - name: Real full run (every default cleaner, for real)
+        run: |
+          set -x
+          scrubmac --json >run.json 2>run.log || true
+          tail -n 60 run.log
+          python3 tests/e2e-live/assert_run.py run.json --exit 0 --no-fail \
+            --ok homebrew,npm,pnpm,yarn,python,poetry,codex,claude,gh,rustup,mise,pre-commit,cocoapods,swiftpm \
+            --note homebrew=casks
+          scrubmac last | head -40
+
+      - name: Cooldown-off paths (npm update -g, yarn global upgrade, plain uv/pipx/pnpm upgrades)
+        run: |
+          set -x
+          CMM_COOLDOWN_DAYS=0 scrubmac npm yarn pnpm python --json >nocool.json 2>nocool.log || true
+          tail -n 40 nocool.log
+          python3 tests/e2e-live/assert_run.py nocool.json --exit 0 --no-fail --ok npm,yarn,pnpm,python
+
+      - name: Opt-in and mode runs
+        run: |
+          set -x
+          scrubmac xcode go rubygems --json >optin.json 2>optin.log || true
+          tail -n 30 optin.log
+          python3 tests/e2e-live/assert_run.py optin.json --exit 0 --no-fail --ok xcode
+          scrubmac --clean-only --json >clean.json 2>/dev/null || true
+          python3 tests/e2e-live/assert_run.py clean.json --exit 0 --no-fail --mode clean
+
+      - name: uninstall.sh --purge
+        if: always()
+        run: |
+          "$HOME/.scrubmac/uninstall.sh" --purge
+          test ! -e "$HOME/.scrubmac"
+          test ! -e "$HOME/.config/scrubmac"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: e2e-${{ matrix.os }}
+          path: |
+            *.json
+            *.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  linux:
+    name: live (ubuntu-24.04 — docker, conda, composer, go)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Give the Docker daemon some build cache and a dangling image
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/img"
+          printf 'FROM busybox\nRUN echo one > /one\n' >"$RUNNER_TEMP/img/Dockerfile"
+          docker build -q -t scrubmac-e2e "$RUNNER_TEMP/img"
+          printf 'FROM busybox\nRUN echo two > /two\n' >"$RUNNER_TEMP/img/Dockerfile"
+          docker build -q -t scrubmac-e2e "$RUNNER_TEMP/img" # the first image is now dangling
+          docker system df
+      - name: Run the cleaners these runners have for real
+        run: |
+          set -x
+          sudo chown -R "$(id -u):$(id -g)" "$CONDA" # the image's Miniconda is root-owned
+          export PATH="$CONDA/bin:$PATH"
+          ./bin/scrubmac docker conda composer go --json >linux.json 2>linux.log || true
+          tail -n 60 linux.log
+          python3 tests/e2e-live/assert_run.py linux.json --exit 0 --no-fail --ok docker,conda,composer,go
+          docker image inspect scrubmac-e2e >/dev/null # tagged images are never touched
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: e2e-linux
+          path: |
+            *.json
+            *.log
+          retention-days: 14
+          if-no-files-found: ignore

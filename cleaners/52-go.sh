@@ -3,12 +3,22 @@
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # gate: go
-# Go: clear the build cache. The module cache is left alone on purpose —
-# purging it forces a re-download of every dependency of every project.
+# group: Languages
+# default: off
+# summary: clear the Go build cache (opt-in: Go already trims unused entries itself)
+# Go (disabled by default — enable with `scrubmac enable go`): clear the
+# build cache. Go already deletes build-cache entries it has not used
+# recently, so clearing everything mostly forces cold rebuilds — hence
+# opt-in. The module cache is never touched.
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 . "${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
 
 skip_unless go
 
-run go clean -cache
+cache_dir_cmd go env GOCACHE
+skip_unless_cleaning
+
+if cleaning; then
+  step go clean -cache
+fi

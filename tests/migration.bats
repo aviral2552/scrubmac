@@ -129,7 +129,6 @@ seed_old_config() {
   [ "$status" -eq 0 ]
   grep -Fxq 'COOLDOWN_DAYS=7' "$NEWCFG/config" # migrated, not shadowed by seeding
   grep -Fxq npm "$NEWCFG/disabled"             # curated list intact
-  [[ "$output" != *"Heavy pruners"* ]]         # fresh-seed message must NOT appear
 }
 
 # ---------- the shim (§3.3) ----------
@@ -157,8 +156,9 @@ seed_old_config() {
 # ---------- legacy lock (§0) ----------
 
 @test "a live pre-rename cleanmymac lock blocks a scrubmac run" {
+  start_holder cleanmymac
   mkdir -p "$TMPDIR/cleanmymac.$(id -u).lock"
-  echo $$ >"$TMPDIR/cleanmymac.$(id -u).lock/pid"
+  echo "$HOLDER_PID" >"$TMPDIR/cleanmymac.$(id -u).lock/pid"
   make_cleaner 10-alpha.sh 'echo hi'
   run "$CMM"
   [ "$status" -eq 2 ]
@@ -175,7 +175,7 @@ seed_old_config() {
   [ "$status" -eq 0 ]
   [[ "$output" == *ALPHA-RAN* ]]
   [ ! -d "$TMPDIR/cleanmymac.$(id -u).lock" ]
-  [ ! -d "$TMPDIR/scrubmac.$(id -u).lock" ]
+  [ ! -L "$LOCK" ] # the run lock (in the state dir) is released too
 }
 
 # ---------- uninstall (both names) ----------

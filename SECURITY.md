@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 2.x     | yes       |
+| 3.x     | yes       |
+| 2.x (cleanmymac) | security fixes only until v4 — please upgrade |
 | 1.x     | no — please upgrade |
 
 ## Reporting a vulnerability
@@ -16,12 +17,24 @@ open a public issue for anything you believe is exploitable.
 You can expect an acknowledgement within a week. Fixes ship as a patch release
 with credit in the changelog (unless you prefer otherwise).
 
+## Verifying a release
+
+Release tarballs carry a sha256 checksum (`SHA256SUMS`) and a GitHub
+build-provenance attestation:
+
+```bash
+gh attestation verify scrubmac-X.Y.Z.tar.gz -R aviral2552/scrubmac
+```
+
 ## Security model in one paragraph
 
 scrubmac is a user-level bash tool that shells out to the package managers
-you already trust. It never runs `sudo`, refuses to run as root, never deletes
-user data (only regenerable caches), executes only cleaner files that are
-owned by you and not writable by anyone else, parses (never sources) its
-config file, self-updates only by fast-forward `git pull` or Homebrew, and
-makes no network calls of its own. The full threat model, including accepted
-residual risks, lives in [docs/security.md](docs/security.md).
+you already trust. It never runs `sudo` (nor tools that escalate on their
+own), refuses to run as root, never deletes user data (only regenerable
+caches), executes only cleaner files that are owned by you and not writable
+by anyone else (a refusal fails the run), gives cleaners no stdin, parses
+(never sources) its config file, applies a supply-chain cooldown by default,
+self-updates only by fast-forwarding to a release tag (signature-checked
+against keys pinned in your installed copy, once releases are signed) or via
+Homebrew, and makes no network calls of its own. The full threat model,
+including accepted residual risks, lives in [docs/security.md](docs/security.md).

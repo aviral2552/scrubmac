@@ -11,12 +11,12 @@ load helpers/setup
 setup() { setup_sandbox; }
 teardown() { teardown_sandbox; }
 
-@test "S2: a group-writable cleaner is refused and never executed" {
+@test "S2: a group-writable cleaner is refused, never executed, and fails the run" {
   make_cleaner 10-evil.sh 'echo EVIL-RAN'
   chmod 775 "$FIXTURES/10-evil.sh"
   make_cleaner 20-good.sh 'echo GOOD-RAN'
   run "$CMM"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" == *"group/world-writable"* ]]
   [[ "$output" != *EVIL-RAN* ]]
   [[ "$output" == *GOOD-RAN* ]]
@@ -27,7 +27,7 @@ teardown() { teardown_sandbox; }
   mv "$FIXTURES/10-target.sh" "$SANDBOX/elsewhere.sh"
   ln -s "$SANDBOX/elsewhere.sh" "$FIXTURES/10-evil.sh"
   run "$CMM"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" == *"symlinked cleaners are not run"* ]]
   [[ "$output" != *TARGET-RAN* ]]
 }
@@ -36,7 +36,7 @@ teardown() { teardown_sandbox; }
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   chmod 777 "$FIXTURES"
   run "$CMM"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" == *"directory must be owned by you"* ]]
   [[ "$output" != *ALPHA-RAN* ]]
   chmod 755 "$FIXTURES"
@@ -123,21 +123,36 @@ EOF
   grep -q 'must not run as root' "$REPO_ROOT/uninstall.sh"
 }
 
+@test "S1: the run lock never lives in a shared world-writable directory" {
+  make_cleaner 10-peek.sh 'echo "LOCK=$(readlink "$HOME/.local/state/scrubmac/run.lock")"'
+  run "$CMM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"LOCK="[0-9]* ]]
+  [ ! -e "/tmp/scrubmac.$(id -u).lock" ] || ! [ -O "/tmp/scrubmac.$(id -u).lock" ]
+}
+
+@test "S5: a cleaner's stdin is /dev/null — it can never read or answer prompts" {
+  make_cleaner 10-stdin.sh 'if [ -t 0 ]; then echo STDIN-TTY; elif read -r x; then echo "STDIN-DATA[$x]"; else echo STDIN-EMPTY; fi'
+  run "$CMM" <<<"secret-typed-input"
+  [[ "$output" == *STDIN-EMPTY* ]]
+  [[ "$output" != *secret-typed-input* ]]
+}
+
 # Tripwires: eval/sudo in command position (start of a command, after ;|&,
 # inside $( ), or as a run/try argument). Mentions in comments and messages
 # are fine; invocations are not.
 @test "no eval invoked anywhere in product code" {
-  ! grep -rnE '(^|[;|&]|\$\()[[:space:]]*eval[[:space:]]' \
+  refute grep -rnE '(^|[;|&]|\$\()[[:space:]]*eval[[:space:]]' \
     "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/cleaners" \
     "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh"
-  ! grep -rnE '(run|try)[[:space:]]+eval[[:space:]]' \
+  refute grep -rnE '(run|try)[[:space:]]+eval[[:space:]]' \
     "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/cleaners"
 }
 
 @test "no sudo invoked anywhere in product code (S1)" {
-  ! grep -rnE '(^|[;|&]|\$\()[[:space:]]*sudo[[:space:]]' \
+  refute grep -rnE '(^|[;|&]|\$\()[[:space:]]*sudo[[:space:]]' \
     "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/cleaners" \
     "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh"
-  ! grep -rnE '(run|try)[[:space:]]+sudo[[:space:]]' \
+  refute grep -rnE '(run|try)[[:space:]]+sudo[[:space:]]' \
     "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/cleaners"
 }

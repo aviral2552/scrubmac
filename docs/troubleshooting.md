@@ -1,62 +1,130 @@
 # Troubleshooting & FAQ
 
-## (historical) the cleanmymac name conflict — resolved by the rename
+Start with `scrubmac doctor` — it reports the install, settings that differ
+from their defaults, every tool and how it was installed, the schedule and
+crontab, the last run, and PATH problems. `scrubmac last` shows the newest
+run's log.
 
-Until 3.0.0 this project was named `cleanmymac` and its binary collided with
-MacPaw's official `cleanmymac-cli` cask, which symlinks
-`$(brew --prefix)/bin/cleanmymac` **and** `bin/cmm` — the two could not be
-brew-linked side by side. The 2026 rename to `scrubmac` ended that conflict.
-One echo remains during the transition: git installs ship a `cleanmymac`
-compat shim (never PATH-linked; removed in v4), and once your old PATH links
-are retired, a `cleanmymac` command on your machine is MacPaw's tool, not
-this one. Full history: [renaming.md](renaming.md).
+## "Every cleaner skipped" (cron)
+
+cron runs jobs with `PATH=/usr/bin:/bin`, so Homebrew, npm, uv and friends
+are "not found" and every cleaner skips — the run looks successful and does
+nothing. scrubmac warns when this happens, and `scrubmac doctor` flags a
+crontab without a `PATH=` line. Either add one:
+
+```
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+0 9 * * 1  $HOME/.scrubmac/bin/scrubmac --scheduled --quiet
+```
+
+or replace the crontab line with `scrubmac schedule weekly`, which carries
+your PATH into a launchd agent (and runs missed schedules after sleep).
+
+## "TIMEOUT" in the summary
+
+A cleaner ran longer than `TIMEOUT` (default 3600 seconds) and was stopped —
+together with every process it started. The rest of the run continued. If a
+tool legitimately needs longer (a huge cask download, a from-source build),
+raise it: `scrubmac config set TIMEOUT 7200`, or `CMM_TIMEOUT=0 scrubmac`
+for one unbounded run.
+
+## "REFUSED" in the summary / "a cleaner was refused"
+
+The execution-safety guard (S2). Cleaner files must be owned by you and not
+writable by group/others, their directory likewise; symlinked cleaners are
+never run. A refusal fails the run on purpose. Fix: `chmod 755 file` /
+`chown` it, or delete it if you don't recognize it — that's the guard doing
+its job.
 
 ## "brew doctor said something scary but the run shows ok"
 
 `brew doctor` and `brew missing` are *advisory* — brew exits non-zero
 whenever it has opinions, which is most machines. scrubmac reports what
 they said and moves on; only failures of mutating commands (`brew upgrade`,
-`brew cleanup`) fail the homebrew cleaner.
+`brew cleanup`) fail the homebrew cleaner. `HOMEBREW_DOCTOR=0` skips them.
 
-## "why did my cleaner say 'skipped self-update'?"
+## "casks not upgraded (unattended run)"
 
-The tool is managed by a package manager. Self-updating a brew- or
-npm-managed binary writes into the manager's territory and gets clobbered on
-its next upgrade, so scrubmac defers: the note names the cleaner that owns
-the update (homebrew or npm). This is by design (D4).
+Upgrading a GUI app can quit it (Homebrew 6 quits and reopens apps whose
+cask asks for it) or stop for your password (pkg installers), so casks are
+only upgraded when you run scrubmac in a terminal yourself. Run `scrubmac
+homebrew` interactively, or `scrubmac config set APP_UPDATES always` if you
+accept that in scheduled runs. See
+[configuration.md](configuration.md#app-updates).
 
-## "npm updates are 'held' — why?"
+## "App Store updates pending — run 'mas update' yourself"
 
-You enabled the supply-chain cooldown. npm has no safe way to say "latest
-version at least N days old" — its `--before` flag would *downgrade* globals
-installed more recently than the cutoff — so scrubmac holds automatic npm
-updates while a cooldown is set and shows you `npm outdated -g` instead.
-Details: [security.md](security.md#s4--supply-chain-cooldown).
+mas installs App Store updates as root (it re-runs itself through `sudo`),
+and scrubmac never escalates, so it only reports them.
+
+## "why did my cleaner say 'X is Homebrew-managed / npm-managed'?"
+
+The tool is managed by a package manager. Self-updating a brew-, npm-,
+pipx- or uv-managed binary writes into the manager's territory and gets
+clobbered on its next upgrade, so scrubmac defers: the note names the
+cleaner that owns the update. This is by design (D4). CLIs installed as
+binary-only Homebrew casks (Claude Code, Codex, Copilot, Cursor) are
+upgraded by name instead.
+
+## "updates are held" / "N global update(s) held by the cooldown"
+
+The supply-chain cooldown (`COOLDOWN_DAYS`, default 7) only installs
+releases at least that old. A package whose newer releases are all younger
+is held until one matures — nothing is downgraded. Yarn classic and old
+pipx/Bun cannot filter by age at all, so their global upgrades are held
+while the cooldown is on. To opt out: `scrubmac config set COOLDOWN_DAYS 0`;
+for one run: `CMM_COOLDOWN_DAYS=0 scrubmac`. Details:
+[security.md](security.md#s4--supply-chain-cooldown).
+
+## "uv tool(s) are pinned to a past --exclude-newer date"
+
+uv stores `--exclude-newer` in each tool's receipt. Releases of scrubmac
+before 3.1 passed an absolute date, which keeps plain upgrades of those
+tools frozen at that date. With uv ≥ 0.11.24,
+`uv tool upgrade --all --exclude-newer false` releases them; or reinstall
+the tools (`uv tool install --force <tool>`).
+
+## "offline — updates skipped"
+
+There was no default network route when the run started, so updates were
+skipped and cleanup ran anyway. A captive-portal Wi-Fi still has a route;
+those updates fail instead, which the summary shows.
 
 ## "another scrubmac run is already in progress"
 
 Two runs at once would fight over package-manager locks, so a lock excludes
-them. If the pid in the message is dead, the next run recovers the stale lock
-automatically. Exit code 2 identifies this case for scripts.
+them — manual, cron and launchd runs alike. If the pid in the message is
+not a running scrubmac, the next run recovers the lock automatically. Exit
+code 2 identifies this case for scripts.
+
+## "uv cache in use — prune skipped"
+
+Long-running `uvx`/`uv run` processes (MCP servers, for example) hold uv's
+cache lock for as long as they live, and pruning would delete environments
+they run from. scrubmac waits briefly, then skips the prune and says so;
+upgrades are unaffected.
 
 ## "scrubmac: command not found" after install
 
 The installer links into the first user-writable of brew's bin,
 `/usr/local/bin`, `~/.local/bin` — and tells you if that directory is not on
 your PATH. Run `~/.scrubmac/bin/scrubmac doctor` directly; it reports the
-link and PATH state.
+link and PATH state. If a `scrubmac` that is not ours (e.g. Homebrew's)
+already sits there, the installer leaves it alone and says so.
 
-## "a cleaner was refused: group/world-writable"
+## "docker/xcode/go/rubygems never run"
 
-The execution-safety guard (S2). Cleaner files must be owned by you and not
-writable by group/others; symlinked cleaners are never run. Fix:
-`chmod 755 file` / `chown` it, or delete it if you don't recognize it —
-that's the guard doing its job.
+They are opt-in. `scrubmac enable docker`, the wizard, or run one explicitly:
+`scrubmac docker`.
 
-## "docker/xcode never run"
+## The schedule did not run
 
-They're heavy pruners, disabled by default. `scrubmac enable docker`, the
-wizard's heavy-pruner screen, or run one explicitly: `scrubmac docker`.
+`scrubmac schedule status` (or `doctor`) says whether the agent is loaded and
+whether its launcher still exists. launchd runs a schedule missed during
+sleep at the next wake, but skips it while the Mac is off. `ON_BATTERY=skip`
+and `MIN_HOURS_BETWEEN_RUNS` make scheduled runs skip on purpose — the log
+(`scrubmac last`) says why. After moving the install or changing your PATH,
+re-run `scrubmac schedule weekly` (or `daily`).
 
 ## Why no sudo? Why no "deep clean"? Why is my Trash still full?
 
@@ -68,9 +136,9 @@ reasoning down: [security.md](security.md#what-scrubmac-will-never-do).
 
 ## The wizard won't start over SSH/cron
 
-It requires an interactive TTY. Either run it from a terminal, or write
-`~/.config/scrubmac/config` directly — the whole format is four keys
-([configuration.md](configuration.md#config-keys)).
+It requires an interactive TTY. Either run it from a terminal, or use
+`scrubmac config set KEY VALUE` — see
+[configuration.md](configuration.md#settings).
 
 ## Yarn berry does nothing
 
@@ -78,10 +146,27 @@ Correct: Yarn 2+ keeps caches per-project and removed `yarn global`. The
 cleaner explains and moves on; classic Yarn 1 still gets a global upgrade +
 cache clean.
 
-## Update says my history has diverged
+## Update says my copy has diverged
 
-`scrubmac update` refuses non-fast-forward pulls (S3) — you edited the
-installed copy, or the remote was force-pushed. Inspect with
-`git -C ~/.scrubmac status`, stash/reset your changes deliberately, and run
-update again. Local edits belong in `~/.config/scrubmac/cleaners.d/`
-instead — they survive updates.
+`scrubmac update` only fast-forwards (S3) — you edited the installed copy,
+or the remote was force-pushed. Inspect with `git -C ~/.scrubmac status`,
+stash/reset your changes deliberately, and run update again. Local edits
+belong in `~/.config/scrubmac/cleaners.d/` instead — they survive updates.
+
+## "release signatures are not checked"
+
+Your install pins no signing keys yet (`share/allowed_signers`), so the
+update trusts the GitHub repository. Once releases are signed and the file
+ships, updates verify every release tag against the keys in your installed
+copy.
+
+## (historical) the cleanmymac name conflict — resolved by the rename
+
+Until 3.0.0 this project was named `cleanmymac` and its binary collided with
+MacPaw's official `cleanmymac-cli` cask, which symlinks
+`$(brew --prefix)/bin/cleanmymac` **and** `bin/cmm` — the two could not be
+brew-linked side by side. The 2026 rename to `scrubmac` ended that conflict.
+One echo remains during the transition: git installs ship a `cleanmymac`
+compat shim (never PATH-linked; removed in v4), and once your old PATH links
+are retired, a `cleanmymac` command on your machine is MacPaw's tool, not
+this one. Full history: [renaming.md](renaming.md).

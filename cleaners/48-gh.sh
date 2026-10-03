@@ -3,12 +3,18 @@
 # Licensed GPL-3.0-only with an additional attribution term under
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # gate: gh
-# GitHub CLI: upgrade every installed extension (including Copilot). gh
-# itself is usually brew-managed and updated by the homebrew cleaner.
+# group: AI tools
+# default: on
+# summary: upgrade GitHub CLI extensions (gh itself is updated by its manager)
+# GitHub CLI: upgrade every installed extension. gh itself is usually
+# brew-managed and updated by the homebrew cleaner.
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 . "${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
 
 skip_unless gh
 
-try gh extension upgrade --all # advisory: exits non-zero when none installed
+report gh extension list
+skip_unless_updating
+
+step gh extension upgrade --all # exits 0 when there is nothing to upgrade

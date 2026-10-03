@@ -1,3 +1,6 @@
+> Historical record: this plan was executed in 3.0.0 (2026-08) and moved to
+> `docs/history/` afterwards; paths below are as they were at the time.
+
 # Rename execution plan: cleanmymac → scrubmac (v3.0.0) — rev 2
 
 **Status: EXECUTING — P1 landed 2026-08-09; P2–P5 same day (see git history
