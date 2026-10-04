@@ -1,6 +1,6 @@
 # Architecture
 
-About 7,800 lines of bash 3.2-compatible shell (and one node script, the registry resolver), structured as a thin
+About 7,900 lines of bash 3.2-compatible shell (and one node script, the registry resolver), structured as a thin
 dispatcher, a small set of libraries, and independent cleaner processes.
 
 ```
@@ -51,9 +51,11 @@ bin/scrubmac ──sources──▶ lib/common.sh     helpers shared with every 
    Breakers take turns under a mutex (`run.lock.breaking`, a symlink naming
    its holder the same way): under it the lock is re-read and removed only
    while it still names the stale holder, so a lock that a racing run just
-   created is never removed (a mutex whose holder died mid-break is broken
-   the same way a stale lock is). Then every contender races to create the
-   lock again — exactly one wins. A holder whose start time
+   created is never removed. A mutex whose holder died mid-break (killed:
+   an interrupt releases it) is broken the same way a stale lock is — the
+   one residual race: when that coincides with three or more runs starting
+   in the same instant, two breakers can overlap. Then every contender races
+   to create the lock again — exactly one wins. A holder whose start time
    cannot be read is assumed alive. A state dir that cannot be written is
    reported as such (exit 2), not as "already in progress". The lock never lives in `$TMPDIR`, which
    differs between cron, launchd and terminal sessions. (A transitional

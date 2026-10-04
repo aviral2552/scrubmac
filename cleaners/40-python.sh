@@ -180,29 +180,46 @@ uv_user_exclude_newer() {
 }
 
 # uv_age_seconds VALUE — how far back an exclude-newer VALUE reaches, in
-# seconds: an RFC 3339 timestamp (its offset honored), a date — which uv
-# reads as the END of that day in local time, i.e. the next local midnight
-# (2026-09-27 in UTC+5:30 is 2026-09-27T18:30:00Z) —, a "friendly" duration
-# (24 hours, 1 week, 30 days) or an ISO 8601 one (P7D, PT24H). 0 for false;
-# nothing when it cannot be read.
+# seconds, read as uv reads it: a timestamp with an offset (Z, +hh:mm,
+# +hhmm or +hh — and, as uv takes them, a space for the T, a lowercase t or
+# z, no seconds), honored; a date, or a date and time WITHOUT an offset —
+# both of which uv reads as the END of that date in local time, i.e. the
+# next local midnight (2026-09-27 in UTC+5:30 is 2026-09-27T18:30:00Z); a
+# "friendly" duration (24 hours, 1 week, 30 days, 3 days ago) or an ISO 8601
+# one (P7D, PT24H). 0 for false; nothing when it cannot be read.
 uv_age_seconds() {
-  local v="$1" ep now
+  local v="$1" d t z ep now
   case "$v" in
     false) echo 0 ;;
-    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] | [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*)
-      case "$v" in
-        *T*) ep="$(cmm_iso_to_epoch "$v")" || return 0 ;;
-        *)
-          ep="$(date -j -v+1d -f '%Y-%m-%d %H:%M:%S' "$v 00:00:00" '+%s' 2>/dev/null ||
-            date -d "$v 1 day" '+%s' 2>/dev/null)" || return 0
-          ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] | [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][Tt' ']*)
+      d="${v:0:10}" t="${v:11}" z=''
+      t="${t%%\[*}" # a [time zone] annotation: the offset decides
+      case "$t" in
+        *[Zz]) z=Z t="${t%?}" ;;
+        *[+-][0-9][0-9]:[0-9][0-9]) z="${t#"${t%??????}"}" t="${t%??????}" ;;
+        *[+-][0-9][0-9][0-9][0-9]) z="${t#"${t%?????}"}" t="${t%?????}" ;;
+        *[+-][0-9][0-9]) z="${t#"${t%???}"}" t="${t%???}" ;;
       esac
+      t="${t%%.*}"
+      case "$t" in
+        '' | [0-9][0-9]:[0-9][0-9]:[0-9][0-9]) ;;
+        [0-9][0-9]:[0-9][0-9]) t="$t:00" ;;
+        [0-9][0-9]) t="$t:00:00" ;;
+        *) return 0 ;;
+      esac
+      if [ -n "$z" ]; then
+        ep="$(cmm_iso_to_epoch "${d}T$t$z")" || return 0
+      else
+        ep="$(date -j -v+1d -f '%Y-%m-%d %H:%M:%S' "$d 00:00:00" '+%s' 2>/dev/null ||
+          date -d "$d 1 day" '+%s' 2>/dev/null)" || return 0
+      fi
       now="$(date -u '+%s')"
       echo $((now > ep ? now - ep : 0))
       ;;
     *)
       awk -v v="$v" 'BEGIN {
         s = tolower(v); gsub(/,/, " ", s); gsub(/^ +| +$/, "", s); total = 0; ok = 0
+        sub(/^[+-] */, "", s); sub(/ *ago$/, "", s) # uv counts back either way
         if (s ~ /^p/) {
           t = 0; rest = substr(s, 2)
           while (rest != "") {
@@ -244,13 +261,15 @@ uv_age_seconds() {
 # DAYS as a relative span (uv >= 0.11.4; older uv an absolute date) — or
 # your own exclude-newer, verbatim, when it reaches further back (the flag
 # beats both your settings and the tool receipts, so it must not relax
-# them), or when it cannot be read.
+# them). Fails when yours cannot be read: then neither can be passed
+# without perhaps relaxing the other.
 uv_cooldown_value() {
   local user age
   user="$(uv_user_exclude_newer)"
   if [ -n "$user" ] && [ "$user" != false ]; then
     age="$(uv_age_seconds "$user")"
-    if [ -z "$age" ] || [ "$age" -gt $(($1 * 86400)) ]; then
+    [ -n "$age" ] || return 1
+    if [ "$age" -gt $(($1 * 86400)) ]; then
       printf '%s\n' "$user"
       return 0
     fi
@@ -312,7 +331,12 @@ if updating; then
   if have uv; then
     uv_self_update
     if [ "$days" -gt 0 ]; then
-      step uv tool upgrade --all --exclude-newer "$(uv_cooldown_value "$days")"
+      if en="$(uv_cooldown_value "$days")"; then
+        step uv tool upgrade --all --exclude-newer "$en"
+      else
+        note "- uv tool upgrades held: your exclude-newer ('$(uv_user_exclude_newer)') cannot be read here, so neither it nor the ${days}-day cooldown can be passed without perhaps relaxing the other — write it as a date (2026-09-01), a timestamp (2026-09-01T00:00:00Z) or a span (14 days, P14D)"
+        summary_note "uv tool upgrades held: your exclude-newer could not be read"
+      fi
     else
       uv_upgrade_uncooled
     fi

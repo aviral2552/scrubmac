@@ -72,18 +72,18 @@ EOF
 # can_resolve — node, npm and lib/registry.cjs are there for registry lookups.
 can_resolve() { have node && have npm && [ -f "$REGISTRY_CJS" ]; }
 
-# bun_policy DAYS — BUN_VER; BUN_POLICY: the minimum release age (seconds)
-# asked for — the cooldown, or install.minimumReleaseAge from your global
-# bunfig when stricter (passing a smaller value on the command line would
-# relax it); BUN_WHY: where it comes from. The global bunfig is the one Bun
-# reads for `bun add/update -g`: $XDG_CONFIG_HOME/.bunfig.toml when
-# XDG_CONFIG_HOME is set (then ~/.bunfig.toml is ignored), ~/.bunfig.toml
-# otherwise.
+# bun_policy DAYS GLOBAL_DIR — BUN_VER; BUN_POLICY: the minimum release age
+# (seconds) asked for — the cooldown, or install.minimumReleaseAge from the
+# bunfig files Bun reads for `bun add/update -g` when stricter (passing a
+# smaller value on the command line would relax it); BUN_WHY: where it
+# comes from. Those files: your global bunfig — $XDG_CONFIG_HOME/.bunfig.toml
+# when XDG_CONFIG_HOME is set (then ~/.bunfig.toml is ignored),
+# ~/.bunfig.toml otherwise — and GLOBAL_DIR/bunfig.toml.
 bun_policy() {
   local cfg=0
   BUN_VER="$(bun --version 2>/dev/null)" || BUN_VER=0
   if have node && [ -f "$REGISTRY_CJS" ]; then
-    cfg="$(node "$REGISTRY_CJS" bunfig-age "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml")" || cfg=0
+    cfg="$(node "$REGISTRY_CJS" bunfig-age "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml" "$2/bunfig.toml")" || cfg=0
   fi
   case "$cfg" in '' | *[!0-9]*) cfg=0 ;; esac
   BUN_POLICY=$(($1 * 86400))
@@ -294,7 +294,7 @@ fi
 gdir="$(bun_global_dir)"
 if updating; then
   days="$(cooldown_days)"
-  bun_policy "$days"
+  bun_policy "$days" "$gdir"
   if [ "$BUN_POLICY" -gt 0 ] && can_resolve; then
     BUN_CUTOFF="$(node "$REGISTRY_CJS" cutoff --seconds "$BUN_POLICY")"
   fi

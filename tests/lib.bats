@@ -516,6 +516,13 @@ EOF
   refute lib 'cmm_iso_to_epoch not-a-date'
 }
 
+@test "cmm_iso_to_epoch honors offsets (+hh:mm, -hhmm, +hh) and rejects trailing junk" {
+  [ "$(lib 'cmm_iso_to_epoch 2026-01-02T08:04:05+05:00')" = 1767323045 ]
+  [ "$(lib 'cmm_iso_to_epoch 2026-01-01T22:04:05-0500')" = 1767323045 ]
+  [ "$(lib 'cmm_iso_to_epoch 2026-01-02T08:04:05+05')" = 1767323045 ]
+  refute lib 'cmm_iso_to_epoch 2026-01-02T03:04:05junk'
+}
+
 @test "cmm_mtime and cmm_du_kb work on GNU and BSD userlands" {
   touch -t 202001020304 "$SANDBOX/old"
   local m

@@ -75,7 +75,8 @@ that pass extra flags.
 - `install.sh` moved whatever directory sat at `~/.cleanmymac` (or
   `CMM_OLD_PREFIX`) to `~/.scrubmac` during the rename migration, then
   mirrored over it with `rsync --delete` — erasing it if it was not a
-  cleanmymac install. Only a real install is migrated now.
+  cleanmymac install. Only a real install is migrated now, and never a git
+  checkout holding local work.
 - `install.sh` could overwrite a Homebrew-installed `scrubmac` link, and its
   `rsync --delete` would mirror into any `CMM_PREFIX` (even `$HOME`). It now
   mirrors only into an empty directory or an existing scrubmac install (real
@@ -104,6 +105,10 @@ that pass extra flags.
 - `conda update --all -y` churned every package in the base environment; the
   conda cleaner now updates conda itself (`conda update -n base conda`), the
   documented way, and leaves a frozen base alone.
+- The pnpm cleaner failed every run while pnpm refused global commands
+  because its global bin directory was not on `PATH` (pnpm 11 without
+  `pnpm setup`, or a scheduled run made before it): global packages are
+  now skipped with a note on the cure.
 - The bun cleaner failed every run on a machine with no global Bun packages
   (`bun update -g` and `bun pm cache rm -g` need the global `package.json`);
   it now works from a scratch directory and says there is nothing to update.
@@ -130,7 +135,9 @@ that pass extra flags.
   detaches with `setsid` — and stops what a cleaner leaves running, as
   launchd would); the summary says `TIMEOUT`.
 - **`scrubmac schedule daily [HH:MM] | weekly [DAY] [HH:MM] | status | off`**
-  — a per-user launchd agent (runs missed schedules after sleep), with
+  — a per-user launchd agent (runs missed schedules after sleep; it carries
+  your `PATH`, XDG directories and tool homes such as `PNPM_HOME` or
+  `CARGO_HOME`), with
   `--scheduled` guards: `ON_BATTERY`, `MIN_HOURS_BETWEEN_RUNS`. Status and
   `doctor` print the exact command that recreates a broken schedule.
 - **Run logs** (`~/.local/state/scrubmac/logs`, rotated to `LOG_KEEP`),

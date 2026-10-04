@@ -13,7 +13,9 @@
 # range operator and pnpm's own minimumReleaseAge, which holds every
 # dependency to the cutoff too; pnpm itself self-updates to the newest
 # release old enough. Without either, plain `pnpm update -g` and
-# `pnpm self-update`. Then drop unreferenced packages from the store.
+# `pnpm self-update`. Global packages are skipped, with a note on the cure,
+# while pnpm refuses global commands (its global bin directory is not on
+# PATH). Then drop unreferenced packages from the store.
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 . "${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
@@ -252,6 +254,11 @@ pnpm_flush_group() {
     PNPM_GROUPHELD=$((PNPM_GROUPHELD + ${#movers[@]}))
     return 0
   fi
+  if [ "$PNPM_GLOBAL_BIN" = none ]; then
+    note "- not re-adding ${movers[*]}: pnpm has no global bin directory here (PNPM_HOME is not set — a scheduled run gets your PATH, not PNPM_HOME), and 'pnpm add -g' needs one — run 'pnpm config set global-bin-dir \"\$PNPM_HOME\"' once in your shell"
+    PNPM_NOBIN=$((PNPM_NOBIN + ${#movers[@]}))
+    return 0
+  fi
   if [ "$PNPM_MAJOR" -ge 11 ]; then
     joined="$(
       IFS=,
@@ -290,6 +297,7 @@ pnpm_update_globals() {
   PNPM_HELD=0
   PNPM_UNSUITABLE=0
   PNPM_GROUPHELD=0
+  PNPM_NOBIN=0
   G_NAMES=() G_VERS=() G_MODES=() G_SPECS=()
   while IFS= read -r line <&3; do
     kind="${line%%"$TAB"*}"
@@ -317,6 +325,7 @@ EOF
   [ "$PNPM_HELD" -gt 0 ] && summary_note "$PNPM_HELD global update(s) held by the cooldown ($PNPM_WHY)"
   [ "$PNPM_UNSUITABLE" -gt 0 ] && summary_note "$PNPM_UNSUITABLE global update(s) not suitable (deprecated, or need a newer Node.js)"
   [ "$PNPM_GROUPHELD" -gt 0 ] && summary_note "$PNPM_GROUPHELD global update(s) held: their install group (pnpm add -g a,b) cannot be re-added this run"
+  [ "$PNPM_NOBIN" -gt 0 ] && summary_note "$PNPM_NOBIN global update(s) held: pnpm has no global bin directory here — run 'pnpm config set global-bin-dir \"\$PNPM_HOME\"' once"
   return 0
 }
 
@@ -330,6 +339,55 @@ pnpm_legacy_globals() {
   root="$(pnpm root -g 2>/dev/null)" || return 0
   [ -n "$root" ] || return 0
   node "$REGISTRY_CJS" pnpm-legacy "$root" 2>/dev/null || true
+}
+
+# pnpm_global_bin — can pnpm do global work here? PNPM_GLOBAL_BIN: "off"
+# when pnpm refuses global commands because its global bin directory is not
+# on PATH (pnpm 11 refuses all of them, even `ls -g`; pnpm 12 all but ls and
+# outdated; pnpm 9/10 all, when PNPM_HOME names that directory) — pnpm from
+# Homebrew or Corepack with no `pnpm setup`, or a scheduled run whose PATH
+# was captured before it; "none" when pnpm has no global bin directory at
+# all (pnpm <= 10 with neither PNPM_HOME nor global-bin-dir — a scheduled run
+# never sees your shell's PNPM_HOME), so `pnpm add -g` fails (`pnpm update
+# -g` does not); else "ok". `pnpm bin -g` tells: its message is on stdout
+# for pnpm 9/10, on stderr (wrapped, with a code) for pnpm 11 and 12.
+pnpm_global_bin() {
+  local out
+  PNPM_GLOBAL_BIN=ok
+  if out="$(pnpm bin -g 2>/dev/null)"; then
+    [ -n "$out" ] || PNPM_GLOBAL_BIN=none
+    return 0
+  fi
+  out="$(pnpm bin -g 2>&1)" || true
+  case "$out" in
+    *GLOBAL_BIN_DIR_NOT_IN_PATH* | *"not in"*PATH*) PNPM_GLOBAL_BIN=off ;;
+  esac
+  return 0
+}
+
+# pnpm_globals_on_disk — global packages evidently exist where pnpm keeps
+# them: <data dir>/global, the data dir being $PNPM_HOME, else
+# $XDG_DATA_HOME/pnpm, else ~/Library/pnpm (~/.local/share/pnpm off macOS) —
+# pnpm 10's global/5/node_modules/NAME, pnpm 11's global/v11/GROUP/….
+pnpm_globals_on_disk() {
+  local g p
+  for g in ${PNPM_HOME:+"$PNPM_HOME/global"} "${XDG_DATA_HOME:-$HOME/.local/share}/pnpm/global" "$HOME/Library/pnpm/global"; do
+    for p in "$g"/*/node_modules/* "$g"/*/*/node_modules/*; do
+      [ -e "$p" ] && return 0
+    done
+  done
+  return 1
+}
+
+# pnpm_globals_off — PNPM_GLOBAL_BIN is "off": say so and what cures it (a
+# summary note too when there evidently are global packages to update).
+pnpm_globals_off() {
+  [ "$PNPM_GLOBAL_BIN" = off ] || return 1
+  note "- global packages skipped: pnpm's global bin directory is not on PATH, and pnpm $PNPM_VER refuses global commands without it — run 'pnpm setup', then, from a new shell, 'scrubmac schedule' again so scheduled runs get the new PATH"
+  if pnpm_globals_on_disk; then
+    summary_note "global packages skipped: pnpm's global bin directory is not on PATH — run 'pnpm setup', then 'scrubmac schedule' again"
+  fi
+  return 0
 }
 
 # pnpm_has_globals — pnpm has global packages, so `pnpm update -g` has work:
@@ -360,9 +418,12 @@ if updating; then
   scratch="$(cmm_scratch_dir)" || scratch=''
   [ -n "$scratch" ] && cd "$scratch"
   pnpm_policy "$days"
+  pnpm_global_bin
   if [ "$PNPM_POLICY" -eq 0 ]; then
-    ai_self_update pnpm pnpm self-update
-    if pnpm_has_globals; then
+    ai_self_update pnpm pnpm self-update # (needs no global bin directory)
+    if pnpm_globals_off; then
+      :
+    elif pnpm_has_globals; then
       step pnpm update -g
     else
       note "- no global packages"
@@ -373,7 +434,9 @@ if updating; then
   else
     PNPM_CUTOFF="$(node "$REGISTRY_CJS" cutoff --minutes "$PNPM_GATE")"
     pnpm_self_update
-    if cmm_version_ge "$PNPM_VER" 10.16; then
+    if pnpm_globals_off; then
+      :
+    elif cmm_version_ge "$PNPM_VER" 10.16; then
       pnpm_update_globals
     else
       note "- this pnpm ($PNPM_VER) predates minimumReleaseAge (10.16), so the cooldown cannot hold dependencies back: global updates are held"

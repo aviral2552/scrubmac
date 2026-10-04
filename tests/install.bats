@@ -286,7 +286,7 @@ EOF
 
 @test "never mirrors over a git checkout at the install path that holds local work" {
   local why
-  for why in untracked dirty stash unpushed; do
+  for why in untracked dirty stash unpushed tagged; do
     rm -rf "$CMM_PREFIX"
     git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$CMM_PREFIX"
     case "$why" in
@@ -297,6 +297,10 @@ EOF
         git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t stash -q
         ;;
       unpushed) git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m WIP ;;
+      tagged) # a tag of your own does not make a commit published
+        git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m WIP
+        git -C "$CMM_PREFIX" tag before-refactor
+        ;;
     esac
     run "$INSTALL"
     [ "$status" -eq 2 ]

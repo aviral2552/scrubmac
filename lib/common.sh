@@ -523,9 +523,10 @@ cmm_local_work() {
     printf 'untracked files that only your own git ignore rules hide'
   elif lw_git rev-parse -q --verify refs/stash >/dev/null 2>&1; then
     printf 'a stash'
-  elif [ -n "$(lw_git rev-list --max-count=1 HEAD --branches --not --remotes --tags \
+  elif [ -n "$(lw_git rev-list --max-count=1 HEAD --branches --not --remotes --glob='refs/tags/v[0-9]*' \
     --glob='refs/scrubmac/release-tags/*' --glob='refs/scrubmac/seen-tags/*' 2>/dev/null || echo unknown)" ]; then
-    # (a release update fetches tags only: origin/* may lag behind HEAD)
+    # (a release update fetches tags only, so origin/* may lag behind HEAD;
+    # release tags count as published — a tag of your own does not)
     printf 'commits that are on no remote'
   else
     return 1
@@ -645,16 +646,21 @@ date_days_ago() {
 cmm_now_iso() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
 # cmm_iso_to_epoch 2026-01-02T03:04:05Z — seconds since the epoch (BSD, then
-# GNU date); fractional seconds are ignored, and a +hh:mm / -hhmm offset is
-# honored (Z or none: UTC). Fails on unparseable input.
+# GNU date); fractional seconds are ignored, and a +hh:mm / -hhmm / +hh
+# offset is honored (Z or none: UTC). Fails on unparseable input.
 cmm_iso_to_epoch() {
   local s="$1" tz='' off=0 e
   case "$s" in
     *T*[+-][0-9][0-9]:[0-9][0-9]) tz="${s#"${s%??????}"}" s="${s%??????}" ;;
     *T*[+-][0-9][0-9][0-9][0-9]) tz="${s#"${s%?????}"}" s="${s%?????}" ;;
+    *T*[+-][0-9][0-9]) tz="${s#"${s%???}"}00" s="${s%???}" ;;
   esac
   s="${s%%.*}"
   s="${s%Z}"
+  case "$s" in # (BSD date ignores whatever follows: an offset it was not given)
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
   if [ -n "$tz" ]; then
     tz="${tz/:/}"
     off=$(((10#${tz:1:2} * 60 + 10#${tz:3:2}) * 60))

@@ -42,7 +42,7 @@ self-updates only by fast-forwarding — to a release tag by default
 are signed), to the tracked branch with `UPDATE_CHANNEL=branch` or when a
 copy that pins no keys finds no release tags — or via Homebrew, installs and
 uninstalls only into directories that hold a scrubmac install (never over a
-git checkout holding local work), and makes no network calls of its own
+git checkout it did not make while that holds local work), and makes no network calls of its own
 except one: under the cooldown, the bun cleaner reads Bun's release feed to
 learn a release's age. The full threat model,
 including accepted residual risks, lives in [docs/security.md](docs/security.md).

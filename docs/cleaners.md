@@ -129,7 +129,10 @@ not fail the run.
   `--before=<cutoff>`, or, when your npm config sets `min-release-age`
   (npm ≥ 11.10), as `--min-release-age=<days, rounded up>` — npm
   11.10–11.14 refuse a `--before` next to it ("--min-release-age cannot be
-  provided when using --before"; fixed in 11.15.0).
+  provided when using --before"; fixed in 11.15.0). Those npms also report
+  a `before` of their own making while `min-release-age` is set (now minus
+  those days, cut to the second): it is not counted as yours — rounded up,
+  it would make the gate a day stricter than asked for.
 - `npm update -g <pkg>…` — when there is no cutoff (cooldown off, no npm
   setting of your own), for exactly those globals after a
   `npm view <pkg> versions dist-tags --json` registry check (not run when
@@ -227,6 +230,21 @@ not fail the run.
 - Updates run from an empty scratch directory: inside a project that pins
   pnpm (`packageManager`), `pnpm self-update` would rewrite that pin
   instead, and pnpm reads project settings from the working directory.
+- **No global bin directory on `PATH`**: pnpm then refuses global commands
+  — pnpm 11 every one (even `pnpm ls -g`), pnpm 12 all but `ls`/`outdated`,
+  pnpm 9/10 all when `PNPM_HOME` names that directory. That is pnpm from
+  Homebrew or Corepack with no `pnpm setup`, or a scheduled run whose `PATH`
+  was captured before it. `pnpm bin -g` tells; global packages are then
+  skipped, not failed, with a note on the cure — `pnpm setup`, then
+  `scrubmac schedule` again from a new shell, so scheduled runs get the new
+  `PATH` — and a summary note when global packages evidently exist
+  (`<data dir>/global`, the data dir being `$PNPM_HOME`, else
+  `$XDG_DATA_HOME/pnpm`, else `~/Library/pnpm`; `~/.local/share/pnpm` is
+  checked too). pnpm ≤ 10 without `PNPM_HOME` (a scheduled run never sees
+  your shell's) has no global bin directory at all: `pnpm update -g` still
+  works, but `pnpm add -g` fails, so cooldown re-adds are held with a note —
+  `pnpm config set global-bin-dir "$PNPM_HOME"`, once, cures that. The
+  self-update needs no global bin directory.
 - `pnpm store prune` — drop unreferenced packages from the
   content-addressable store (`pnpm store path` locates it for its size in
   `scrubmac status`).
@@ -254,9 +272,12 @@ current directory, and their `-g` forms (like `bun update -g`) fail until a
 global package exists.
 
 - Without a cooldown or a bunfig `install.minimumReleaseAge` of your own
-  (in the global bunfig Bun reads: `$XDG_CONFIG_HOME/.bunfig.toml` when
-  `XDG_CONFIG_HOME` is set — `~/.bunfig.toml` is then ignored — else
-  `~/.bunfig.toml`; integers, floats and inline tables all count):
+  (in the bunfig files Bun reads for `-g` commands: the global one —
+  `$XDG_CONFIG_HOME/.bunfig.toml` when `XDG_CONFIG_HOME` is set,
+  `~/.bunfig.toml` then ignored, else `~/.bunfig.toml` — and `bunfig.toml`
+  in Bun's global directory; integers, floats and inline tables all count,
+  also inline tables spread over several lines, and a `#` inside a quoted
+  string starts no comment):
   `bun upgrade` —
   standalone installs only (it replaces the running binary in place, so
   Homebrew/npm/version-manager copies are left to their managers) — and
@@ -316,7 +337,7 @@ cache is left alone: `deno clean` would wipe all of it.
 |---|---|
 | `uv self update` | only the uv that uv's standalone installer manages: its install receipt must name this uv's directory — the first `uv-receipt.json` that exists decides, looked up the way uv does (`$AXOUPDATER_CONFIG_PATH`, else `$XDG_CONFIG_HOME/uv` then `~/.config/uv`). uv from pip, cargo, conda, Homebrew or a version manager refuses (exit 2) — those get a note instead |
 | `uv tool upgrade --all` | upgrade uv-managed tools |
-| `uv tool upgrade --all --exclude-newer "N days"` | under the cooldown (uv ≥ 0.11.4 keeps the span relative in tool receipts; older uv gets an absolute RFC 3339 date). Your own `exclude-newer` (`UV_EXCLUDE_NEWER`, or `uv.toml`: `UV_CONFIG_FILE`, `${XDG_CONFIG_HOME:-~/.config}/uv/uv.toml`, `/etc/uv/uv.toml`) is passed instead, as written, when it reaches further back — the flag overrides both your settings and the tool receipts — or when its value cannot be read. Read as uv reads it: a date is the *end* of that day in local time, and a timestamp's offset counts |
+| `uv tool upgrade --all --exclude-newer "N days"` | under the cooldown (uv ≥ 0.11.4 keeps the span relative in tool receipts; older uv gets an absolute RFC 3339 date). Your own `exclude-newer` (`UV_EXCLUDE_NEWER`, or `uv.toml`: `UV_CONFIG_FILE`, `${XDG_CONFIG_HOME:-~/.config}/uv/uv.toml`, `/etc/uv/uv.toml`) is passed instead, as written, when it reaches further back — the flag overrides both your settings and the tool receipts. Read as uv reads it: a date — and a date and time *without* an offset, which uv takes as that date — is the *end* of that day in local time; a timestamp's offset counts (`Z`, `±hh:mm`, `±hhmm`, `±hh`; a space for the `T`, lowercase `t`/`z` and missing seconds are fine); spans may say `ago`. When its value cannot be read (an ISO 8601 basic-format timestamp, say), tool upgrades are held, with a note and a summary note: passing either value could relax the other |
 | `uv tool upgrade <tool> --exclude-newer false` | cooldown off, uv ≥ 0.11.24, before the upgrade above: for each tool whose receipt still carries a cutoff from an earlier cooldown (uv remembers it, so plain upgrades keep honoring it) *and* that the cutoff is holding back — `uv tool list --outdated --exclude-newer false` names those; uv rewrites a receipt only when its tool upgrades. Not when your own uv settings set `exclude-newer`. Older uv: a summary note says how many tools stay held back |
 | `pipx upgrade-all` | upgrade pipx-managed packages |
 | `pipx upgrade-all --cooldown N` | under the cooldown (pipx ≥ 1.16; older pipx holds its upgrades) — or your `PIPX_COOLDOWN` when larger |

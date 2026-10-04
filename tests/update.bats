@@ -334,6 +334,25 @@ require_ssh_signing() {
   [ "$(cat "$INST/VERSION")" = 1.1.0 ]
 }
 
+@test "a release of this copy's own version that is a fast-forward is still taken (-dev, -rc, a copy taken before its tag)" {
+  local v
+  for v in 1.1.0 1.1.0-dev 1.1.0-rc.1; do
+    rm -rf "$ORIGIN" "$INST"
+    make_origin
+    tag v1.0.0
+    commit_version "$v"
+    git clone -q "$ORIGIN" "$INST"
+    echo fix >"$ORIGIN/FIX"
+    echo 1.1.0 >"$ORIGIN/VERSION"
+    git -C "$ORIGIN" add -A
+    git -C "$ORIGIN" commit -qm "1.1.0"
+    tag v1.1.0
+    run "$INST/bin/scrubmac" update --check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Update available: v$v -> v1.1.0"* ]] || false
+  done
+}
+
 @test "an older maintenance release on its own branch is not a failed update" {
   make_origin
   tag v1.0.0

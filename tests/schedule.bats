@@ -134,6 +134,16 @@ EOF
   refute grep -q 'a&b<c>' "$PLIST"
 }
 
+@test "tool homes set in this shell travel with the agent (absolute values only)" {
+  PNPM_HOME="$SANDBOX/pnpm home" CARGO_HOME=relative/cargo BUN_INSTALL='' run "$CMM" schedule weekly
+  [ "$status" -eq 0 ]
+  grep -q '<key>PNPM_HOME</key>' "$PLIST"
+  grep -Fq "<string>$SANDBOX/pnpm home</string>" "$PLIST"
+  refute grep -q '<key>CARGO_HOME</key>' "$PLIST"
+  refute grep -q '<key>BUN_INSTALL</key>' "$PLIST"
+  [[ "$output" == *"also:   "*PNPM_HOME* ]] || false
+}
+
 @test "the generated plist is valid (plutil -lint, macOS only)" {
   [ -x /usr/bin/plutil ] || skip "plutil is macOS-only"
   run "$CMM" schedule weekly

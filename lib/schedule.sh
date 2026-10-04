@@ -145,6 +145,26 @@ cmm_schedule_loaded() {
   launchctl print "$(cmm__launchd_domain)/$CMM_SCHEDULE_LABEL" >/dev/null 2>&1
 }
 
+# What a launchd job would not know that this shell does (launchd starts
+# jobs with a bare environment): where scrubmac keeps its config and state,
+# and where your tools were installed — carried when set here (absolute
+# values only), so a scheduled run finds the same tools in the same places.
+CMM__SCHEDULE_ENV='XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CACHE_HOME CMM_STATE_DIR
+  PNPM_HOME BUN_INSTALL DENO_INSTALL VOLTA_HOME NVM_DIR CARGO_HOME RUSTUP_HOME GOPATH
+  PIPX_HOME PIPX_BIN_DIR UV_TOOL_DIR UV_TOOL_BIN_DIR MISE_DATA_DIR ASDF_DATA_DIR
+  PYENV_ROOT RBENV_ROOT NODENV_ROOT GEM_HOME NPM_CONFIG_PREFIX npm_config_prefix'
+
+# cmm__schedule_env — the CMM__SCHEDULE_ENV variables set here, one KEY per
+# line.
+cmm__schedule_env() {
+  local key val
+  for key in $CMM__SCHEDULE_ENV; do
+    val="${!key:-}"
+    case "$val" in /*) printf '%s\n' "$key" ;; esac
+  done
+  return 0
+}
+
 cmm__write_plist() { # cmm__write_plist FILE WEEKDAY(''=daily) HOUR MINUTE
   local plist="$1" wd="$2" hour="$3" minute="$4" launcher path_env key val
   launcher="$(cmm_stable_launcher)"
@@ -174,10 +194,8 @@ EOF
     printf '    <key>Minute</key>\n    <integer>%s</integer>\n' "$minute"
     printf '  </dict>\n  <key>EnvironmentVariables</key>\n  <dict>\n'
     printf '    <key>PATH</key>\n    <string>%s</string>\n' "$(cmm__xml_escape "$path_env")"
-    # carry location overrides so the agent reads the same config and state
-    for key in XDG_CONFIG_HOME XDG_STATE_HOME CMM_STATE_DIR; do
-      val="${!key:-}"
-      [ -n "$val" ] || continue
+    for key in $(cmm__schedule_env); do
+      val="${!key}"
       printf '    <key>%s</key>\n    <string>%s</string>\n' "$key" "$(cmm__xml_escape "$val")"
     done
     cat <<EOF
@@ -256,6 +274,7 @@ cmm_schedule_set() {
   note "scheduled: $(cmm_schedule_describe) — runs '$(cmm_stable_launcher) --scheduled --quiet'"
   note "  agent:  $plist"
   note "  PATH:   captured from this shell (re-run this command after changing your PATH)"
+  [ -n "$(cmm__schedule_env)" ] && note "  also:   $(cmm__schedule_env | tr '\n' ' ')(from this shell, likewise)"
   note "  logs:   $CMM_LOG_DIR  (or 'scrubmac last')"
   note "launchd runs a schedule missed during sleep at the next wake; a Mac that is off skips it."
 }

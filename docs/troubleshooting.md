@@ -98,6 +98,31 @@ that date. With uv ≥ 0.11.24, `uv tool upgrade --all --exclude-newer false`
 releases them (scrubmac does this itself when the cooldown is off); or
 reinstall the tools (`uv tool install --force <tool>`).
 
+## "global packages skipped: pnpm's global bin directory is not on PATH"
+
+pnpm refuses global commands (pnpm 11 all of them, pnpm 12 every change)
+while the directory it links global binaries into is not on `PATH` —
+typically `pnpm setup` was never run (pnpm from Homebrew or Corepack), or a
+schedule was made before it was. scrubmac skips global packages instead of
+failing every run. Run `pnpm setup`, open a new shell, and run `scrubmac
+schedule …` again so scheduled runs get the new `PATH` (and `PNPM_HOME`).
+The summary mentions it only when you have global packages.
+
+## "global update(s) held: pnpm has no global bin directory here"
+
+pnpm ≤ 10 can update global packages without knowing its global bin
+directory, but cannot re-add them (`ERR_PNPM_NO_GLOBAL_BIN_DIR`) — usually
+because `PNPM_HOME` is not set in that run. Run `scrubmac schedule …` again
+from a shell that sets it (the agent carries `PNPM_HOME`), or tell pnpm once:
+`pnpm config set global-bin-dir "$PNPM_HOME"`.
+
+## "uv tool upgrades held: your exclude-newer could not be read"
+
+Your `UV_EXCLUDE_NEWER`, or `exclude-newer` in a `uv.toml`, is in a form
+scrubmac does not read, so it cannot tell which of it and the cooldown is
+stricter — passing either one might relax the other. Use a date, an RFC 3339
+timestamp, or a duration (`7 days`, `P7D`).
+
 ## "offline — updates skipped"
 
 There was no default network route when the run started, so updates were

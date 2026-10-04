@@ -104,14 +104,24 @@ npm_skip_note() {
 # config sets min-release-age (npm >= 11.10), as --min-release-age=DAYS
 # (rounded up): npm 11.10–11.14 refuse a --before next to it ("--min-
 # release-age cannot be provided when using --before"; fixed in 11.15.0).
+# Those npms also report a `before` of their own making when min-release-age
+# is set — now minus those days, cut to the second, so a second older: it is
+# not yours, and counting it would round up to a day more than asked for.
 npm_policy() {
-  local mra before why='' days
+  local npmv=0 mra before why='' days
   mra="$(npm config get min-release-age 2>/dev/null)" || mra=''
   before="$(npm config get before 2>/dev/null)" || before=''
   case "$mra" in '' | null | 0 | *[!0-9.]*) mra='' ;; esac
+  case "$before" in null | undefined) before='' ;; esac
+  if [ -n "$mra" ]; then
+    npmv="$(npm --version 2>/dev/null)" || npmv=0
+    if cmm_version_ge "$npmv" 11.10 && ! cmm_version_ge "$npmv" 11.15; then
+      before='' # npm's own, from min-release-age (see above)
+    fi
+  fi
   NPM_CUTOFF="$(node "$REGISTRY_CJS" cutoff --days "$1" --days "$mra" --before "$before")" || NPM_CUTOFF=none
   NPM_GATE="--before=$NPM_CUTOFF"
-  if [ -n "$mra" ] && [ "$NPM_CUTOFF" != none ] && cmm_version_ge "$(npm --version 2>/dev/null || echo 0)" 11.10; then
+  if [ -n "$mra" ] && [ "$NPM_CUTOFF" != none ] && cmm_version_ge "$npmv" 11.10; then
     days="$(node "$REGISTRY_CJS" cutoff --days "$1" --days "$mra" --before "$before" --ceil-days)" || days=''
     if [ -n "$days" ] && [ "$days" -gt 0 ]; then
       NPM_GATE="--min-release-age=$days"
@@ -120,8 +130,7 @@ npm_policy() {
   fi
   [ "$1" -gt 0 ] && why="the ${1}-day cooldown"
   [ -n "$mra" ] && why="${why:+$why; }npm min-release-age=$mra"
-  # (npm 11.10–11.14 report a `before` derived from min-release-age: not yours)
-  case "$mra:$before" in :null | :undefined | :) ;; :*) why="${why:+$why; }npm before=$before" ;; esac
+  [ -n "$before" ] && why="${why:+$why; }npm before=$before"
   NPM_WHY="$why"
 }
 

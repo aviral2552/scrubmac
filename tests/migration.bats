@@ -106,12 +106,21 @@ seed_old_config() {
 
 # ---------- install-dir migration (§3.2) ----------
 
-@test "install.sh migrates an external legacy dir: move, git kept, compat symlink, links swapped" {
-  mkdir -p "$CMM_OLD_PREFIX/.git" "$CMM_OLD_PREFIX/lib" "$CMM_OLD_PREFIX/bin" "$SANDBOX/bindir"
-  printf 'gitstate\n' >"$CMM_OLD_PREFIX/.git/HEAD"
-  printf '2.0.1\n' >"$CMM_OLD_PREFIX/VERSION" # a minimal 2.x layout
+# old_git_install — a minimal 2.x git install at CMM_OLD_PREFIX, everything
+# committed and on its remote (as a `git clone` that install.sh copied).
+old_git_install() {
+  mkdir -p "$CMM_OLD_PREFIX/lib" "$CMM_OLD_PREFIX/bin" "$SANDBOX/bindir"
+  printf '2.0.1\n' >"$CMM_OLD_PREFIX/VERSION"
   printf '# lib\n' >"$CMM_OLD_PREFIX/lib/common.sh"
   printf '#!/bin/sh\n' >"$CMM_OLD_PREFIX/bin/cleanmymac"
+  git -C "$CMM_OLD_PREFIX" init -q
+  git -C "$CMM_OLD_PREFIX" add -A
+  git -C "$CMM_OLD_PREFIX" -c user.email=t@example.invalid -c user.name=t commit -qm 2.0.1
+  git -C "$CMM_OLD_PREFIX" update-ref refs/remotes/origin/master HEAD
+}
+
+@test "install.sh migrates an external legacy dir: move, git kept, compat symlink, links swapped" {
+  old_git_install
   ln -s "$CMM_OLD_PREFIX/bin/cleanmymac" "$SANDBOX/bindir/cleanmymac"
   run "$INSTALL"
   [ "$status" -eq 0 ]
@@ -225,6 +234,32 @@ seed_old_config() {
   [ -L "$TMPDIR/cleanmymac.$(id -u).lock" ] # left alone
   [ -d "$SANDBOX/elsewhere" ]
   [ ! -e "$SANDBOX/elsewhere/pid" ]
+}
+
+@test "a legacy git install holding local work is never migrated (the mirror would erase it)" {
+  old_git_install
+  printf 'my notes\n' >"$CMM_OLD_PREFIX/NOTES.txt"
+  run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to migrate it"* ]] || false
+  [ -f "$CMM_OLD_PREFIX/NOTES.txt" ]
+  [ -d "$CMM_OLD_PREFIX/.git" ]
+  [ ! -e "$CMM_PREFIX" ]
+}
+
+@test "enable/disable with an unreadable 3.0 file write nothing, so it is still converted later" {
+  [ "$(id -u)" -ne 0 ] || skip "root reads any file"
+  make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
+  make_cleaner 60-docker.sh '# default: off' 'echo DOCKER-RAN'
+  mkdir -p "$NEWCFG"
+  printf 'alpha\n' >"$NEWCFG/disabled"
+  chmod 000 "$NEWCFG/disabled"
+  run "$CMM" disable docker
+  chmod 644 "$NEWCFG/disabled"
+  [ "$status" -eq 2 ]
+  [ ! -e "$NEWCFG/enabled" ]
+  run "$CMM"
+  [[ "$output" == *"kept your earlier choices enabled: docker"* ]] || false
 }
 
 @test "a 3.0 disabled file that cannot be read now is converted once it can be" {

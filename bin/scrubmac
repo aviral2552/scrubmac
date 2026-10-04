@@ -460,6 +460,7 @@ cmd_enable_disable() {
   [ -n "$names" ] || usage_err "usage: scrubmac $CMD <cleaner ...> (names may be comma-separated)"
   cmm__check_list "$names"
   cmm_state_migrate
+  cmm_require_state_readable # (before either file is written)
   while IFS= read -r n; do
     cmm_set_state "$n" "$want"
     if [ "$want" = on ]; then

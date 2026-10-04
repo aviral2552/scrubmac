@@ -712,11 +712,13 @@ cmm__lock_break() {
       sleep 0.1
     fi
   done
+  CMM__BREAK_ME="$me" # (an interrupt from here on: cmm_locks_release frees it)
   if [ "$(readlink "$CMM_LOCK" 2>/dev/null || true)" = "$held" ]; then
     rm -f "$CMM_LOCK"
     warn "removed a stale lock left by pid ${held%%:*}"
   fi
   rm -f "$m"
+  CMM__BREAK_ME=''
   return 0
 }
 
@@ -790,6 +792,10 @@ cmm_legacy_lock_acquire() {
 }
 
 cmm_locks_release() {
+  if [ -n "${CMM__BREAK_ME:-}" ] &&
+    [ "$(readlink "$CMM_LOCK.breaking" 2>/dev/null || true)" = "$CMM__BREAK_ME" ]; then
+    rm -f "$CMM_LOCK.breaking" 2>/dev/null || true
+  fi
   if [ -n "${CMM__LOCK_HELD:-}" ]; then
     if [ "$(readlink "$CMM_LOCK" 2>/dev/null || true)" = "$CMM__LOCK_HELD" ]; then
       rm -f "$CMM_LOCK" 2>/dev/null || true
