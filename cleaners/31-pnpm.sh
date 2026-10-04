@@ -80,16 +80,32 @@ can_resolve() { have node && have npm && [ -f "$REGISTRY_CJS" ]; }
 
 # pnpm_policy DAYS — PNPM_VER/PNPM_MAJOR; PNPM_POLICY: the minimum release
 # age (minutes) asked for — the cooldown, or your own minimumReleaseAge when
-# stricter (passing a smaller value on the command line would relax it);
-# PNPM_GATE: that, but at least pnpm's built-in default (1440 since pnpm 11);
-# PNPM_WHY: where it comes from.
+# stricter (passing a smaller value on the command line would relax it; a
+# fraction of a minute is rounded up); PNPM_GATE: that, but at least pnpm's
+# built-in default (1440 since pnpm 11); PNPM_WHY: where it comes from.
+# PNPM_UNSURE: why your minimumReleaseAge cannot be read as minutes, or "" —
+# Infinity, 1e+21, text (pnpm 10 and 11 then fail every update, and pnpm 12,
+# also on a fraction, cannot even load its configuration), or pnpm could not
+# tell it at all.
 pnpm_policy() {
-  local cfg
+  local raw cfg=0
   PNPM_VER="$(pnpm --version 2>/dev/null)" || PNPM_VER=0
   PNPM_MAJOR="${PNPM_VER%%.*}"
   case "$PNPM_MAJOR" in '' | *[!0-9]*) PNPM_MAJOR=0 ;; esac
-  cfg="$(pnpm config get minimumReleaseAge 2>/dev/null | tail -n 1)" || cfg=''
-  case "$cfg" in '' | *[!0-9]*) cfg=0 ;; esac
+  PNPM_UNSURE=''
+  if ! raw="$(pnpm config get minimumReleaseAge 2>/dev/null | tail -n 1)"; then
+    PNPM_UNSURE="'pnpm config get minimumReleaseAge' failed"
+    raw=''
+  fi
+  case "$raw" in
+    '' | undefined | null) ;;
+    *[!0-9.]* | .* | *. | *.*.* | ????????????????*) PNPM_UNSURE="it is '$raw'" ;;
+    *.*)
+      cfg=$((10#${raw%.*}))
+      case "${raw#*.}" in *[1-9]*) cfg=$((cfg + 1)) ;; esac # (rounded up)
+      ;;
+    *) cfg=$((10#$raw)) ;;
+  esac
   PNPM_POLICY=$(($1 * 1440))
   PNPM_WHY=''
   [ "$1" -gt 0 ] && PNPM_WHY="the ${1}-day cooldown"
@@ -255,7 +271,7 @@ pnpm_flush_group() {
     return 0
   fi
   if [ "$PNPM_GLOBAL_BIN" = none ]; then
-    note "- not re-adding ${movers[*]}: pnpm has no global bin directory here (PNPM_HOME is not set — a scheduled run gets your PATH, not PNPM_HOME), and 'pnpm add -g' needs one — run 'pnpm config set global-bin-dir \"\$PNPM_HOME\"' once in your shell"
+    note "- not re-adding ${movers[*]}: pnpm has no global bin directory here (PNPM_HOME is not set here), and 'pnpm add -g' needs one — run 'scrubmac schedule' again from a shell where PNPM_HOME is set (or 'pnpm config set global-bin-dir \"\$PNPM_HOME\"' once)"
     PNPM_NOBIN=$((PNPM_NOBIN + ${#movers[@]}))
     return 0
   fi
@@ -325,7 +341,7 @@ EOF
   [ "$PNPM_HELD" -gt 0 ] && summary_note "$PNPM_HELD global update(s) held by the cooldown ($PNPM_WHY)"
   [ "$PNPM_UNSUITABLE" -gt 0 ] && summary_note "$PNPM_UNSUITABLE global update(s) not suitable (deprecated, or need a newer Node.js)"
   [ "$PNPM_GROUPHELD" -gt 0 ] && summary_note "$PNPM_GROUPHELD global update(s) held: their install group (pnpm add -g a,b) cannot be re-added this run"
-  [ "$PNPM_NOBIN" -gt 0 ] && summary_note "$PNPM_NOBIN global update(s) held: pnpm has no global bin directory here — run 'pnpm config set global-bin-dir \"\$PNPM_HOME\"' once"
+  [ "$PNPM_NOBIN" -gt 0 ] && summary_note "$PNPM_NOBIN global update(s) held: PNPM_HOME is not set here, so pnpm has no global bin directory — run 'scrubmac schedule' again from a shell where it is"
   return 0
 }
 
@@ -347,10 +363,10 @@ pnpm_legacy_globals() {
 # outdated; pnpm 9/10 all, when PNPM_HOME names that directory) — pnpm from
 # Homebrew or Corepack with no `pnpm setup`, or a scheduled run whose PATH
 # was captured before it; "none" when pnpm has no global bin directory at
-# all (pnpm <= 10 with neither PNPM_HOME nor global-bin-dir — a scheduled run
-# never sees your shell's PNPM_HOME), so `pnpm add -g` fails (`pnpm update
-# -g` does not); else "ok". `pnpm bin -g` tells: its message is on stdout
-# for pnpm 9/10, on stderr (wrapped, with a code) for pnpm 11 and 12.
+# all (pnpm <= 10 with neither PNPM_HOME nor global-bin-dir — a schedule made
+# before scrubmac carried PNPM_HOME, or a shell without it), so `pnpm add -g`
+# fails (`pnpm update -g` does not); else "ok". `pnpm bin -g` tells: its
+# message is on stderr (wrapped, with a code, on pnpm 12).
 pnpm_global_bin() {
   local out
   PNPM_GLOBAL_BIN=ok
@@ -419,7 +435,10 @@ if updating; then
   [ -n "$scratch" ] && cd "$scratch"
   pnpm_policy "$days"
   pnpm_global_bin
-  if [ "$PNPM_POLICY" -eq 0 ]; then
+  if [ -n "$PNPM_UNSURE" ]; then
+    note "- pnpm self-update and global updates held: pnpm's minimumReleaseAge cannot be read as a number of minutes ($PNPM_UNSURE), and a --config.minimum-release-age passed instead could relax it — set it to a whole number of minutes (20160 is two weeks)"
+    summary_note "pnpm updates held: pnpm minimumReleaseAge could not be read"
+  elif [ "$PNPM_POLICY" -eq 0 ]; then
     ai_self_update pnpm pnpm self-update # (needs no global bin directory)
     if pnpm_globals_off; then
       :

@@ -236,6 +236,18 @@ old_git_install() {
   [ ! -e "$SANDBOX/elsewhere/pid" ]
 }
 
+@test "run from inside a legacy git install, local work and all, it is just moved (nothing is mirrored)" {
+  git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$CMM_OLD_PREFIX"
+  mkdir -p "$CMM_OLD_PREFIX/.vscode"
+  printf 'x\n' >"$CMM_OLD_PREFIX/.vscode/settings.json"
+  run "$CMM_OLD_PREFIX/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Migrated $CMM_OLD_PREFIX"* ]] || false
+  [ -f "$CMM_PREFIX/.vscode/settings.json" ]
+  [ -d "$CMM_PREFIX/.git" ]
+  [ -L "$CMM_OLD_PREFIX" ]
+}
+
 @test "a legacy git install holding local work is never migrated (the mirror would erase it)" {
   old_git_install
   printf 'my notes\n' >"$CMM_OLD_PREFIX/NOTES.txt"

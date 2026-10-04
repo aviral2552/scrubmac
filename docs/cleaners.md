@@ -127,12 +127,21 @@ not fail the run.
   when stricter — a cutoff on the command line would override, and so
   relax, those settings, so scrubmac passes the stricter one itself: as
   `--before=<cutoff>`, or, when your npm config sets `min-release-age`
-  (npm ≥ 11.10), as `--min-release-age=<days, rounded up>` — npm
-  11.10–11.14 refuse a `--before` next to it ("--min-release-age cannot be
-  provided when using --before"; fixed in 11.15.0). Those npms also report
-  a `before` of their own making while `min-release-age` is set (now minus
-  those days, cut to the second): it is not counted as yours — rounded up,
-  it would make the gate a day stricter than asked for.
+  (npm ≥ 11.10; even to 0), as `--min-release-age=<days, rounded up>` —
+  npm 11.10–11.14 refuse a `--before` next to it ("--min-release-age cannot
+  be provided when using --before"; fixed in 11.15.0). Those npms also
+  report a `before` of their own making while `min-release-age` is set (now
+  minus those days, cut to the second): it is not counted as yours —
+  rounded up, it would make the gate a day stricter than asked for. npm
+  11.10–11.13 go further and hide `min-release-age` itself
+  (`npm config get min-release-age` says `null`), so when one of those
+  reports a `before`, scrubmac looks for the setting where npm reads it:
+  `npm_config_min_release_age` (either case), then the userconfig and
+  globalconfig files `npm config get` names (when it names none, those the
+  environment names, `~/.npmrc` for the user's). A `min-release-age` that
+  is not a plain number of days (`1e1`, `${VAR}`) holds global updates, with
+  a note and a summary note: no cutoff passed instead could be known not to
+  relax it.
 - `npm update -g <pkg>…` — when there is no cutoff (cooldown off, no npm
   setting of your own), for exactly those globals after a
   `npm view <pkg> versions dist-tags --json` registry check (not run when
@@ -173,8 +182,9 @@ not fail the run.
   `pnpm update -g` is what migrates those): with none, and `pnpm setup`
   never run, pnpm fails for want of a global bin directory.
 - **With one** (the stricter of `COOLDOWN_DAYS` and your own
-  `minimumReleaseAge`, read with `pnpm config get minimumReleaseAge` — and
-  at least pnpm 11's built-in day): global packages are listed with
+  `minimumReleaseAge`, read with `pnpm config get minimumReleaseAge`, a
+  fraction of a minute rounded up — and at least pnpm 11's built-in day):
+  global packages are listed with
   `pnpm ls -g --depth=0 --json` and resolved like npm's (`npm view` and
   scrubmac's resolver; deprecated or engine-incompatible picks are left as
   they are, since pnpm resolves ranges itself) **within the range each was
@@ -222,6 +232,13 @@ not fail the run.
     installs the newest release, so its self-update is held.
   - The lookups need node and npm; without them, updates and the
     self-update are held.
+- A `minimumReleaseAge` that is no number of minutes (`Infinity`, `1e+21`,
+  text), or one pnpm cannot report (`pnpm config get` fails — pnpm 12 cannot
+  load a config holding such a value, nor a fraction), holds the
+  self-update and the global updates, with or without a cooldown, with a
+  note and a summary note: a `--config.minimum-release-age` passed instead
+  could relax it, and pnpm 10 and 11 fail every update on such a value
+  themselves. Pruning the store still runs.
 - pnpm's `minimumReleaseAge` is never passed to `pnpm update -g` or
   `pnpm self-update`: they fail outright (`ERR_PNPM_NO_MATURE_MATCHING_VERSION`)
   whenever an installed release is newer than the cutoff, and pnpm 10's
@@ -240,11 +257,13 @@ not fail the run.
   `PATH` — and a summary note when global packages evidently exist
   (`<data dir>/global`, the data dir being `$PNPM_HOME`, else
   `$XDG_DATA_HOME/pnpm`, else `~/Library/pnpm`; `~/.local/share/pnpm` is
-  checked too). pnpm ≤ 10 without `PNPM_HOME` (a scheduled run never sees
-  your shell's) has no global bin directory at all: `pnpm update -g` still
-  works, but `pnpm add -g` fails, so cooldown re-adds are held with a note —
-  `pnpm config set global-bin-dir "$PNPM_HOME"`, once, cures that. The
-  self-update needs no global bin directory.
+  checked too). pnpm ≤ 10 without `PNPM_HOME` (a schedule made before
+  scrubmac carried it, or a shell that lacks it) has no global bin directory
+  at all: `pnpm update -g` still works, but `pnpm add -g` fails, so cooldown
+  re-adds are held with a note — `scrubmac schedule` again from a shell
+  where `PNPM_HOME` is set cures that (or, once, `pnpm config set
+  global-bin-dir "$PNPM_HOME"`). The self-update needs no global bin
+  directory.
 - `pnpm store prune` — drop unreferenced packages from the
   content-addressable store (`pnpm store path` locates it for its size in
   `scrubmac status`).
@@ -275,14 +294,19 @@ global package exists.
   (in the bunfig files Bun reads for `-g` commands: the global one —
   `$XDG_CONFIG_HOME/.bunfig.toml` when `XDG_CONFIG_HOME` is set,
   `~/.bunfig.toml` then ignored, else `~/.bunfig.toml` — and `bunfig.toml`
-  in Bun's global directory; integers, floats and inline tables all count,
-  also inline tables spread over several lines, and a `#` inside a quoted
-  string starts no comment):
+  in Bun's global directory; read as Bun reads TOML — integers, floats,
+  inline tables, also ones spread over several lines, multi-line strings
+  and arrays; a `#` inside a string starts no comment):
   `bun upgrade` —
   standalone installs only (it replaces the running binary in place, so
   Homebrew/npm/version-manager copies are left to their managers) — and
   `bun update -g`, within the saved ranges. No global packages: nothing to
   update, and no failure.
+- A `minimumReleaseAge` that gives no number of seconds to trust — `inf`,
+  more than 10¹² (no cutoff date reaches that far back), not a number, or
+  in a part of the file the reader cannot follow — holds `bun upgrade` and
+  the global updates, with a note and a summary note: any
+  `--minimum-release-age` passed instead could relax it.
 - **With one** (the stricter of the two; passing a smaller value on the
   command line would relax yours): the global packages are read from Bun's
   global directory (named by the `bun pm ls -g` header: its `package.json`

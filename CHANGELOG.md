@@ -198,7 +198,9 @@ that pass extra flags.
     global upgrades are held.
   - A stricter policy of your own (npm `min-release-age`/`before`, pnpm
     `minimumReleaseAge`, a bunfig `minimumReleaseAge`, uv `exclude-newer`,
-    `PIPX_COOLDOWN`) is never relaxed.
+    `PIPX_COOLDOWN`) is never relaxed — read the way each tool reads it
+    (npm 11.10–11.13 hide `min-release-age` from `npm config get`; Bun's
+    TOML), and one that cannot be read holds those updates instead.
   - `COOLDOWN_DAYS=0` opts out — and also clears the cutoffs earlier runs
     left in uv receipts and pipx metadata.
 - **Homebrew casks are upgraded only when a person is watching**

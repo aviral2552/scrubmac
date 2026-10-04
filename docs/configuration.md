@@ -211,11 +211,14 @@ Unlike cron, launchd runs a job missed while the Mac slept as soon as it
 wakes (a Mac that is powered off skips it). The agent carries the `PATH`
 of the shell you scheduled from (minus `.` and relative entries), so your
 tools are found — re-run the command after changing your `PATH`. It also
-carries the locations launchd would not know, when your shell sets them:
-the XDG directories and `CMM_STATE_DIR`, and tool homes such as
+carries scrubmac's state dir and the locations launchd would not know, when
+your shell sets them: the XDG directories, and tool homes such as
 `PNPM_HOME`, `BUN_INSTALL`, `CARGO_HOME`, `RUSTUP_HOME`, `GOPATH`,
 `VOLTA_HOME`, `PIPX_HOME`, `UV_TOOL_DIR` or `PYENV_ROOT` (the full list is
-`CMM__SCHEDULE_ENV` in `lib/schedule.sh`; absolute values only). It runs
+`CMM__SCHEDULE_ENV` in `lib/schedule.sh`) — absolute values only, and not
+one inside the directory you schedule from (a project's own, like direnv's
+`GEM_HOME`). Schedule from a plain shell: a shell with direnv settings gets
+a warning, since its `PATH` is the project's too. It runs
 with background priority, and each cleaner starts in your home directory
 (launchd itself starts jobs in `/`). Re-scheduling replaces the old agent
 (waiting for launchd to unload it first), and re-enables an agent you had

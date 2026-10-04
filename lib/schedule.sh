@@ -154,13 +154,24 @@ CMM__SCHEDULE_ENV='XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CACHE_HOME C
   PIPX_HOME PIPX_BIN_DIR UV_TOOL_DIR UV_TOOL_BIN_DIR MISE_DATA_DIR ASDF_DATA_DIR
   PYENV_ROOT RBENV_ROOT NODENV_ROOT GEM_HOME NPM_CONFIG_PREFIX npm_config_prefix'
 
-# cmm__schedule_env — the CMM__SCHEDULE_ENV variables set here, one KEY per
-# line.
+# cmm__schedule_env [local] — the CMM__SCHEDULE_ENV variables to carry, one
+# KEY per line: set here to an absolute path, and not inside the directory
+# you schedule from (unless that is your home) — such a value is a
+# project's own (direnv's GEM_HOME, a project CARGO_HOME), which `local`
+# lists instead.
 cmm__schedule_env() {
-  local key val
+  local key val here home inside want=0
+  [ "${1:-}" = local ] && want=1
+  here="$(pwd -P 2>/dev/null || pwd)"
+  home="$(cmm_canon_path "$HOME" 2>/dev/null || printf '%s' "$HOME")"
   for key in $CMM__SCHEDULE_ENV; do
     val="${!key:-}"
-    case "$val" in /*) printf '%s\n' "$key" ;; esac
+    case "$val" in /*) ;; *) continue ;; esac
+    inside=0
+    if [ "$here" != "$home" ] && [ "$here" != / ]; then
+      case "$val/" in "$here"/* | "$PWD"/*) inside=1 ;; esac
+    fi
+    [ "$inside" = "$want" ] && printf '%s\n' "$key"
   done
   return 0
 }
@@ -219,7 +230,7 @@ EOF
 }
 
 cmm_schedule_set() {
-  local kind="$1" wd='' arg hour=9 minute=0 plist domain got_day=0 got_time=0 i=0
+  local kind="$1" wd='' arg hour=9 minute=0 plist domain got_day=0 got_time=0 i=0 also
   local usage="usage: scrubmac schedule daily [HH:MM] | weekly [DAY] [HH:MM]   (DAY: mon … sun)"
   shift
   [ "$kind" = weekly ] && wd=1
@@ -274,7 +285,13 @@ cmm_schedule_set() {
   note "scheduled: $(cmm_schedule_describe) — runs '$(cmm_stable_launcher) --scheduled --quiet'"
   note "  agent:  $plist"
   note "  PATH:   captured from this shell (re-run this command after changing your PATH)"
-  [ -n "$(cmm__schedule_env)" ] && note "  also:   $(cmm__schedule_env | tr '\n' ' ')(from this shell, likewise)"
+  also="$(cmm__schedule_env | { grep -vx CMM_STATE_DIR || true; } | tr '\n' ' ')"
+  [ -n "$also" ] && note "  also:   $also(from this shell, likewise)"
+  also="$(cmm__schedule_env local | tr '\n' ' ')"
+  [ -n "$also" ] && note "  not carried (inside this directory — a project's own?): $also"
+  if [ -n "${DIRENV_DIR:-}" ]; then
+    warn "this shell has direnv settings for ${DIRENV_DIR#-} — the schedule took its PATH and tool homes; unless that is what you want, run 'scrubmac schedule' again from a plain shell"
+  fi
   note "  logs:   $CMM_LOG_DIR  (or 'scrubmac last')"
   note "launchd runs a schedule missed during sleep at the next wake; a Mac that is off skips it."
 }

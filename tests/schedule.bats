@@ -144,6 +144,17 @@ EOF
   [[ "$output" == *"also:   "*PNPM_HOME* ]] || false
 }
 
+@test "a tool home inside the directory you schedule from (a project's own) is not carried; direnv gets a warning" {
+  mkdir -p "$SANDBOX/proj/.direnv/ruby"
+  cd "$SANDBOX/proj"
+  GEM_HOME="$SANDBOX/proj/.direnv/ruby" DIRENV_DIR="-$SANDBOX/proj" run "$CMM" schedule weekly
+  [ "$status" -eq 0 ]
+  refute grep -q '<key>GEM_HOME</key>' "$PLIST"
+  [[ "$output" == *"not carried (inside this directory"*GEM_HOME* ]] || false
+  [[ "$output" == *"direnv settings for $SANDBOX/proj"* ]] || false
+  [[ "$output" != *"also:"*CMM_STATE_DIR* ]] || false # (always carried; never "from this shell")
+}
+
 @test "the generated plist is valid (plutil -lint, macOS only)" {
   [ -x /usr/bin/plutil ] || skip "plutil is macOS-only"
   run "$CMM" schedule weekly

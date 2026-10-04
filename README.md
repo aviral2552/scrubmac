@@ -45,10 +45,10 @@ if you like.
   process, with a time limit (a hung tool is stopped together with the
   processes it started) and no stdin; the summary says exactly what
   happened, and every real run leaves a log.
-- **Auditable.** About 7,900 lines of shellcheck-clean bash (about 6,000
-  without comments and blank lines) plus an 850-line dependency-free node
+- **Auditable.** About 8,100 lines of shellcheck-clean bash (about 6,100
+  without comments and blank lines) plus a 950-line dependency-free node
   resolver for the cooldown, a [threat model](docs/security.md), and a test
-  suite of ~630 hermetic tests plus a live end-to-end run on real macOS —
+  suite of ~640 hermetic tests plus a live end-to-end run on real macOS —
   every command checked against its tool's documentation.
 
 ## Install

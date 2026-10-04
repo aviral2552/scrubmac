@@ -504,7 +504,7 @@ cmm_is_install_dir() {
 # and in no release tag) and succeeds. Git's environment is ignored (a
 # GIT_DIR from a hook would point it at another repository).
 cmm_local_work() {
-  local d="$1" out
+  local d="$1" out rel
   [ -e "$d/.git" ] || return 1
   if ! have git; then
     printf 'a .git (and no git here to check it for local work)'
@@ -515,6 +515,11 @@ cmm_local_work() {
       GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CEILING_DIRECTORIES
     git -C "$d" "$@"
   )
+  # published: on a remote, or in a release tag (exactly vX.Y.Z, as releases
+  # are named — a tag of your own is not), mirrored or not
+  rel="$(lw_git for-each-ref --format='%(refname)' refs/tags 2>/dev/null |
+    grep -E '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+  # shellcheck disable=SC2086  # (rel: tag refnames never contain whitespace)
   if ! out="$(lw_git status --porcelain --untracked-files=all 2>/dev/null)"; then
     printf 'a .git that git cannot read'
   elif [ -n "$out" ]; then
@@ -523,10 +528,9 @@ cmm_local_work() {
     printf 'untracked files that only your own git ignore rules hide'
   elif lw_git rev-parse -q --verify refs/stash >/dev/null 2>&1; then
     printf 'a stash'
-  elif [ -n "$(lw_git rev-list --max-count=1 HEAD --branches --not --remotes --glob='refs/tags/v[0-9]*' \
+  elif [ -n "$(lw_git rev-list --max-count=1 HEAD --branches --not --remotes $rel \
     --glob='refs/scrubmac/release-tags/*' --glob='refs/scrubmac/seen-tags/*' 2>/dev/null || echo unknown)" ]; then
-    # (a release update fetches tags only, so origin/* may lag behind HEAD;
-    # release tags count as published — a tag of your own does not)
+    # (a release update fetches tags only, so origin/* may lag behind HEAD)
     printf 'commits that are on no remote'
   else
     return 1

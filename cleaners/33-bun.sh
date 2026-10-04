@@ -78,14 +78,22 @@ can_resolve() { have node && have npm && [ -f "$REGISTRY_CJS" ]; }
 # smaller value on the command line would relax it); BUN_WHY: where it
 # comes from. Those files: your global bunfig — $XDG_CONFIG_HOME/.bunfig.toml
 # when XDG_CONFIG_HOME is set (then ~/.bunfig.toml is ignored),
-# ~/.bunfig.toml otherwise — and GLOBAL_DIR/bunfig.toml.
+# ~/.bunfig.toml otherwise — and GLOBAL_DIR/bunfig.toml. BUN_UNSURE=1 when
+# no number of seconds can be trusted (inf, too large, not a number, a
+# file the reader cannot follow): then nothing may relax it.
 bun_policy() {
   local cfg=0
   BUN_VER="$(bun --version 2>/dev/null)" || BUN_VER=0
+  BUN_UNSURE=0
   if have node && [ -f "$REGISTRY_CJS" ]; then
-    cfg="$(node "$REGISTRY_CJS" bunfig-age "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml" "$2/bunfig.toml")" || cfg=0
+    cfg="$(node "$REGISTRY_CJS" bunfig-age "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml" "$2/bunfig.toml")" || cfg=unsure
   fi
-  case "$cfg" in '' | *[!0-9]*) cfg=0 ;; esac
+  case "$cfg" in
+    '' | *[!0-9]* | ??????????????*) # no integer, or one past registry.cjs's cap
+      BUN_UNSURE=1
+      cfg=0
+      ;;
+  esac
   BUN_POLICY=$(($1 * 86400))
   BUN_WHY=''
   [ "$1" -gt 0 ] && BUN_WHY="the ${1}-day cooldown"
@@ -295,22 +303,27 @@ gdir="$(bun_global_dir)"
 if updating; then
   days="$(cooldown_days)"
   bun_policy "$days" "$gdir"
-  if [ "$BUN_POLICY" -gt 0 ] && can_resolve; then
-    BUN_CUTOFF="$(node "$REGISTRY_CJS" cutoff --seconds "$BUN_POLICY")"
-  fi
-  bun_self_update
-  if [ ! -f "$gdir/package.json" ]; then
-    note "- no global Bun packages ($gdir has no package.json)"
-  elif [ "$BUN_POLICY" -eq 0 ]; then
-    step bun update -g
-  elif ! can_resolve; then
-    note "- cooldown active ($BUN_WHY) but node/npm (needed for registry lookups) not found: global updates are held"
-    summary_note "global updates held (node/npm not found for the cooldown)"
-  elif ! cmm_version_ge "$BUN_VER" 1.3; then
-    note "- this Bun ($BUN_VER) predates --minimum-release-age (1.3), so the cooldown cannot hold dependencies back: global updates are held"
-    summary_note "global updates held by the cooldown (Bun < 1.3)"
+  if [ "$BUN_UNSURE" = 1 ]; then
+    note "- bun upgrade and global updates held: your bunfig's install.minimumReleaseAge cannot be read as a number of seconds here (inf, too large, not a number, or in a part of the file this reader cannot follow), and a --minimum-release-age passed instead could relax it"
+    summary_note "Bun updates held: bunfig install.minimumReleaseAge could not be read"
   else
-    bun_cooldown_update "$gdir"
+    if [ "$BUN_POLICY" -gt 0 ] && can_resolve; then
+      BUN_CUTOFF="$(node "$REGISTRY_CJS" cutoff --seconds "$BUN_POLICY")"
+    fi
+    bun_self_update
+    if [ ! -f "$gdir/package.json" ]; then
+      note "- no global Bun packages ($gdir has no package.json)"
+    elif [ "$BUN_POLICY" -eq 0 ]; then
+      step bun update -g
+    elif ! can_resolve; then
+      note "- cooldown active ($BUN_WHY) but node/npm (needed for registry lookups) not found: global updates are held"
+      summary_note "global updates held (node/npm not found for the cooldown)"
+    elif ! cmm_version_ge "$BUN_VER" 1.3; then
+      note "- this Bun ($BUN_VER) predates --minimum-release-age (1.3), so the cooldown cannot hold dependencies back: global updates are held"
+      summary_note "global updates held by the cooldown (Bun < 1.3)"
+    else
+      bun_cooldown_update "$gdir"
+    fi
   fi
 fi
 

@@ -96,25 +96,79 @@ npm_skip_note() {
   esac
 }
 
+# npm_hidden_mra — the min-release-age npm 11.10–11.13 read but no longer
+# report: once read, they delete it and keep only the `before` they derive
+# from it, so `npm config get min-release-age` says null. Looked up where npm
+# reads it, highest precedence first: the environment
+# (npm_config_min_release_age, in either case), then the userconfig and
+# globalconfig files `npm config get` names — or, when it names no file (npm
+# will not print a path its redaction would change, a UUID in it, say), the
+# ones the environment names, ~/.npmrc for the user's. The value as written
+# (an empty one is 0); nothing when none sets it.
+npm_hidden_mra() {
+  local v k f
+  for v in "${npm_config_min_release_age:-}" "${NPM_CONFIG_MIN_RELEASE_AGE:-}"; do
+    if [ -n "$v" ]; then
+      printf '%s\n' "$v"
+      return 0
+    fi
+  done
+  for k in userconfig globalconfig; do
+    f="$(npm config get "$k" 2>/dev/null)" || f=''
+    if [ ! -f "$f" ]; then
+      case "$k" in
+        userconfig) f="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}}" ;;
+        *) f="${npm_config_globalconfig:-${NPM_CONFIG_GLOBALCONFIG:-}}" ;;
+      esac
+    fi
+    [ -f "$f" ] || continue
+    v="$(awk '/^[[:space:]]*\[/ { exit }
+      /^[[:space:]]*["\047]?min-release-age["\047]?[[:space:]]*=/ {
+        v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*[;#].*$/, "", v)
+        gsub(/^["\047]|["\047]$/, "", v); last = v; found = 1 }
+      END { if (found) print (last == "" ? 0 : last) }' "$f")"
+    if [ -n "$v" ]; then
+      printf '%s\n' "$v"
+      return 0
+    fi
+  done
+  return 0
+}
+
 # npm_policy DAYS — the cutoff to hold updates to (NPM_CUTOFF, an ISO date,
-# or "none"), why (NPM_WHY), and how to hand it to npm (NPM_GATE): the
-# cooldown, or your own npm min-release-age or before setting when stricter.
-# A cutoff on the command line overrides (relaxes) those settings, so the
-# stricter one is passed explicitly — as --before=DATE, or, when your npm
-# config sets min-release-age (npm >= 11.10), as --min-release-age=DAYS
+# "none", or "hold" when your min-release-age is not a plain number of days),
+# why (NPM_WHY), and how to hand it to npm (NPM_GATE): the cooldown, or your
+# own npm min-release-age or before setting when stricter. A cutoff on the
+# command line overrides (relaxes) those settings, so the stricter one is
+# passed explicitly — as --before=DATE, or, when your npm config sets
+# min-release-age (npm >= 11.10; even to 0), as --min-release-age=DAYS
 # (rounded up): npm 11.10–11.14 refuse a --before next to it ("--min-
 # release-age cannot be provided when using --before"; fixed in 11.15.0).
-# Those npms also report a `before` of their own making when min-release-age
-# is set — now minus those days, cut to the second, so a second older: it is
-# not yours, and counting it would round up to a day more than asked for.
+# Those npms also report a `before` of their own making while
+# min-release-age is set — now minus those days, cut to the second, so a
+# second older: it is not yours, and counting it would round up to a day
+# more than asked for. npm 11.10–11.13 even hide min-release-age itself
+# behind that `before` (npm_hidden_mra finds it).
 npm_policy() {
-  local npmv=0 mra before why='' days
+  local npmv='' mra before why='' days
   mra="$(npm config get min-release-age 2>/dev/null)" || mra=''
   before="$(npm config get before 2>/dev/null)" || before=''
-  case "$mra" in '' | null | 0 | *[!0-9.]*) mra='' ;; esac
+  case "$mra" in null | undefined) mra='' ;; esac
   case "$before" in null | undefined) before='' ;; esac
-  if [ -n "$mra" ]; then
+  if [ -z "$mra" ] && [ -n "$before" ]; then
     npmv="$(npm --version 2>/dev/null)" || npmv=0
+    if cmm_version_ge "$npmv" 11.10 && ! cmm_version_ge "$npmv" 11.14; then
+      mra="$(npm_hidden_mra)" # behind that before, perhaps
+    fi
+  fi
+  case "$mra" in
+    *[!0-9.]* | .* | *. | *.*.*)
+      NPM_CUTOFF=hold NPM_GATE='' NPM_WHY="$mra"
+      return 0
+      ;;
+  esac
+  if [ -n "$mra" ]; then
+    [ -n "$npmv" ] || npmv="$(npm --version 2>/dev/null)" || npmv=0
     if cmm_version_ge "$npmv" 11.10 && ! cmm_version_ge "$npmv" 11.15; then
       before='' # npm's own, from min-release-age (see above)
     fi
@@ -234,7 +288,10 @@ if updating; then
     cmm_fail_later
   else
     npm_policy "$days"
-    if [ "$NPM_CUTOFF" != none ]; then
+    if [ "$NPM_CUTOFF" = hold ]; then
+      note "- global updates held: your npm min-release-age ('$NPM_WHY') is not a plain number of days, so how far back it holds cannot be told — and a cutoff passed instead could relax it; write it as one (min-release-age=7)"
+      summary_note "global updates held: npm min-release-age '$NPM_WHY' could not be read"
+    elif [ "$NPM_CUTOFF" != none ]; then
       npm_cooldown_update
     else
       npm_plain_update

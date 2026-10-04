@@ -1,6 +1,6 @@
 # Architecture
 
-About 7,900 lines of bash 3.2-compatible shell (and one node script, the registry resolver), structured as a thin
+About 8,100 lines of bash 3.2-compatible shell (and one node script, the registry resolver), structured as a thin
 dispatcher, a small set of libraries, and independent cleaner processes.
 
 ```

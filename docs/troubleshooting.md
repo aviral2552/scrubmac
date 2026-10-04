@@ -108,13 +108,38 @@ failing every run. Run `pnpm setup`, open a new shell, and run `scrubmac
 schedule …` again so scheduled runs get the new `PATH` (and `PNPM_HOME`).
 The summary mentions it only when you have global packages.
 
-## "global update(s) held: pnpm has no global bin directory here"
+## "global update(s) held: … PNPM_HOME is not set here"
 
 pnpm ≤ 10 can update global packages without knowing its global bin
 directory, but cannot re-add them (`ERR_PNPM_NO_GLOBAL_BIN_DIR`) — usually
-because `PNPM_HOME` is not set in that run. Run `scrubmac schedule …` again
-from a shell that sets it (the agent carries `PNPM_HOME`), or tell pnpm once:
+because `PNPM_HOME` is not set in that run (a schedule made before scrubmac
+carried it, or a shell without it). Run `scrubmac schedule …` again from a
+shell that sets it, or tell pnpm once:
 `pnpm config set global-bin-dir "$PNPM_HOME"`.
+
+## "global updates held: npm min-release-age '…' could not be read"
+
+Your npm `min-release-age` is not a plain number of days (`1e1`, `${VAR}`,
+`Infinity`), so scrubmac cannot tell how far back it reaches — passing its
+own cutoff could relax yours. Write it as a plain number:
+`min-release-age=7`.
+
+## "pnpm updates held: pnpm minimumReleaseAge could not be read"
+
+Your pnpm `minimumReleaseAge` is not a number of minutes (`Infinity`,
+`1e21`, a word) — or pnpm cannot load its own configuration at all (pnpm 12
+refuses such a value) — so a plain `pnpm update -g` would fail on it, and
+passing scrubmac's cutoff could relax it. The self-update and global updates
+are held; the store is still pruned. Set a whole number of minutes:
+`pnpm config set minimumReleaseAge 20160` (two weeks).
+
+## "Bun updates held: bunfig install.minimumReleaseAge could not be read"
+
+Your bunfig's `minimumReleaseAge` has no number of seconds scrubmac can trust
+(`inf`, more than 10¹², not a number, or a file it cannot follow), so it
+holds `bun upgrade` and global updates rather than risk relaxing it. Make it
+a plain number of seconds, and check that Bun loads the file (`bun pm ls -g`
+complains when it cannot).
 
 ## "uv tool upgrades held: your exclude-newer could not be read"
 

@@ -717,7 +717,7 @@ cmm__lock_break() {
     rm -f "$CMM_LOCK"
     warn "removed a stale lock left by pid ${held%%:*}"
   fi
-  rm -f "$m"
+  [ "$(readlink "$m" 2>/dev/null || true)" = "$me" ] && rm -f "$m"
   CMM__BREAK_ME=''
   return 0
 }

@@ -130,7 +130,8 @@ MIGRATED=0
 if [ -d "$OLD_DEST" ] && [ ! -L "$OLD_DEST" ] && [ ! -e "$DEST_DIR" ]; then
   if cmm_unsafe_target "$OLD_DEST" || ! cmm_is_install_dir "$OLD_DEST"; then
     echo "note: $OLD_DEST is not a cleanmymac install — left alone (nothing migrated from it)"
-  elif why="$(cmm_local_work "$OLD_DEST")"; then
+  elif [ "$SRC_DIR" != "$OLD_DEST" ] && why="$(cmm_local_work "$OLD_DEST")"; then
+    # (run from that install itself, nothing is mirrored: it is only moved)
     die "$OLD_DEST is a git checkout with $why — refusing to migrate it (the mirror that follows would erase that); commit and push, or move it away, first"
   else
     MIGRATED=1

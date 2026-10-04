@@ -297,9 +297,11 @@ EOF
         git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t stash -q
         ;;
       unpushed) git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m WIP ;;
-      tagged) # a tag of your own does not make a commit published
+      tagged) # a tag of your own does not make a commit published — not
+        # even one that starts like a release
         git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m WIP
         git -C "$CMM_PREFIX" tag before-refactor
+        git -C "$CMM_PREFIX" tag v9.9.9-mine
         ;;
     esac
     run "$INSTALL"
@@ -340,8 +342,8 @@ EOF
 
 @test "a shallow clone of a release tag (no remote branches at all) is upgraded" {
   git clone -q --bare "$BATS_FILE_TMPDIR/src-cache/origin.git" "$SANDBOX/origin.git"
-  git -C "$SANDBOX/origin.git" tag v0.0.1-test HEAD
-  git clone -q --depth 1 --branch v0.0.1-test "file://$SANDBOX/origin.git" "$CMM_PREFIX" 2>/dev/null
+  git -C "$SANDBOX/origin.git" tag v0.0.1 HEAD
+  git clone -q --depth 1 --branch v0.0.1 "file://$SANDBOX/origin.git" "$CMM_PREFIX" 2>/dev/null
   run "$INSTALL"
   [ "$status" -eq 0 ]
   [ -f "$CMM_PREFIX/.scrubmac-install" ]

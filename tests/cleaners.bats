@@ -790,6 +790,16 @@ EOF
   [ "$output" = 1209600 ] # rounded up: never relaxed
 }
 
+@test "registry cutoff: an age past the earliest date a Date can hold stops there — never a crash" {
+  need_node
+  run reg cutoff --seconds 20000000000000 --days 7
+  [ "$status" -eq 0 ]
+  [ "$output" = -271821-04-20T00:00:00Z ]
+  run reg cutoff --minutes 1000000000000000
+  [ "$status" -eq 0 ]
+  [ "$output" = -271821-04-20T00:00:00Z ]
+}
+
 @test "registry cutoff --ceil-days: whole days back, rounded up" {
   need_node
   run reg cutoff --days 7 --ceil-days
@@ -844,6 +854,50 @@ EOF
   printf 'install = {\n  linker = "isolated"\n}\n[run]\nminimumReleaseAge = 99999999\n' >"$SANDBOX/closed.toml"
   run reg bunfig-age "$SANDBOX/closed.toml" # the table ends where its braces balance
   [ "$output" = 0 ]
+}
+
+@test "registry bunfig-age: multi-line strings and arrays are read as Bun reads them; no trustworthy integer says 'unsure'" {
+  need_node
+  # each one Bun 1.4.2 holds to 1209600 seconds
+  printf '[install]\nfoo = """\n[bar]\n"""\nminimumReleaseAge = 1209600\n' >"$SANDBOX/ml-basic.toml"
+  printf "[install]\nfoo = '''\n[bar]\n'''\nminimumReleaseAge = 1209600\n" >"$SANDBOX/ml-literal.toml"
+  printf 'x = { y = """a"b""" }\n[install]\nminimumReleaseAge = 1209600\n' >"$SANDBOX/ml-quote.toml"
+  printf "x = { y = '''it's''' }\n[install]\nminimumReleaseAge = 1209600\n" >"$SANDBOX/ml-apostrophe.toml"
+  printf '[install]\nfoo = [\n  [ "a" ]\n]\nminimumReleaseAge = 1209600\n' >"$SANDBOX/nested-array.toml"
+  printf 'x = {y="""a""}"""}\n[install]\nminimumReleaseAge = 1209600\n' >"$SANDBOX/ml-brace.toml"
+  printf 'x = """a""""\n[install]\nminimumReleaseAge = 1209600\n' >"$SANDBOX/ml-quote-last.toml" # a" then the close
+  printf "x = 'C:\\\\'\n[install]\nminimumReleaseAge = 1209600\n" >"$SANDBOX/literal-backslash.toml" # no escapes in ''
+  printf '\xef\xbb\xbfinstall = {\r\n  minimumReleaseAge = 1209600, # c\r\n}\r\n' >"$SANDBOX/bom-crlf.toml"
+  local f
+  for f in ml-basic ml-literal ml-quote ml-apostrophe nested-array ml-brace ml-quote-last literal-backslash bom-crlf; do
+    run reg bunfig-age "$SANDBOX/$f.toml"
+    [ "$output" = 1209600 ] || {
+      echo "$f: $output"
+      false
+    }
+  done
+  printf '[install]\nfoo = """\nminimumReleaseAge = 5\n"""\n' >"$SANDBOX/in-string.toml"
+  run reg bunfig-age "$SANDBOX/in-string.toml" # a key inside a string sets nothing
+  [ "$output" = 0 ]
+  printf '[install]\nminimumReleaseAge = nan\n' >"$SANDBOX/nan.toml"
+  run reg bunfig-age "$SANDBOX/nan.toml" # Bun holds nothing back for nan
+  [ "$output" = 0 ]
+  # inf (Bun: never old enough), past 1e12 (no cutoff date), not a number,
+  # and a file that stops making sense before the key: no integer to trust
+  printf '[install]\nminimumReleaseAge = inf\n' >"$SANDBOX/inf.toml"
+  printf '[install]\nminimumReleaseAge = 1e400\n' >"$SANDBOX/e400.toml"
+  printf '[install]\nminimumReleaseAge = 20_000_000_000_000\n' >"$SANDBOX/huge.toml"
+  printf '[install]\nminimumReleaseAge = "1209600"\n' >"$SANDBOX/string.toml"
+  printf 'x = {\n[install]\nminimumReleaseAge = 1209600\n' >"$SANDBOX/unbalanced.toml"
+  for f in inf e400 huge string unbalanced; do
+    run reg bunfig-age "$SANDBOX/$f.toml"
+    [ "$output" = unsure ] || {
+      echo "$f: $output"
+      false
+    }
+  done
+  run reg bunfig-age "$SANDBOX/ml-basic.toml" "$SANDBOX/inf.toml" # one is enough
+  [ "$output" = unsure ]
 }
 
 @test "registry bunfig-age: the largest install.minimumReleaseAge of the bunfig files given" {
@@ -1133,6 +1187,78 @@ installed_with_before() {
   installed_with_before tool@1.1.0
 }
 
+@test "npm: 11.10–11.13 hide your min-release-age behind the before they make of it — found where npm reads it, it gates as --min-release-age" {
+  need_node
+  npm_fixture
+  npm_globals tool:1.0.0:1.3.0
+  npm_view tool 1.3.0 1.0.0:90 1.1.0:30 1.2.0:10 1.3.0:1
+  # what npm 11.13 reports when min-release-age=7 is set anywhere: no
+  # min-release-age, and a before 7 days back (cut to the second)
+  node -e 'console.log(new Date(Date.now() - 7 * 864e5 - 2000).toString())' >"$SANDBOX/npmfx/config-before"
+  printf 'registry=https://registry.npmjs.org/\nmin-release-age = 7 ; mine\n' >"$SANDBOX/userrc"
+  echo "$SANDBOX/userrc" >"$SANDBOX/npmfx/config-userconfig"
+  NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh # the npmrc npm names
+  [ "$status" -eq 0 ]
+  grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG"
+  refute grep -q -- '--before' "$CALL_LOG" # which these npms refuse next to it
+  [[ "$output" == *"(the 3-day cooldown; npm min-release-age=7)"* ]] || false
+  : >"$CALL_LOG"
+  NPM_VER=11.10.0 run run_cleaner 30-npm.sh # the cooldown off: yours still gates
+  grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG"
+  : >"$CALL_LOG"
+  rm "$SANDBOX/npmfx/config-userconfig" "$SANDBOX/userrc" # no path from npm …
+  printf 'min-release-age=14\n' >"$HOME/.npmrc"                # … ~/.npmrc it is
+  NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh
+  grep -qx 'npm install -g tool@1.1.0 --min-release-age=14' "$CALL_LOG"
+  : >"$CALL_LOG"
+  rm "$HOME/.npmrc"
+  printf 'min-release-age=7.5\n' >"$SANDBOX/globalrc" # the global npmrc, a fraction
+  echo "$SANDBOX/globalrc" >"$SANDBOX/npmfx/config-globalconfig"
+  NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh
+  grep -qx 'npm install -g tool@1.2.0 --min-release-age=8' "$CALL_LOG"
+  : >"$CALL_LOG"
+  NPM_CONFIG_MIN_RELEASE_AGE=14 NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh # the environment beats the files
+  grep -qx 'npm install -g tool@1.1.0 --min-release-age=14' "$CALL_LOG"
+  : >"$CALL_LOG"
+  npm_config_min_release_age=4 NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=7 run run_cleaner 30-npm.sh
+  grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG" # the cooldown's 7 days, stricter
+  : >"$CALL_LOG"
+  rm "$SANDBOX/npmfx/config-globalconfig" "$SANDBOX/globalrc"
+  # no min-release-age anywhere: the before is yours, and --before it is
+  node -e 'console.log(new Date(Date.now() - 20 * 864e5 + 36e5).toString())' >"$SANDBOX/npmfx/config-before"
+  NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh
+  [ "$status" -eq 0 ]
+  installed_with_before tool@1.1.0
+  refute grep -q -- '--min-release-age' "$CALL_LOG"
+}
+
+@test "npm: a min-release-age of 0 still rules out --before on npm 11.10–11.14; one that is not a plain number holds global updates" {
+  need_node
+  npm_fixture
+  npm_globals tool:1.0.0:1.3.0
+  npm_view tool 1.3.0 1.0.0:90 1.1.0:30 1.2.0:10 1.3.0:1
+  echo 0 >"$SANDBOX/npmfx/config-min-release-age" # npm 11.14 shows the 0 …
+  node -e 'console.log(new Date().toString())' >"$SANDBOX/npmfx/config-before" # … and a before of now
+  NPM_VER=11.14.1 CMM_COOLDOWN_DAYS=7 run run_cleaner 30-npm.sh
+  [ "$status" -eq 0 ]
+  grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG"
+  refute grep -q -- '--before' "$CALL_LOG"
+  : >"$CALL_LOG"
+  rm "$SANDBOX/npmfx/config-min-release-age" # npm 11.13 hides it
+  printf 'min-release-age=0\n' >"$HOME/.npmrc"
+  NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=7 run run_cleaner 30-npm.sh
+  grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG"
+  refute grep -q -- '--before' "$CALL_LOG"
+  : >"$CALL_LOG"
+  printf 'min-release-age=1e1\n' >"$HOME/.npmrc" # npm reads 10; this cleaner cannot tell
+  node -e 'console.log(new Date(Date.now() - 10 * 864e5).toString())' >"$SANDBOX/npmfx/config-before"
+  NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=7 CMM_REPORT_FILE="$SANDBOX/report" run run_cleaner 30-npm.sh
+  [ "$status" -eq 0 ]
+  refute grep -q '^npm install' "$CALL_LOG"
+  [[ "$output" == *"global updates held: your npm min-release-age ('1e1') is not a plain number of days"* ]] || false
+  grep -qx $'note\tglobal updates held: npm min-release-age \'1e1\' could not be read' "$SANDBOX/report"
+}
+
 @test "npm: with the cooldown off, your own npm min-release-age still goes through the resolver (never npm update -g)" {
   need_node
   npm_fixture
@@ -1206,7 +1332,8 @@ EOF
 # ---------- pnpm ----------
 
 # pnpm_fixture — a pnpm stub: `--version` prints $PNPM_VER (12.8.1), `config
-# get minimumReleaseAge` $PNPM_MRA (undefined), `ls -g --depth=0 --json`
+# get minimumReleaseAge` $PNPM_MRA (undefined; FAIL: it fails, as pnpm 12 does
+# on a config it cannot load), `ls -g --depth=0 --json`
 # $SANDBOX/pnpm-ls.json (pnpm_globals writes it; none by default), `outdated
 # -g --format json` $SANDBOX/pnpm-outdated.json (unreadable when absent:
 # every global is looked up), `bin -g` its global bin directory. Every call
@@ -1214,10 +1341,10 @@ EOF
 # $SANDBOX/pnpm-cwd. With the npm fixture, the registry knows pnpm (the
 # running version is the newest) unless a test says otherwise.
 # PNPM_BIN_OFF=1: that directory is not on PATH, and pnpm refuses global
-# commands as the real ones do — pnpm 11 all of them, pnpm 12 all but ls and
-# outdated (wrapped, with a code), pnpm 9/10 all (on stdout: PNPM_HOME set).
+# commands as the real ones do (on stderr) — pnpm 11 all of them, pnpm 12 all
+# but ls and outdated (wrapped, with a code), pnpm 9/10 all (PNPM_HOME set).
 # PNPM_NO_GLOBAL_BIN=1: there is none (pnpm <= 10 without PNPM_HOME) — `bin
-# -g` prints nothing, and `add -g` fails.
+# -g` prints nothing, and `add -g` fails (on stdout, as pnpm 10 does).
 pnpm_fixture() {
   [ -f "$SANDBOX/pnpm-ls.json" ] || printf '[{"path":"%s","private":true,"dependencies":{}}]' "$SANDBOX/pnhome/global/v11" >"$SANDBOX/pnpm-ls.json"
   if [ -d "$SANDBOX/npmfx" ]; then
@@ -1240,7 +1367,7 @@ case " $* " in
           exit 1
           ;;
         *)
-          printf ' ERROR  The configured global bin directory "%s" is not in PATH\nFor help, run: pnpm help %s\n' "$HOME/Library/pnpm" "$1"
+          printf ' ERROR  The configured global bin directory "%s" is not in PATH\nFor help, run: pnpm help %s\n' "$HOME/Library/pnpm" "$1" >&2
           exit 1
           ;;
       esac
@@ -1252,7 +1379,10 @@ case " $* " in
 esac
 case "$1" in
   --version) echo "${PNPM_VER:-12.8.1}" ;;
-  config) echo "${PNPM_MRA:-undefined}" ;;
+  config)
+    [ "${PNPM_MRA:-}" = FAIL ] && { echo 'Error: invalid u64' >&2; exit 1; }
+    echo "${PNPM_MRA:-undefined}"
+    ;;
   bin) [ -n "${PNPM_NO_GLOBAL_BIN:-}" ] || echo "$HOME/Library/pnpm/bin" ;;
   ls) cat "$SANDBOX/pnpm-ls.json" ;;
   root) echo "${PNPM_GLOBAL_ROOT:-$SANDBOX/pnhome/global/v11}" ;;
@@ -1396,7 +1526,7 @@ EOF
   done
 }
 
-@test "pnpm: pnpm 10 with no global bin directory (no PNPM_HOME, as in a scheduled run) cannot 'pnpm add -g': re-adds held, 'pnpm update -g' runs" {
+@test "pnpm: pnpm 10 with no global bin directory (no PNPM_HOME, as in an older schedule) cannot 'pnpm add -g': re-adds held, 'pnpm update -g' runs" {
   need_node
   npm_fixture
   pnpm10_globals ms@2.1.1
@@ -1406,8 +1536,8 @@ EOF
   CMM_COOLDOWN_DAYS=7 CMM_REPORT_FILE="$SANDBOX/report" run run_cleaner 31-pnpm.sh
   [ "$status" -eq 0 ]
   refute grep -q '^pnpm add' "$CALL_LOG"
-  [[ "$output" == *"not re-adding ms@2.1.3: pnpm has no global bin directory here"* ]] || false
-  grep -qx $'note\t1 global update(s) held: pnpm has no global bin directory here — run \'pnpm config set global-bin-dir "$PNPM_HOME"\' once' "$SANDBOX/report"
+  [[ "$output" == *"not re-adding ms@2.1.3: pnpm has no global bin directory here (PNPM_HOME is not set here)"*"run 'scrubmac schedule' again from a shell where PNPM_HOME is set"* ]] || false
+  grep -qx $'note\t1 global update(s) held: PNPM_HOME is not set here, so pnpm has no global bin directory — run \'scrubmac schedule\' again from a shell where it is' "$SANDBOX/report"
   : >"$CALL_LOG"
   run run_cleaner 31-pnpm.sh # no cooldown: `pnpm update -g` needs no global bin directory
   [ "$status" -eq 0 ]
@@ -1481,6 +1611,34 @@ EOF
   PNPM_MRA=20160 run run_cleaner 31-pnpm.sh # cooldown off: still never a plain update
   grep -qx 'pnpm add -g tool@^1.1.0 --config.minimum-release-age=20160' "$CALL_LOG"
   refute grep -q '^pnpm update' "$CALL_LOG"
+}
+
+@test "pnpm: a minimumReleaseAge that is no number of minutes holds the self-update and global updates; a fraction counts, rounded up" {
+  need_node
+  npm_fixture
+  pnpm_globals g1=tool@1.0.0
+  npm_view tool 1.3.0 1.0.0:90 1.1.0:30 1.2.0:10 1.3.0:1
+  pnpm_fixture
+  local v
+  # pnpm 10 and 11 fail every update on these; pnpm 12 cannot load them at all (FAIL)
+  for v in Infinity 1e+21 99999999999999999999 two-weeks FAIL; do
+    : >"$CALL_LOG"
+    PNPM_MRA="$v" CMM_COOLDOWN_DAYS=7 CMM_REPORT_FILE="$SANDBOX/report-$v" run run_cleaner 31-pnpm.sh
+    [ "$status" -eq 0 ]
+    refute grep -Eq '^pnpm (add|update|self-update)' "$CALL_LOG" # --config.minimum-release-age=10080 would relax it
+    grep -qx 'pnpm store prune' "$CALL_LOG"
+    grep -qx $'note\tpnpm updates held: pnpm minimumReleaseAge could not be read' "$SANDBOX/report-$v"
+  done
+  [[ "$output" == *"pnpm self-update and global updates held: pnpm's minimumReleaseAge cannot be read as a number of minutes ('pnpm config get minimumReleaseAge' failed)"* ]] || false
+  : >"$CALL_LOG"
+  PNPM_MRA=Infinity run run_cleaner 31-pnpm.sh # the cooldown off too: a plain 'pnpm update -g' fails on it
+  [ "$status" -eq 0 ]
+  refute grep -Eq '^pnpm (add|update|self-update)' "$CALL_LOG"
+  [[ "$output" == *"cannot be read as a number of minutes (it is 'Infinity')"* ]] || false
+  : >"$CALL_LOG"
+  PNPM_MRA=20160.5 CMM_COOLDOWN_DAYS=7 run run_cleaner 31-pnpm.sh # pnpm 10 and 11 honor a fraction
+  [ "$status" -eq 0 ]
+  grep -qx 'pnpm add -g tool@^1.1.0 --config.minimum-release-age=20161' "$CALL_LOG"
 }
 
 @test "pnpm: pnpm 11's built-in one-day minimumReleaseAge is the floor of the gate" {
@@ -1971,6 +2129,29 @@ EOF
   [ "$status" -eq 0 ]
   grep -qx 'bun update -g tool@1.1.0 --minimum-release-age 1209600' "$CALL_LOG"
   [[ "$output" == *"(the 7-day cooldown; bunfig minimumReleaseAge=1209600)"* ]] || false
+}
+
+@test "bun: a bunfig minimumReleaseAge with no integer to trust (inf, too large, unreadable) holds bun upgrade and global updates" {
+  need_node
+  npm_fixture
+  bun_fixture
+  bun_dep tool '^1.0.0' 1.0.0
+  npm_view tool 1.3.0 1.0.0:90 1.1.0:30 1.2.0:10 1.3.0:1
+  bun_release 1.4.2 30
+  mkdir -p "$XDG_CONFIG_HOME"
+  printf '[install]\nminimumReleaseAge = inf # never old enough\n' >"$XDG_CONFIG_HOME/.bunfig.toml"
+  CMM_COOLDOWN_DAYS=7 CMM_REPORT_FILE="$SANDBOX/report" run run_cleaner 33-bun.sh
+  [ "$status" -eq 0 ]
+  refute grep -Eq '^bun (update|upgrade)' "$CALL_LOG" # --minimum-release-age 604800 would relax it
+  [[ "$output" == *"bun upgrade and global updates held: your bunfig's install.minimumReleaseAge cannot be read as a number of seconds here"* ]] || false
+  grep -qx $'note\tBun updates held: bunfig install.minimumReleaseAge could not be read' "$SANDBOX/report"
+  grep -qx 'bun pm cache rm' "$CALL_LOG" # cleaning is unaffected
+  : >"$CALL_LOG"
+  printf 'x = {\n[install]\nminimumReleaseAge = 1209600\n' >"$SANDBOX/bunglobal/bunfig.toml" # the global dir's, unbalanced
+  rm "$XDG_CONFIG_HOME/.bunfig.toml"
+  run run_cleaner 33-bun.sh # the cooldown off: a plain 'bun update -g' would fail on it
+  [ "$status" -eq 0 ]
+  refute grep -Eq '^bun (update|upgrade)' "$CALL_LOG"
 }
 
 @test "bun: the global bunfig is the one Bun reads — ~/.bunfig.toml only without XDG_CONFIG_HOME" {
@@ -3406,7 +3587,7 @@ DRYRUN_ALLOW="$STATUS_ALLOW"'
  --dry-run( |$)
 ^gem cleanup -d$
 ^[a-z-]+ (--version|--help)$
-^npm (outdated -g --json|ls -g --long --json|root -g|view .+|config get (min-release-age|before))$
+^npm (outdated -g --json|ls -g --long --json|root -g|view .+|config get (min-release-age|before|userconfig|globalconfig))$
 ^pnpm (--version|ls -g --depth=0 --json|outdated -g --format json|config get minimumReleaseAge|root -g|bin -g)$
 ^bun (--version|outdated -g)$
 ^curl -fsSL --max-time 30 -K - -H Accept: application/vnd\.github\.v3\+json https://api\.github\.com/repos/Jarred-Sumner/bun-releases-for-updater/releases/latest$
