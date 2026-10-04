@@ -96,12 +96,15 @@ npm_skip_note() {
   esac
 }
 
-# npm_hidden_mra — the min-release-age npm 11.10–11.13 read but no longer
-# report: once read, they delete it and keep only the `before` they derive
-# from it, so `npm config get min-release-age` says null. Found the way npm
-# finds it (lib/registry.cjs npm-min-release-age: the environment in any
-# case, then the userconfig and globalconfig npmrc files `npm config get`
-# names, read with npm's own ini rules): the number npm uses, or nothing;
+# npm_hidden_mra — the min-release-age npm 11.10–11.14 apply when `npm config
+# get min-release-age` says null: 11.10–11.13 delete it once read (keeping
+# only the `before` they derive from it), and a level set to null hides a
+# lower level's value from `npm config get` — yet both npms refuse a --before
+# while any level sets it, even to null. Found the way npm finds it
+# (lib/registry.cjs npm-min-release-age: the environment in any case, the
+# userconfig, globalconfig and npm's own npmrc files, read with npm's own
+# ini rules): the days npm holds back, "0" when every level that sets it
+# says null, "NaN" for a value npm cannot read, nothing when none sets it;
 # "?" when it could not be looked up.
 npm_hidden_mra() {
   local user global
@@ -123,18 +126,18 @@ npm_hidden_mra() {
 # Those npms also report a `before` of their own making while
 # min-release-age is set — now minus those days, cut to the second, so a
 # second older: it is not yours, and counting it would round up to a day
-# more than asked for. npm 11.10–11.13 even hide min-release-age itself
-# behind that `before` (npm_hidden_mra finds it).
+# more than asked for. When `npm config get` says null, those npms may still
+# apply one — or refuse a --before over a null — so npm_hidden_mra looks.
 npm_policy() {
   local npmv='' mra before why='' days
   mra="$(npm config get min-release-age 2>/dev/null)" || mra=''
   before="$(npm config get before 2>/dev/null)" || before=''
   case "$mra" in null | undefined) mra='' ;; esac
   case "$before" in null | undefined) before='' ;; esac
-  if [ -z "$mra" ] && [ -n "$before" ]; then
+  if [ -z "$mra" ]; then
     npmv="$(npm --version 2>/dev/null)" || npmv=0
-    if cmm_version_ge "$npmv" 11.10 && ! cmm_version_ge "$npmv" 11.14; then
-      mra="$(npm_hidden_mra)" # behind that before, perhaps
+    if cmm_version_ge "$npmv" 11.10 && ! cmm_version_ge "$npmv" 11.15; then
+      mra="$(npm_hidden_mra)" # hidden, or set to null somewhere
     fi
   fi
   case "$mra" in

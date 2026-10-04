@@ -166,6 +166,7 @@ cmm__schedule_env() {
   here="$(pwd -P 2>/dev/null || pwd)"
   home="$(cmm_canon_path "$HOME" 2>/dev/null || printf '%s' "$HOME")"
   case "$home/" in "${here%/}"/*) project=0 ;; esac
+  case "${HOME%/}/" in "${PWD%/}"/*) project=0 ;; esac # (a symlinked home's logical parent)
   for key in $CMM__SCHEDULE_ENV; do
     val="${!key:-}"
     case "$val" in /*) ;; *) continue ;; esac

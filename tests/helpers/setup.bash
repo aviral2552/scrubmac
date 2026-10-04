@@ -96,6 +96,9 @@ setup_sandbox() {
   export CMM_APPLE_STUB_DIR="$SANDBOX/applestubs"
   export CMM_BREW_LOCATIONS="$SANDBOX/no-homebrew/bin/brew"
   export CMM_LINK_DIRS="$HOME/.local/bin" # never the host's /usr/local/bin
+  # npm's prefix fallbacks (PREFIX/etc/npmrc) must not reach the host's
+  export PREFIX="$SANDBOX/prefix"
+  unset DESTDIR
   export STATE_DIR="$HOME/.local/state/scrubmac"
   export LOCK="$STATE_DIR/run.lock"
   # A TIMEOUT for tests that look for its watchdog after the run (see

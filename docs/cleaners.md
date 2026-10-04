@@ -132,22 +132,28 @@ not fail the run.
   be provided when using --before"; fixed in 11.15.0). Those npms also
   report a `before` of their own making while `min-release-age` is set (now
   minus those days, cut to the second): it is not counted as yours —
-  rounded up, it would make the gate a day stricter than asked for. npm
-  11.10–11.13 go further and hide `min-release-age` itself
-  (`npm config get min-release-age` says `null`), so when one of those
-  reports a `before`, scrubmac reads the setting the way npm does
-  (`lib/registry.cjs npm-min-release-age`): `npm_config_*` environment
-  names in any case, the last one winning as in npm, then the userconfig,
-  then the globalconfig npmrc — each with npm's own ini rules (a BOM, CRLF,
-  `;`/`#` comments, quotes, `key[]` lists, a `[section]` ending the top
-  level, `${VAR}`s, numbers such as `1.4e1`), a value npm drops as invalid
-  passed over. The files are the ones `npm config get` names; when it names
-  none (npm will not print a path its redaction would change), those the
-  environment or the user npmrc names, else `~/.npmrc` and
-  `<prefix>/etc/npmrc`. A `min-release-age` that gives no finite number of
-  days (`Infinity`, a list of several) holds global updates, with a note
-  and a summary note: no cutoff passed instead could be known not to relax
-  it.
+  rounded up, it would make the gate a day stricter than asked for. When
+  `npm config get min-release-age` says `null` on those npms, the setting
+  may still be there: 11.10–11.13 hide it once read, and a level set to
+  `null` hides the value of a level below it — which still applies — while
+  npm still refuses a `--before` over a `null`. So scrubmac then reads the
+  setting the way npm does (`lib/registry.cjs npm-min-release-age`): its
+  levels are the `npm_config_*` environment names in any case (the last one
+  winning, as in npm), the userconfig, the globalconfig and npm's own npmrc
+  (beside its package), each with npm's own ini rules (a BOM, CRLF, `;`/`#`
+  comments, quotes, `key[]` lists, a `[section]` ending the top level,
+  `${VAR}`s, numbers such as `1.4e1`); a `null` level lets the ones below
+  show through, and one that sets nothing else still makes the gate
+  `--min-release-age=<cooldown>`. The files are the ones `npm config get`
+  names; when it names none (npm will not print a path its redaction would
+  change), those the environment, the user npmrc or npm's own names, else
+  `~/.npmrc` and `<prefix>/etc/npmrc`. A value npm cannot read at the
+  highest level that sets one (`7d`, an environment `null`, a `${VAR}` that
+  expands to text) is not passed over: npm 11.10–11.13 turn it into an
+  Invalid Date and fail every command. Such a value, and one that gives no
+  finite number of days (`Infinity`, a list of several), holds global
+  updates, with a note and a summary note: no cutoff passed instead could
+  be known not to relax it.
 - `npm update -g <pkg>…` — when there is no cutoff (cooldown off, no npm
   setting of your own), for exactly those globals after a
   `npm view <pkg> versions dist-tags --json` registry check (not run when

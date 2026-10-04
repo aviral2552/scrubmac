@@ -166,6 +166,17 @@ EOF
   done
 }
 
+@test "scheduled from the logical parent of a symlinked home, tool homes are still carried" {
+  mkdir -p "$SANDBOX/real/x" "$SANDBOX/users"
+  ln -s "$SANDBOX/real/x" "$SANDBOX/users/x"
+  export HOME="$SANDBOX/users/x"
+  cd "$SANDBOX/users"
+  PNPM_HOME="$HOME/Library/pnpm" run "$CMM" schedule weekly
+  [ "$status" -eq 0 ]
+  grep -q '<key>PNPM_HOME</key>' "$HOME/Library/LaunchAgents/com.github.aviral2552.scrubmac.plist"
+  [[ "$output" != *"not carried"* ]] || false
+}
+
 @test "a tool home under a symlinked path inside the directory you schedule from is still caught" {
   mkdir -p "$SANDBOX/proj/.direnv/ruby"
   ln -s "$SANDBOX/proj" "$SANDBOX/proj-link"
