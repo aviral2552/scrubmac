@@ -156,20 +156,24 @@ CMM__SCHEDULE_ENV='XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CACHE_HOME C
 
 # cmm__schedule_env [local] — the CMM__SCHEDULE_ENV variables to carry, one
 # KEY per line: set here to an absolute path, and not inside the directory
-# you schedule from (unless that is your home) — such a value is a
-# project's own (direnv's GEM_HOME, a project CARGO_HOME), which `local`
-# lists instead.
+# you schedule from (unless that is your home, or one of its parents) —
+# such a value is a project's own (direnv's GEM_HOME, a project
+# CARGO_HOME), which `local` lists instead. Paths compare in canonical form
+# (a symlinked home).
 cmm__schedule_env() {
-  local key val here home inside want=0
+  local key val canon here home inside project=1 want=0
   [ "${1:-}" = local ] && want=1
   here="$(pwd -P 2>/dev/null || pwd)"
   home="$(cmm_canon_path "$HOME" 2>/dev/null || printf '%s' "$HOME")"
+  case "$home/" in "${here%/}"/*) project=0 ;; esac
   for key in $CMM__SCHEDULE_ENV; do
     val="${!key:-}"
     case "$val" in /*) ;; *) continue ;; esac
     inside=0
-    if [ "$here" != "$home" ] && [ "$here" != / ]; then
-      case "$val/" in "$here"/* | "$PWD"/*) inside=1 ;; esac
+    if [ "$project" = 1 ]; then
+      canon="$(cmm_canon_path "$val" 2>/dev/null || printf '%s' "$val")"
+      case "$canon/" in "$here"/*) inside=1 ;; esac
+      case "$val/" in "$PWD"/*) inside=1 ;; esac
     fi
     [ "$inside" = "$want" ] && printf '%s\n' "$key"
   done

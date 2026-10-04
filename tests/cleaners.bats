@@ -790,6 +790,78 @@ EOF
   [ "$output" = 1209600 ] # rounded up: never relaxed
 }
 
+@test "registry npm-min-release-age: an npmrc read the way npm's ini reads it (each one checked against npm 11.13)" {
+  need_node
+  local rc="$SANDBOX/userrc" v want
+  # file contents and what npm 11.13 applies
+  while IFS='|' read -r v want; do
+    printf '%b' "$v" >"$rc"
+    run reg npm-min-release-age --user "$rc" --global /nonexistent
+    [ "$status" -eq 0 ]
+    [ "$output" = "$want" ] || {
+      echo "$v: $output (npm: $want)"
+      false
+    }
+  done <<'EOF'
+min-release-age=7 \n|7
+min-release-age=7\r\n|7
+\xef\xbb\xbfmin-release-age=7\n|7
+min-release-age[]=7\n|7
+min-release-age[]=7\nmin-release-age[]=14\n|NaN
+  [x]\nmin-release-age=7\n|7
+min-release-age=7\nmin-release-age=14\n|14
+min-release-age=7 ; mine\n|7
+min-release-age=7 # mine\n|7
+ min-release-age = " 7 " \n|7
+"min-release-age"='7'\n|7
+min-release-age=1.4e1\n|14
+min-release-age=0x7\n|7
+min-release-age=\n|0
+min-release-age\n|1
+; min-release-age=7\n|
+[x]\nmin-release-age=7\n|
+EOF
+  printf 'min-release-age=${MRA_DAYS}\n' >"$rc"
+  MRA_DAYS=5 run reg npm-min-release-age --user "$rc" --global /nonexistent
+  [ "$output" = 5 ]
+}
+
+@test "registry npm-min-release-age: the environment in any case (the last one wins), then the user npmrc, then the global one wherever npm keeps it" {
+  need_node
+  printf 'min-release-age=7\n' >"$SANDBOX/userrc"
+  printf 'min-release-age=9\n' >"$SANDBOX/globalrc"
+  run reg npm-min-release-age --user "$SANDBOX/userrc" --global "$SANDBOX/globalrc"
+  [ "$output" = 7 ] # the user's beats the global one
+  run env NPM_CONFIG_min_release_age=14 "$REAL_NODE" "$REPO_ROOT/lib/registry.cjs" npm-min-release-age --user "$SANDBOX/userrc"
+  [ "$output" = 14 ]
+  run env npm_config_min_release_age=3 NPM_CONFIG_MIN_RELEASE_AGE=14 "$REAL_NODE" "$REPO_ROOT/lib/registry.cjs" npm-min-release-age
+  [ "$output" = 14 ]
+  run env NPM_CONFIG_MIN_RELEASE_AGE=14 npm_config_min_release_age=3 "$REAL_NODE" "$REPO_ROOT/lib/registry.cjs" npm-min-release-age
+  [ "$output" = 3 ]
+  run env npm_config_min_release_age= Npm_Config_Min_Release_Age=abc "$REAL_NODE" "$REPO_ROOT/lib/registry.cjs" npm-min-release-age --user "$SANDBOX/userrc"
+  [ "$output" = 7 ] # empty and invalid ones are passed over
+  printf '[sec]\nmin-release-age=7\n' >"$SANDBOX/userrc" # a [section]: not the top level
+  run reg npm-min-release-age --user "$SANDBOX/userrc" --global "$SANDBOX/globalrc"
+  [ "$output" = 9 ]
+  # no global path from npm: the environment's, the user npmrc's, or PREFIX/etc/npmrc
+  run env npm_config_globalconfig="$SANDBOX/globalrc" "$REAL_NODE" "$REPO_ROOT/lib/registry.cjs" npm-min-release-age --user "$SANDBOX/userrc" --global ''
+  [ "$output" = 9 ]
+  printf 'globalconfig=%s\n' "$SANDBOX/globalrc" >"$SANDBOX/named"
+  run reg npm-min-release-age --user "$SANDBOX/named" --global null
+  [ "$output" = 9 ]
+  mkdir -p "$SANDBOX/pfx/etc" "$SANDBOX/builtin/etc"
+  printf 'min-release-age=11\n' >"$SANDBOX/pfx/etc/npmrc"
+  run env NPM_CONFIG_PREFIX="$SANDBOX/pfx" "$REAL_NODE" "$REPO_ROOT/lib/registry.cjs" npm-min-release-age --user /nonexistent
+  [ "$output" = 11 ]
+  printf 'prefix=%s\n' "$SANDBOX/pfx" >"$SANDBOX/named"
+  run reg npm-min-release-age --user "$SANDBOX/named"
+  [ "$output" = 11 ]
+  npm_fixture # npm's own npmrc, beside its package.json, names the prefix
+  printf 'prefix=%s\n' "$SANDBOX/pfx" >"$SANDBOX/npmpkg/npmrc"
+  run reg npm-min-release-age --user /nonexistent --npm "$STUB_BIN/npm"
+  [ "$output" = 11 ]
+}
+
 @test "registry cutoff: an age past the earliest date a Date can hold stops there — never a crash" {
   need_node
   run reg cutoff --seconds 20000000000000 --days 7
@@ -898,6 +970,39 @@ EOF
   done
   run reg bunfig-age "$SANDBOX/ml-basic.toml" "$SANDBOX/inf.toml" # one is enough
   [ "$output" = unsure ]
+}
+
+@test "registry bunfig-age: escapes in quoted keys are decoded as Bun decodes them; one Bun rejects is 'unsure'" {
+  need_node
+  local f
+  # each one Bun 1.4.2 holds to 1209600 seconds
+  printf '%s\n' '[install]' '"minimumReleaseAge" = 1209600' >"$SANDBOX/u4.toml"
+  printf '%s\n' '[install]' '"\U0000006dinimumReleaseAge" = 1209600' >"$SANDBOX/u8.toml"
+  printf '%s\n' 'install = { "minimum\x52eleaseAge" = 1209600 }' >"$SANDBOX/x2.toml"
+  printf '%s\n' '"install".minimumReleaseAge = 1209600' >"$SANDBOX/dotted.toml"
+  printf '%s\n' '[ "install" ]' 'minimumReleaseAge = 1209600' >"$SANDBOX/header.toml"
+  for f in u4 u8 x2 dotted header; do
+    run reg bunfig-age "$SANDBOX/$f.toml"
+    [ "$output" = 1209600 ] || {
+      echo "$f: $output"
+      false
+    }
+  done
+  printf '%s\n' '[install]' "'minimum\\u0052eleaseAge' = 1209600" >"$SANDBOX/literal.toml"
+  run reg bunfig-age "$SANDBOX/literal.toml" # no escapes in a 'literal' key: another key
+  [ "$output" = 0 ]
+  # escapes Bun rejects (and with them the file)
+  printf '%s\n' '[install]' '"minimum\qReleaseAge" = 1209600' >"$SANDBOX/bad.toml"
+  printf '%s\n' '[install]' '"minimum\u00ZZReleaseAge" = 1209600' >"$SANDBOX/badhex.toml"
+  printf '%s\n' '[install]' '"minimum\uD800ReleaseAge" = 1209600' >"$SANDBOX/surrogate.toml"
+  printf '%s\n' 'x = {' '[install]' '"minimum\u0052eleaseAge" = 1209600' >"$SANDBOX/after-break.toml" # read no further
+  for f in bad badhex surrogate after-break; do
+    run reg bunfig-age "$SANDBOX/$f.toml"
+    [ "$output" = unsure ] || {
+      echo "$f: $output"
+      false
+    }
+  done
 }
 
 @test "registry bunfig-age: the largest install.minimumReleaseAge of the bunfig files given" {
@@ -1206,6 +1311,11 @@ installed_with_before() {
   NPM_VER=11.10.0 run run_cleaner 30-npm.sh # the cooldown off: yours still gates
   grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG"
   : >"$CALL_LOG"
+  printf '\xef\xbb\xbfmin-release-age=7 \r\n' >"$SANDBOX/userrc" # a BOM, a blank, CRLF: npm's ini reads 7
+  NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh
+  grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG"
+  refute grep -q -- '--before' "$CALL_LOG"
+  : >"$CALL_LOG"
   rm "$SANDBOX/npmfx/config-userconfig" "$SANDBOX/userrc" # no path from npm …
   printf 'min-release-age=14\n' >"$HOME/.npmrc"                # … ~/.npmrc it is
   NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh
@@ -1220,6 +1330,9 @@ installed_with_before() {
   NPM_CONFIG_MIN_RELEASE_AGE=14 NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh # the environment beats the files
   grep -qx 'npm install -g tool@1.1.0 --min-release-age=14' "$CALL_LOG"
   : >"$CALL_LOG"
+  NPM_CONFIG_min_release_age=14 NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh # in any case
+  grep -qx 'npm install -g tool@1.1.0 --min-release-age=14' "$CALL_LOG"
+  : >"$CALL_LOG"
   npm_config_min_release_age=4 NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=7 run run_cleaner 30-npm.sh
   grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG" # the cooldown's 7 days, stricter
   : >"$CALL_LOG"
@@ -1232,7 +1345,7 @@ installed_with_before() {
   refute grep -q -- '--min-release-age' "$CALL_LOG"
 }
 
-@test "npm: a min-release-age of 0 still rules out --before on npm 11.10–11.14; one that is not a plain number holds global updates" {
+@test "npm: a min-release-age of 0 still rules out --before on npm 11.10–11.14; one that is no finite number of days holds global updates" {
   need_node
   npm_fixture
   npm_globals tool:1.0.0:1.3.0
@@ -1250,13 +1363,17 @@ installed_with_before() {
   grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG"
   refute grep -q -- '--before' "$CALL_LOG"
   : >"$CALL_LOG"
-  printf 'min-release-age=1e1\n' >"$HOME/.npmrc" # npm reads 10; this cleaner cannot tell
-  node -e 'console.log(new Date(Date.now() - 10 * 864e5).toString())' >"$SANDBOX/npmfx/config-before"
+  printf 'min-release-age=1.4e1\n' >"$HOME/.npmrc" # npm reads 14
+  NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=7 run run_cleaner 30-npm.sh
+  grep -qx 'npm install -g tool@1.1.0 --min-release-age=14' "$CALL_LOG"
+  : >"$CALL_LOG"
+  printf 'min-release-age=Infinity\n' >"$HOME/.npmrc" # npm reads it, but it makes no date
+  echo 'Invalid Date' >"$SANDBOX/npmfx/config-before"
   NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=7 CMM_REPORT_FILE="$SANDBOX/report" run run_cleaner 30-npm.sh
   [ "$status" -eq 0 ]
   refute grep -q '^npm install' "$CALL_LOG"
-  [[ "$output" == *"global updates held: your npm min-release-age ('1e1') is not a plain number of days"* ]] || false
-  grep -qx $'note\tglobal updates held: npm min-release-age \'1e1\' could not be read' "$SANDBOX/report"
+  [[ "$output" == *"global updates held: your npm min-release-age ('Infinity') is not a plain number of days"* ]] || false
+  grep -qx $'note\tglobal updates held: npm min-release-age \'Infinity\' could not be read' "$SANDBOX/report"
 }
 
 @test "npm: with the cooldown off, your own npm min-release-age still goes through the resolver (never npm update -g)" {

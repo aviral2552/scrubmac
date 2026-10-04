@@ -98,41 +98,17 @@ npm_skip_note() {
 
 # npm_hidden_mra — the min-release-age npm 11.10–11.13 read but no longer
 # report: once read, they delete it and keep only the `before` they derive
-# from it, so `npm config get min-release-age` says null. Looked up where npm
-# reads it, highest precedence first: the environment
-# (npm_config_min_release_age, in either case), then the userconfig and
-# globalconfig files `npm config get` names — or, when it names no file (npm
-# will not print a path its redaction would change, a UUID in it, say), the
-# ones the environment names, ~/.npmrc for the user's. The value as written
-# (an empty one is 0); nothing when none sets it.
+# from it, so `npm config get min-release-age` says null. Found the way npm
+# finds it (lib/registry.cjs npm-min-release-age: the environment in any
+# case, then the userconfig and globalconfig npmrc files `npm config get`
+# names, read with npm's own ini rules): the number npm uses, or nothing;
+# "?" when it could not be looked up.
 npm_hidden_mra() {
-  local v k f
-  for v in "${npm_config_min_release_age:-}" "${NPM_CONFIG_MIN_RELEASE_AGE:-}"; do
-    if [ -n "$v" ]; then
-      printf '%s\n' "$v"
-      return 0
-    fi
-  done
-  for k in userconfig globalconfig; do
-    f="$(npm config get "$k" 2>/dev/null)" || f=''
-    if [ ! -f "$f" ]; then
-      case "$k" in
-        userconfig) f="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}}" ;;
-        *) f="${npm_config_globalconfig:-${NPM_CONFIG_GLOBALCONFIG:-}}" ;;
-      esac
-    fi
-    [ -f "$f" ] || continue
-    v="$(awk '/^[[:space:]]*\[/ { exit }
-      /^[[:space:]]*["\047]?min-release-age["\047]?[[:space:]]*=/ {
-        v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*[;#].*$/, "", v)
-        gsub(/^["\047]|["\047]$/, "", v); last = v; found = 1 }
-      END { if (found) print (last == "" ? 0 : last) }' "$f")"
-    if [ -n "$v" ]; then
-      printf '%s\n' "$v"
-      return 0
-    fi
-  done
-  return 0
+  local user global
+  user="$(npm config get userconfig 2>/dev/null)" || user=''
+  global="$(npm config get globalconfig 2>/dev/null)" || global=''
+  node "$REGISTRY_CJS" npm-min-release-age --user "$user" --global "$global" --npm "$(command -v npm)" 2>/dev/null ||
+    printf '?\n'
 }
 
 # npm_policy DAYS — the cutoff to hold updates to (NPM_CUTOFF, an ISO date,

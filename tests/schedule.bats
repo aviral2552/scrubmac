@@ -155,6 +155,26 @@ EOF
   [[ "$output" != *"also:"*CMM_STATE_DIR* ]] || false # (always carried; never "from this shell")
 }
 
+@test "scheduled from your home, from / or from a parent of home, tool homes are carried" {
+  local from
+  for from in "$HOME" / "$(dirname "$HOME")"; do
+    cd "$from"
+    PNPM_HOME="$HOME/Library/pnpm" run "$CMM" schedule weekly
+    [ "$status" -eq 0 ]
+    grep -q '<key>PNPM_HOME</key>' "$PLIST"
+    [[ "$output" != *"not carried"* ]] || false
+  done
+}
+
+@test "a tool home under a symlinked path inside the directory you schedule from is still caught" {
+  mkdir -p "$SANDBOX/proj/.direnv/ruby"
+  ln -s "$SANDBOX/proj" "$SANDBOX/proj-link"
+  cd -P "$SANDBOX/proj"
+  GEM_HOME="$SANDBOX/proj-link/.direnv/ruby" run "$CMM" schedule weekly
+  [ "$status" -eq 0 ]
+  refute grep -q '<key>GEM_HOME</key>' "$PLIST"
+}
+
 @test "the generated plist is valid (plutil -lint, macOS only)" {
   [ -x /usr/bin/plutil ] || skip "plutil is macOS-only"
   run "$CMM" schedule weekly

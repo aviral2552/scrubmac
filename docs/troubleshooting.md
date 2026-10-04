@@ -119,10 +119,11 @@ shell that sets it, or tell pnpm once:
 
 ## "global updates held: npm min-release-age '…' could not be read"
 
-Your npm `min-release-age` is not a plain number of days (`1e1`, `${VAR}`,
-`Infinity`), so scrubmac cannot tell how far back it reaches — passing its
-own cutoff could relax yours. Write it as a plain number:
-`min-release-age=7`.
+scrubmac reads your npm `min-release-age` the way npm does (so `7`, `7.5`,
+`1e1` and a `${VAR}` that expands to a number all count), but this one has
+no number of days it can trust — `Infinity`, several values (`key[]`
+lines), or npm's configuration could not be read — so passing its own
+cutoff could relax yours. Write it as a plain number: `min-release-age=7`.
 
 ## "pnpm updates held: pnpm minimumReleaseAge could not be read"
 

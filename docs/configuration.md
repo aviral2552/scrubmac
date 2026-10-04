@@ -217,7 +217,7 @@ your shell sets them: the XDG directories, and tool homes such as
 `VOLTA_HOME`, `PIPX_HOME`, `UV_TOOL_DIR` or `PYENV_ROOT` (the full list is
 `CMM__SCHEDULE_ENV` in `lib/schedule.sh`) — absolute values only, and not
 one inside the directory you schedule from (a project's own, like direnv's
-`GEM_HOME`). Schedule from a plain shell: a shell with direnv settings gets
+`GEM_HOME`) unless that is your home or one of its parents. Schedule from a plain shell: a shell with direnv settings gets
 a warning, since its `PATH` is the project's too. It runs
 with background priority, and each cleaner starts in your home directory
 (launchd itself starts jobs in `/`). Re-scheduling replaces the old agent

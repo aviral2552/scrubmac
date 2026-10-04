@@ -135,13 +135,19 @@ not fail the run.
   rounded up, it would make the gate a day stricter than asked for. npm
   11.10–11.13 go further and hide `min-release-age` itself
   (`npm config get min-release-age` says `null`), so when one of those
-  reports a `before`, scrubmac looks for the setting where npm reads it:
-  `npm_config_min_release_age` (either case), then the userconfig and
-  globalconfig files `npm config get` names (when it names none, those the
-  environment names, `~/.npmrc` for the user's). A `min-release-age` that
-  is not a plain number of days (`1e1`, `${VAR}`) holds global updates, with
-  a note and a summary note: no cutoff passed instead could be known not to
-  relax it.
+  reports a `before`, scrubmac reads the setting the way npm does
+  (`lib/registry.cjs npm-min-release-age`): `npm_config_*` environment
+  names in any case, the last one winning as in npm, then the userconfig,
+  then the globalconfig npmrc — each with npm's own ini rules (a BOM, CRLF,
+  `;`/`#` comments, quotes, `key[]` lists, a `[section]` ending the top
+  level, `${VAR}`s, numbers such as `1.4e1`), a value npm drops as invalid
+  passed over. The files are the ones `npm config get` names; when it names
+  none (npm will not print a path its redaction would change), those the
+  environment or the user npmrc names, else `~/.npmrc` and
+  `<prefix>/etc/npmrc`. A `min-release-age` that gives no finite number of
+  days (`Infinity`, a list of several) holds global updates, with a note
+  and a summary note: no cutoff passed instead could be known not to relax
+  it.
 - `npm update -g <pkg>…` — when there is no cutoff (cooldown off, no npm
   setting of your own), for exactly those globals after a
   `npm view <pkg> versions dist-tags --json` registry check (not run when
@@ -303,10 +309,12 @@ global package exists.
   `bun update -g`, within the saved ranges. No global packages: nothing to
   update, and no failure.
 - A `minimumReleaseAge` that gives no number of seconds to trust — `inf`,
-  more than 10¹² (no cutoff date reaches that far back), not a number, or
-  in a part of the file the reader cannot follow — holds `bun upgrade` and
-  the global updates, with a note and a summary note: any
-  `--minimum-release-age` passed instead could relax it.
+  more than 10¹² (some 31,700 years: no release is that old, and scrubmac
+  counts no further), not a number, a quoted key with an escape Bun
+  rejects, or in a part of the file the reader cannot follow — holds
+  `bun upgrade` and the global updates, with a note and a summary note: any
+  `--minimum-release-age` passed instead could relax it. Escapes in quoted
+  keys (`"minimum\u0052eleaseAge"`) are decoded as Bun decodes them.
 - **With one** (the stricter of the two; passing a smaller value on the
   command line would relax yours): the global packages are read from Bun's
   global directory (named by the `bun pm ls -g` header: its `package.json`
