@@ -7,41 +7,119 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
+# A newer push supersedes a pull request's run; every other run (a push to
+# master, the schedule, a manual dispatch) is a group of its own, so no
+# commit lands without its run finishing (a shared group would also drop
+# queued runs).
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: lint + docs-check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      # Pinned linters, verified against GitHub's recorded release-asset
+      # digests (neither project publishes a checksum file anymore).
+      SHELLCHECK_VERSION: v0.11.0
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+      SHFMT_VERSION: v3.14.1
+      SHFMT_SHA256: 76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf
     steps:
-      - uses: actions/checkout@v4
-      - name: Install shellcheck and shfmt
-        run: sudo apt-get update -q && sudo apt-get install -y shellcheck shfmt
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned shellcheck and shfmt (checksum-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          sudo install -m 0755 "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          curl -fsSL -o shfmt "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          echo "${SHFMT_SHA256}  shfmt" | sha256sum -c -
+          sudo install -m 0755 shfmt /usr/local/bin/shfmt
+          shellcheck --version
+          shfmt --version
       - run: make lint
       - run: make docs-check
+      - name: man page lint
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q mandoc
+          mandoc -T lint -W warning man/scrubmac.1
 
   test-macos:
-    name: bats (macOS) + bash 3.2 smoke
-    runs-on: macos-15
+    name: bats (${{ matrix.os }}) + bash 3.2 smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install bats-core
         run: brew install --quiet bats-core
       - name: Run test suite
         run: make test
       - name: bash 3.2 smoke — the shipped macOS bash must run everything
         run: |
-          /bin/bash --version | head -1
-          for f in bin/scrubmac bin/cleanmymac lib/common.sh lib/wizard.sh install.sh uninstall.sh cleaners/*.sh scripts/*.sh; do
-            /bin/bash -n "$f"
-          done
+          make bash32
           /bin/bash bin/scrubmac version
           /bin/bash bin/scrubmac list
           /bin/bash bin/scrubmac --dry-run
+          /bin/bash bin/scrubmac status
+          /bin/bash bin/scrubmac doctor
 
   test-linux:
     name: bats (Linux — GNU userland portability)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - name: Install bats
-        run: sudo apt-get update -q && sudo apt-get install -y bats
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install bats (plus fish and zsh for the completion tests)
+        run: sudo apt-get update -q && sudo apt-get install -y -q bats fish zsh
       - run: make test
+
+  coverage:
+    name: coverage (informational)
+    runs-on: ubuntu-26.04
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install kcov and bats
+        run: sudo apt-get update -q && sudo apt-get install -y -q kcov bats
+      - name: Measure line coverage of bin/, lib/ and cleaners/
+        run: |
+          kcov --include-path="$PWD/bin,$PWD/lib,$PWD/cleaners" \
+            --bash-dont-parse-binary-dir \
+            --bash-parse-files-in-dir="$PWD/bin,$PWD/lib,$PWD/cleaners" \
+            "$PWD/coverage" bats tests || true
+          python3 - <<'PY'
+          import glob, json
+          files = glob.glob("coverage/bats*/coverage.json") or glob.glob("coverage/*/coverage.json")
+          if files:
+              data = json.load(open(files[0]))
+              print(f"line coverage: {data.get('percent_covered')}% "
+                    f"({data.get('covered_lines')}/{data.get('total_lines')} lines)")
+          else:
+              print("no coverage report found")
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage
+          retention-days: 7

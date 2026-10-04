@@ -4,19 +4,22 @@
 # GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
 # lib/wizard.sh — the powerlevel10k-style setup wizard.
 #
-# Sourced by bin/scrubmac (never executed directly), so discover(),
-# config paths, and the lib helpers are all in scope. Bash 3.2 compatible.
-# Nothing is written until the summary screen is confirmed; (r) restarts
-# from the top and (q) quits without writing, on every screen.
+# Sourced by bin/scrubmac (never executed directly), so discovery, state,
+# settings and the lib helpers are all in scope. Bash 3.2 compatible.
+# Every screen starts from your CURRENT configuration (Enter keeps it);
+# nothing is written until the summary screen is confirmed; (r) restarts
+# from the top and (q) quits without writing, on every screen. Settings the
+# wizard does not manage are preserved untouched.
 
-# Display-name:cleaner-names groups, in screen order. Underscores become
-# spaces for display. Discovered cleaners not listed here land in "Other".
-W_GROUPS='Package_managers:homebrew mas|JavaScript:npm pnpm yarn bun|Python:python conda|AI_tools:claude codex gemini gh cursor|Languages:rustup composer go mise|Heavy_pruners:docker xcode'
+# Screen order for the built-in groups; groups declared by your own cleaners
+# follow, then "Other" for cleaners without a "# group:" header.
+W_GROUP_ORDER='Package managers|JavaScript|Python|AI tools|Languages|Apple development|Developer tools'
 
 W_RESTART=0
 W_ANSWER=''
-W_DISABLED=''
-W_COOLDOWN=0
+W_ON=''
+W_COOLDOWN=7
+W_APP=interactive
 W_QUIET=0
 W_CHOSEN_COLOR=auto
 
@@ -39,82 +42,113 @@ w_ask() {
   esac
 }
 
-w_is_off() {
-  case " $W_DISABLED " in
+w_is_on() {
+  case " $W_ON " in
     *" $1 "*) return 0 ;;
-    *) return 1 ;;
   esac
+  return 1
 }
 
-w_off() { w_is_off "$1" || W_DISABLED="$W_DISABLED $1"; }
+w_on() { w_is_on "$1" || W_ON="$W_ON $1"; }
 
-w_on() {
+w_off() {
   local out='' n
-  for n in $W_DISABLED; do
+  for n in $W_ON; do
     [ "$n" = "$1" ] || out="$out $n"
   done
-  W_DISABLED="${out# }"
+  W_ON="$out"
 }
 
-# w_cleaner_path NAME — path of a discovered cleaner ('' if unknown).
-w_cleaner_path() {
-  discover | awk -F '\t' -v n="$1" '$1 == n { print $3; exit }'
+w_valid_or() { # w_valid_or KEY FALLBACK — the configured value of KEY if valid
+  local v
+  v="$(config_get "$1" "")"
+  cmm_setting_info "$1" || true
+  if [ -n "$v" ] && cmm_setting_valid "$CMM__S_TYPE" "$v"; then
+    printf '%s\n' "$v"
+  else
+    printf '%s\n' "$2"
+  fi
 }
 
-# w_tool_mark NAME — "found" / "not found (auto-skips)" from the gate header.
+# w_seed — start every screen from the configuration on disk.
+w_seed() {
+  local name def
+  W_RESTART=0
+  W_ON=''
+  while IFS="$TAB" read -r name _ _ _ _ _ def _; do
+    [ -n "$name" ] || continue
+    cmm_is_enabled "$name" "$def" && W_ON="$W_ON $name"
+  done <<EOF
+$CMM_DISCOVERED
+EOF
+  W_COOLDOWN="$(w_valid_or COOLDOWN_DAYS 7)"
+  W_APP="$(w_valid_or APP_UPDATES interactive)"
+  W_QUIET="$(w_valid_or QUIET 0)"
+  W_CHOSEN_COLOR="$(w_valid_or COLOR auto)"
+}
+
+# w_group_names — groups present among discovered cleaners, in screen order:
+# the built-in order, then other groups alphabetically, then "Other".
+w_group_names() {
+  printf '%s\n' "$CMM_DISCOVERED" | awk -F '\t' -v order="$W_GROUP_ORDER" '
+    NF { present[$6] = 1 }
+    END {
+      n = split(order, o, "|")
+      for (i = 1; i <= n; i++) if (o[i] in present) { print o[i]; known[o[i]] = 1 }
+      known["Other"] = 1
+      for (g in present) if (!(g in known)) extra[++m] = g
+      for (i = 1; i <= m; i++) for (j = i + 1; j <= m; j++) if (extra[j] < extra[i]) { t = extra[i]; extra[i] = extra[j]; extra[j] = t }
+      for (i = 1; i <= m; i++) print extra[i]
+      if ("Other" in present) print "Other"
+    }'
+}
+
+# w_group_members GROUP — cleaner names in GROUP, in run order.
+w_group_members() {
+  printf '%s\n' "$CMM_DISCOVERED" | awk -F '\t' -v g="$1" '$6 == g { printf "%s ", $1 }'
+}
+
+# w_tool_mark GATE — "found" / "not found — auto-skips".
 w_tool_mark() {
-  local path gate g
-  path="$(w_cleaner_path "$1")"
-  [ -n "$path" ] || {
-    printf 'unknown\n'
-    return 0
-  }
-  gate="$(sed -n 's/^# gate: //p' "$path" | head -n 1)"
-  [ -n "$gate" ] || {
-    printf '?\n'
-    return 0
-  }
-  for g in $gate; do
-    if have "$g"; then
-      printf 'found\n'
-      return 0
-    fi
-  done
-  printf 'not found (auto-skips)\n'
+  case "$(cmm_tool_present "$1")" in
+    yes) printf 'found\n' ;;
+    '?') printf '?\n' ;;
+    *) printf 'not found — auto-skips\n' ;;
+  esac
 }
 
 # ---------- screens ----------
 w_welcome() {
   w_header 'Welcome to scrubmac'
   note 'This wizard picks which services to maintain and sets security policy.'
-  note 'Safety doctrine: never sudo, never your data — only updates and'
-  note 'regenerable caches. Every screen accepts (r)estart and (q)uit;'
-  note 'nothing is written until you confirm the summary.'
+  note 'Safety doctrine: scrubmac never runs sudo itself and never touches'
+  note 'your data — only updates and regenerable caches. Each screen starts'
+  note 'from your current choices (Enter keeps them) and accepts (r)estart'
+  note 'and (q)uit; nothing is written until you confirm the summary.'
   note ''
   w_ask 'Press Enter to begin: '
 }
 
 # w_services_screen TITLE NAMES…
 w_services_screen() {
-  local title="$1" state
+  local title="$1" items i n row gate def summary state
   shift
-  local items="$*"
+  items="$*"
   while :; do
     w_header "$title"
-    local i=1 n
+    i=1
     for n in $items; do
-      state='[x]'
-      w_is_off "$n" && state='[ ]'
-      printf '  %d) %s %-12s %s\n' "$i" "$state" "$n" "($(w_tool_mark "$n"))"
+      row="$(printf '%s\n' "$CMM_DISCOVERED" | awk -F '\t' -v n="$n" '$1 == n { print; exit }')"
+      gate="$(printf '%s' "$row" | cut -f 5)"
+      def="$(printf '%s' "$row" | cut -f 7)"
+      summary="$(printf '%s' "$row" | cut -f 8)"
+      [ "$summary" = - ] && summary=''
+      state='[ ]'
+      w_is_on "$n" && state='[x]'
+      printf '  %2d) %s %-12s %s%s\n' "$i" "$state" "$n" "($(w_tool_mark "$gate"))" "$([ "$def" = off ] && printf ' · opt-in')"
+      [ -n "$summary" ] && printf '         %s\n' "$summary"
       i=$((i + 1))
     done
-    case "$title" in
-      *pruners*)
-        note ''
-        note '  docker: prunes build cache + dangling images only (never containers/volumes)'
-        note '  xcode:  deletes stale simulators + DerivedData older than 30 days'
-        ;;
-    esac
     note ''
     w_ask 'Toggle a number, (a)ll on, (n)one, Enter to continue: '
     [ "$W_RESTART" -eq 1 ] && return 0
@@ -141,7 +175,7 @@ w_services_screen() {
           idx=$((idx + 1))
         done
         if [ -n "$hit" ]; then
-          if w_is_off "$hit"; then w_on "$hit"; else w_off "$hit"; fi
+          if w_is_on "$hit"; then w_off "$hit"; else w_on "$hit"; fi
         else
           note '  (number out of range)'
         fi
@@ -158,21 +192,23 @@ w_cooldown_screen() {
     note 'ecosystem time to catch them. Trade-off: security PATCHES are also'
     note 'delayed by N days.'
     note ''
-    note '  Applies mechanically to uv (--exclude-newer). For npm, automatic'
-    note '  global updates are held while a cooldown is set (npm offers no'
-    note '  safe equivalent). Homebrew is a curated registry: not applicable.'
+    note '  Enforced for npm, pnpm and Bun (scrubmac picks the newest version at'
+    note '  least N days old), uv (--exclude-newer) and pipx (--cooldown); Yarn'
+    note '  classic global upgrades are held. Homebrew is a curated registry:'
+    note '  not applicable. See docs/security.md (S4).'
     note ''
     note '  1) Off'
     note '  2) 3 days'
     note '  3) 7 days (recommended)'
     note '  4) 14 days'
     note ''
-    w_ask 'Choice [3]: '
+    w_ask "Choice [Enter keeps ${W_COOLDOWN} day(s)]: "
     [ "$W_RESTART" -eq 1 ] && return 0
     case "$W_ANSWER" in
+      '') ;;
       1) W_COOLDOWN=0 ;;
       2) W_COOLDOWN=3 ;;
-      3 | '') W_COOLDOWN=7 ;;
+      3) W_COOLDOWN=7 ;;
       4) W_COOLDOWN=14 ;;
       *)
         note '  (enter 1-4)'
@@ -183,16 +219,45 @@ w_cooldown_screen() {
   done
 }
 
+w_app_screen() {
+  while :; do
+    w_header 'App updates (Homebrew casks)'
+    note 'Upgrading a GUI app can quit it while it is open, or stop to ask'
+    note 'for your password — fine when you are watching, surprising in a'
+    note 'scheduled run.'
+    note ''
+    note '  1) Only when I run scrubmac myself (recommended)'
+    note '  2) Always — scheduled runs too'
+    note '  3) Never — scrubmac leaves GUI apps alone'
+    note ''
+    w_ask "Choice [Enter keeps '${W_APP}']: "
+    [ "$W_RESTART" -eq 1 ] && return 0
+    case "$W_ANSWER" in
+      '') ;;
+      1) W_APP=interactive ;;
+      2) W_APP=always ;;
+      3) W_APP=never ;;
+      *)
+        note '  (enter 1-3)'
+        continue
+        ;;
+    esac
+    return 0
+  done
+}
+
 w_output_screen() {
   while :; do
     w_header 'Output'
-    note '  1) Full — stream every command and its output (recommended)'
-    note '  2) Quiet — banners and summary only; failures still dump their output'
+    note '  1) Full — stream every command and its output'
+    note '  2) Quiet — one line per cleaner, then the summary; a failing'
+    note '     cleaner still shows its output'
     note ''
-    w_ask 'Choice [1]: '
+    w_ask "Choice [Enter keeps $([ "$W_QUIET" = 1 ] && echo quiet || echo full)]: "
     [ "$W_RESTART" -eq 1 ] && return 0
     case "$W_ANSWER" in
-      1 | '') W_QUIET=0 ;;
+      '') ;;
+      1) W_QUIET=0 ;;
       2) W_QUIET=1 ;;
       *)
         note '  (enter 1 or 2)'
@@ -206,14 +271,15 @@ w_output_screen() {
 w_color_screen() {
   while :; do
     w_header 'Color'
-    note '  1) Auto — color when the output is a terminal (recommended)'
+    note '  1) Auto — color when the output is a terminal'
     note '  2) Always'
     note '  3) Never'
     note ''
-    w_ask 'Choice [1]: '
+    w_ask "Choice [Enter keeps ${W_CHOSEN_COLOR}]: "
     [ "$W_RESTART" -eq 1 ] && return 0
     case "$W_ANSWER" in
-      1 | '') W_CHOSEN_COLOR=auto ;;
+      '') ;;
+      1) W_CHOSEN_COLOR=auto ;;
       2) W_CHOSEN_COLOR=always ;;
       3) W_CHOSEN_COLOR=never ;;
       *)
@@ -226,94 +292,108 @@ w_color_screen() {
 }
 
 w_summary_screen() {
+  local name def on_list='' off_list=''
+  while IFS="$TAB" read -r name _ _ _ _ _ def _; do
+    [ -n "$name" ] || continue
+    if w_is_on "$name"; then
+      [ "$def" = off ] && on_list="$on_list $name"
+    else
+      off_list="$off_list $name"
+    fi
+  done <<EOF
+$CMM_DISCOVERED
+EOF
   w_header 'Summary'
-  if [ -n "$W_DISABLED" ]; then
-    note "disabled cleaners:    $W_DISABLED"
-  else
-    note 'disabled cleaners:    (none — everything runs)'
-  fi
+  note "disabled cleaners:    ${off_list# }"
+  [ -z "$off_list" ] && note '                      (none — everything runs)'
+  [ -n "$on_list" ] && note "opt-in cleaners on:   ${on_list# }"
   note "update cooldown:      ${W_COOLDOWN} day(s)"
+  note "app updates:          $W_APP"
   note "quiet mode:           $W_QUIET"
   note "color:                $W_CHOSEN_COLOR"
   note ''
-  note "Writes to: $CMM_CONFIG_FILE"
+  note "Writes to: $CMM_CONFIG_FILE (other settings there are kept)"
   note ''
-  w_ask 'Write this configuration? (y)es / (r)estart / (q)uit: '
-  [ "$W_RESTART" -eq 1 ] && return 0
-  case "$W_ANSWER" in
-    y | Y) return 0 ;;
-    *)
-      note ''
-      note 'Wizard aborted — nothing was written.'
-      exit 0
-      ;;
-  esac
+  while :; do
+    w_ask 'Write this configuration? [Y]es / (r)estart / (q)uit: '
+    [ "$W_RESTART" -eq 1 ] && return 0
+    case "$W_ANSWER" in
+      '' | [yY] | [yY][eE][sS]) return 0 ;;
+      *) note '  (enter y, r, or q)' ;;
+    esac
+  done
 }
 
 w_write() {
-  mkdir -p "$CMM_CONFIG_DIR"
-  cat >"$CMM_CONFIG_FILE" <<EOF
-# scrubmac configuration — written by 'scrubmac configure'.
-# KEY=value, one per line; values restricted to A-Za-z0-9._/- .
-# This file is parsed, never executed.
-COOLDOWN_DAYS=$W_COOLDOWN
-QUIET=$W_QUIET
-COLOR=$W_CHOSEN_COLOR
-DERIVEDDATA_AGE_DAYS=30
+  local name def en='' dis='' n
+  # config: rewrite only the wizard's keys; keep every other line
+  {
+    if [ -f "$CMM_CONFIG_FILE" ]; then
+      grep -v -E '^[[:space:]]*(COOLDOWN_DAYS|APP_UPDATES|QUIET|COLOR)[[:space:]]*=' "$CMM_CONFIG_FILE" || true
+    else
+      printf '%s\n' "# scrubmac configuration — written by 'scrubmac configure'." \
+        "# KEY=value, one per line; values restricted to A-Za-z0-9._/- ." \
+        "# This file is parsed, never executed. 'scrubmac config' lists every setting."
+    fi
+    printf 'COOLDOWN_DAYS=%s\nAPP_UPDATES=%s\nQUIET=%s\nCOLOR=%s\n' \
+      "$W_COOLDOWN" "$W_APP" "$W_QUIET" "$W_CHOSEN_COLOR"
+  } | cmm_write_file_atomic "$CMM_CONFIG_FILE" || exit 2
+
+  # state: record choices that differ from a cleaner's default, keep earlier
+  # explicit choices that still hold, and keep entries for cleaners that are
+  # not installed right now.
+  while IFS="$TAB" read -r name _ _ _ _ _ def _; do
+    [ -n "$name" ] || continue
+    if w_is_on "$name"; then
+      if [ "$def" = off ] || cmm_listed "$CMM_ENABLED_FILE" "$name"; then
+        en="$en$name"$'\n'
+      fi
+    else
+      if [ "$def" != off ] || cmm_listed "$CMM_DISABLED_FILE" "$name"; then
+        dis="$dis$name"$'\n'
+      fi
+    fi
+  done <<EOF
+$CMM_DISCOVERED
 EOF
-  local n
-  for n in $W_DISABLED; do
-    printf '%s\n' "$n"
-  done | sort >"$CMM_DISABLED_FILE"
+  while IFS= read -r n; do
+    if [ -n "$n" ] && ! known_cleaner "$n"; then en="$en$n"$'\n'; fi
+  done <<EOF
+$(cmm_state_names "$CMM_ENABLED_FILE")
+EOF
+  while IFS= read -r n; do
+    if [ -n "$n" ] && ! known_cleaner "$n"; then dis="$dis$n"$'\n'; fi
+  done <<EOF
+$(cmm_state_names "$CMM_DISABLED_FILE")
+EOF
+  # (your comments in both files are kept — see cmm_state_write)
+  # shellcheck disable=SC2046  # cleaner names never contain whitespace
+  cmm_state_write "$CMM_ENABLED_FILE" "$CMM__HDR_ON" $(printf '%s' "$en" | awk 'NF' | sort -u) || exit 2
+  # shellcheck disable=SC2046
+  cmm_state_write "$CMM_DISABLED_FILE" "$CMM__HDR_OFF" $(printf '%s' "$dis" | awk 'NF' | sort -u) || exit 2
   note ''
   note "Wrote $CMM_CONFIG_FILE"
-  note "Wrote $CMM_DISABLED_FILE"
+  note "Wrote $CMM_ENABLED_FILE and $CMM_DISABLED_FILE"
 }
 
-# ---------- driver ----------
-w_reset() {
-  W_RESTART=0
-  W_DISABLED="$CMM_DEFAULT_DISABLED"
-  W_COOLDOWN=0
-  W_QUIET=0
-  W_CHOSEN_COLOR=auto
-}
-
-# w_groups_screens — one services screen per non-empty group, then "Other"
-# for discovered cleaners (e.g. yours in cleaners.d) not covered by a group.
+# w_groups_screens — one services screen per group, in screen order. The
+# group list arrives on fd 3: the screens read their answers from stdin,
+# which must stay the user's terminal (a heredoc on stdin would answer for
+# them).
 w_groups_screens() {
-  local group title names known='' name filtered
-  local old_ifs="$IFS"
-  IFS='|'
-  set -f
-  # shellcheck disable=SC2086
-  set -- $W_GROUPS
-  set +f
-  IFS="$old_ifs"
-  for group in "$@"; do
-    title="$(printf '%s' "${group%%:*}" | tr '_' ' ')"
-    names="${group#*:}"
-    filtered=''
-    for name in $names; do
-      known="$known $name"
-      [ -n "$(w_cleaner_path "$name")" ] && filtered="$filtered $name"
-    done
+  local group members title
+  while IFS= read -r group <&3; do
+    [ -n "$group" ] || continue
+    members="$(w_group_members "$group")"
+    [ -n "${members// /}" ] || continue
+    title="$group"
+    [ "$group" = Other ] && title='Other (your cleaners)'
     # shellcheck disable=SC2086
-    [ -n "$filtered" ] && w_services_screen "$title" $filtered
+    w_services_screen "$title" $members
     [ "$W_RESTART" -eq 1 ] && return 0
-  done
-  local extras=''
-  while IFS="$TAB" read -r name _rest; do
-    [ -n "$name" ] || continue
-    case " $known " in
-      *" $name "*) ;;
-      *) extras="$extras $name" ;;
-    esac
-  done <<EOF
-$(discover)
+  done 3<<EOF
+$(w_group_names)
 EOF
-  # shellcheck disable=SC2086
-  [ -n "$extras" ] && w_services_screen 'Other (your cleaners)' $extras
   return 0
 }
 
@@ -322,16 +402,22 @@ wizard_main() {
   local mode="${1:-configure}"
   if [ "${CMM_WIZARD_ASSUME_TTY:-0}" != "1" ] && ! { [ -t 0 ] && [ -t 1 ]; }; then
     err 'the setup wizard needs an interactive terminal'
-    note "non-interactive setups can write $CMM_CONFIG_FILE directly (see docs/configuration.md)"
+    note "non-interactive setups can use 'scrubmac config set KEY VALUE' (see docs/configuration.md)"
     exit 2
   fi
+  # nothing it cannot read may be overwritten: its contents would be lost
+  cmm_require_readable "$CMM_CONFIG_FILE"
+  cmm_require_state_readable
+  cmm_discover
   while :; do
-    w_reset
+    w_seed
     w_welcome
     if [ "$W_RESTART" -eq 1 ]; then continue; fi
     w_groups_screens
     if [ "$W_RESTART" -eq 1 ]; then continue; fi
     w_cooldown_screen
+    if [ "$W_RESTART" -eq 1 ]; then continue; fi
+    w_app_screen
     if [ "$W_RESTART" -eq 1 ]; then continue; fi
     w_output_screen
     if [ "$W_RESTART" -eq 1 ]; then continue; fi

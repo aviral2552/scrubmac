@@ -5,14 +5,24 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    runs-on: macos-15
+  # The same gates as CI, on the tagged commit: pinned, checksum-verified
+  # linters (a newer Homebrew shellcheck must not fail a tag CI passed), the
+  # man-page lint, and the suite on macOS 15/26 (bash 3.2, plus the bash 3.2
+  # smoke) and Linux (bash 5, GNU userland).
+  lint:
+    runs-on: ubuntu-24.04
+    env:
+      SHELLCHECK_VERSION: v0.11.0
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+      SHFMT_VERSION: v3.14.1
+      SHFMT_SHA256: 76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify tag matches VERSION
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -21,26 +31,88 @@ jobs:
             echo "tag $TAG does not match VERSION $VER" >&2
             exit 1
           fi
-
       - name: Verify CHANGELOG has a section for this version
         run: grep -q "^## \[$(cat VERSION)\]" CHANGELOG.md
+      - name: Install pinned shellcheck and shfmt (checksum-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          sudo install -m 0755 "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          curl -fsSL -o shfmt "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          echo "${SHFMT_SHA256}  shfmt" | sha256sum -c -
+          sudo install -m 0755 shfmt /usr/local/bin/shfmt
+      - run: make lint docs-check
+      - name: man page lint
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q mandoc
+          mandoc -T lint -W warning man/scrubmac.1
 
-      - name: Install toolchain
-        run: brew install --quiet shellcheck shfmt bats-core
+  test:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-15, macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install bats
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install --quiet bats-core
+          else
+            sudo apt-get update -q && sudo apt-get install -y -q bats fish zsh
+          fi
+      - run: make test
+      - name: bash 3.2 smoke — the shipped macOS bash must run everything
+        if: runner.os == 'macOS'
+        run: |
+          make bash32
+          /bin/bash bin/scrubmac version
+          /bin/bash bin/scrubmac list
+          /bin/bash bin/scrubmac --dry-run
+          /bin/bash bin/scrubmac status
+          /bin/bash bin/scrubmac doctor
 
-      - name: Full check
-        run: make lint test docs-check
+  release:
+    needs: [lint, test]
+    runs-on: macos-15
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # sign the build-provenance attestation
+      attestations: write
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: License files must ship (a release may never carry the README's license claim without the term text)
         run: git ls-files --error-unmatch LICENSE NOTICE
 
       - name: Build tarball + checksums
+        id: build
         run: |
           VER="$(cat VERSION)"
           git archive --format=tar.gz --prefix="scrubmac-$VER/" \
             -o "scrubmac-$VER.tar.gz" HEAD
           shasum -a 256 "scrubmac-$VER.tar.gz" > SHA256SUMS
           cat SHA256SUMS
+          echo "version=$VER" >>"$GITHUB_OUTPUT"
+          echo "sha256=$(cut -d' ' -f1 SHA256SUMS)" >>"$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: scrubmac-${{ steps.build.outputs.version }}.tar.gz
 
       - name: Create GitHub release
         env:
@@ -50,3 +122,40 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             "scrubmac-$VER.tar.gz" SHA256SUMS \
             --title "scrubmac $VER" --generate-notes
+
+  bump-tap:
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions: {}
+    env:
+      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+      VER: ${{ needs.release.outputs.version }}
+      SHA: ${{ needs.release.outputs.sha256 }}
+    steps:
+      - name: Manual bump instructions (no HOMEBREW_TAP_TOKEN secret)
+        if: env.HAS_TAP_TOKEN != 'true'
+        run: |
+          echo "::notice::Set the HOMEBREW_TAP_TOKEN secret to automate this (see RELEASING.md). Manual bump for aviral2552/homebrew-tap Formula/scrubmac.rb:"
+          echo "  url \"https://github.com/aviral2552/scrubmac/releases/download/v${VER}/scrubmac-${VER}.tar.gz\""
+          echo "  sha256 \"${SHA}\""
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.HAS_TAP_TOKEN == 'true'
+        with:
+          repository: aviral2552/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Point the formula at the new release
+        if: env.HAS_TAP_TOKEN == 'true'
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          url="https://github.com/aviral2552/scrubmac/releases/download/v${VER}/scrubmac-${VER}.tar.gz"
+          sed -i -E "s|^  url \".*\"$|  url \"${url}\"|; s|^  sha256 \".*\"$|  sha256 \"${SHA}\"|" Formula/scrubmac.rb
+          grep -qF "$SHA" Formula/scrubmac.rb
+          grep -qF "$url" Formula/scrubmac.rb
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -am "scrubmac ${VER}"
+          git push

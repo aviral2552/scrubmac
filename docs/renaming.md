@@ -1,7 +1,7 @@
 # Renaming: decision record & future runbook
 
 **Status: EXECUTED — the project is `scrubmac` as of v3.0.0 (2026-08-09).**
-The execution followed **[rename-plan-scrubmac.md](rename-plan-scrubmac.md)**;
+The execution followed **[history/rename-plan-scrubmac.md](history/rename-plan-scrubmac.md)**;
 homebrew-core submission stays gated on the self-submission notability bar
 (≥225 stars / ≥90 forks / ≥90 watchers).
 
@@ -20,7 +20,7 @@ All facts below were verified against primary sources on 2026-08-03.
    `binary …, target: "cleanmymac"` **and** `target: "cmm"` — their CLI
    symlinks `$(brew --prefix)/bin/cleanmymac`. Our formula links the same
    path. Users installing both hit brew link failures (see
-   [troubleshooting](troubleshooting.md#brew-link-conflict-with-macpaws-cleanmymac-cli)).
+   [troubleshooting](troubleshooting.md#historical-the-cleanmymac-name-conflict--resolved-by-the-rename)).
 3. **homebrew-core is name-blocked and notability-blocked.**
    `brew audit --new` enforces token uniqueness across core formulae AND
    cask tokens — `cleanmymac` is hard-blocked. Separately,
@@ -72,7 +72,7 @@ cask token 404, `github.com/aviral2552/<t>` free, npm/PyPI free, product-name we
   bottle as `cellar: :any_skip_relocation, all:` (precedent: `bats-core`);
   macOS-only is fine via `depends_on :macos` (precedent: `mas`); category
   precedent: `topgrade`. Self-update must stay disabled under brew — already
-  true (`cleanmymac update` delegates to brew).
+  true (`scrubmac update` delegates to brew).
 - Local gate before the PR: `HOMEBREW_NO_INSTALL_FROM_API=1 brew install
   --build-from-source <name>` · `brew test <name>` · `brew audit --strict
   --new --online <name>` · `brew style --fix --formula <name>` ·

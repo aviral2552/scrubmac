@@ -8,6 +8,7 @@
 # rename. It is never linked onto PATH by the installer or the Homebrew
 # formula, and will be removed in v4.
 set -euo pipefail
+unset CDPATH # (cd would search it, and print where it went)
 
 SELF="${BASH_SOURCE[0]}"
 while [ -L "$SELF" ]; do
@@ -19,5 +20,21 @@ while [ -L "$SELF" ]; do
   esac
 done
 
-printf 'cleanmymac is now scrubmac; this alias will be removed in v4 — re-run install.sh to finish migrating\n' >&2
-exec "$(cd "$(dirname "$SELF")" && pwd)/scrubmac" "$@"
+# Physical path: the compat link ~/.cleanmymac -> ~/.scrubmac resolves to
+# the migrated install; a real ~/.cleanmymac dir has not been migrated yet.
+ROOT="$(cd -P "$(dirname "$SELF")/.." && pwd -P)"
+case "$ROOT" in
+  */.cleanmymac | */cleanmymac)
+    if [ -d "$HOME/.scrubmac" ]; then
+      # (its install.sh would mirror this older copy over the real install)
+      hint="this is an old copy; scrubmac is installed at ~/.scrubmac — point crontabs and aliases there, then delete $ROOT"
+    else
+      hint="finish migrating: run $ROOT/install.sh"
+    fi
+    ;;
+  *)
+    hint="call 'scrubmac' instead (update crontabs, aliases and scripts)"
+    ;;
+esac
+printf 'cleanmymac is now scrubmac; this alias will be removed in v4 — %s\n' "$hint" >&2
+exec "$ROOT/bin/scrubmac" "$@"

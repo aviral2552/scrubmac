@@ -10,7 +10,7 @@ class Scrubmac < Formula
   # The uploaded release asset — the exact file SHA256SUMS describes. Not the
   # auto-generated /archive/ tarball, whose bytes GitHub does not guarantee
   # stable (the Jan 2023 archive-checksum breakage).
-  url "https://github.com/aviral2552/scrubmac/releases/download/v3.0.1/scrubmac-3.0.1.tar.gz"
+  url "https://github.com/aviral2552/scrubmac/releases/download/v3.1.0/scrubmac-3.1.0.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_SHA256"
   license "GPL-3.0-only"
 
@@ -20,16 +20,27 @@ class Scrubmac < Formula
     libexec.install "bin", "lib", "cleaners", "VERSION"
     bin.install_symlink libexec/"bin/scrubmac"
     man1.install "man/scrubmac.1"
+    bash_completion.install "completions/scrubmac.bash" => "scrubmac"
+    zsh_completion.install "completions/_scrubmac"
+    fish_completion.install "completions/scrubmac.fish"
   end
 
   def caveats
     <<~EOS
-      Heavy pruners (docker, xcode) start disabled. Opt in with the wizard
-      (`scrubmac configure`) or `scrubmac enable docker`.
+      Opt-in cleaners (docker, xcode, go, rubygems) start disabled: enable them
+      with the wizard (`scrubmac configure`) or `scrubmac enable docker`.
+      Run it on a schedule with `scrubmac schedule weekly`; remove that with
+      `scrubmac schedule off` before uninstalling.
     EOS
   end
 
   test do
+    ENV["HOME"] = testpath
     assert_match version.to_s, shell_output("#{bin}/scrubmac version")
+    assert_match "homebrew", shell_output("#{bin}/scrubmac list --names")
+    # A dry run changes nothing. With only the system PATH, the cleaners
+    # whose tools live elsewhere skip, and the summary counts them.
+    ENV["PATH"] = "/usr/bin:/bin"
+    assert_match(/\d+ ok, \d+ skipped, 0 failed/, shell_output("#{bin}/scrubmac --dry-run --quiet"))
   end
 end

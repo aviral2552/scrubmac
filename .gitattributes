@@ -1,0 +1,5 @@
+# Release tarballs (git archive) carry what users run, not how we test it.
+.github/        export-ignore
+tests/          export-ignore
+.editorconfig   export-ignore
+.shellcheckrc   export-ignore

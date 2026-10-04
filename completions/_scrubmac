@@ -1,0 +1,82 @@
+#compdef scrubmac
+# Part of scrubmac — Copyright (C) 2018-2026 Aviral Sharma.
+# Licensed GPL-3.0-only with an additional attribution term under
+# GPLv3 section 7(b) — see the LICENSE and NOTICE files at the project root.
+# zsh completion for scrubmac. Cleaner names come from `scrubmac list --names`.
+
+_scrubmac_cleaners() {
+  local -a names
+  names=(${(f)"$(scrubmac list --names 2>/dev/null)"})
+  _describe -t cleaners 'cleaner' names
+}
+
+_scrubmac_keys() {
+  local -a keys
+  keys=(${(f)"$(scrubmac config keys 2>/dev/null)"})
+  _describe -t keys 'setting' keys
+}
+
+_scrubmac() {
+  local -a commands
+  commands=(
+    'run:run cleaners (the default)'
+    'list:show all cleaners and their status'
+    'status:read-only report of cache sizes and outdated packages'
+    'doctor:environment, configuration and security report'
+    'configure:(re)run the setup wizard'
+    'enable:turn cleaners on'
+    'disable:turn cleaners off'
+    'config:show or change settings'
+    'schedule:run scrubmac automatically via launchd'
+    'last:show the log of the most recent run'
+    'update:update scrubmac itself'
+    'version:print the version'
+    'help:show help'
+  )
+  _arguments -C \
+    '(-n --dry-run)'{-n,--dry-run}'[print every command; change nothing]' \
+    '(-q --quiet)'{-q,--quiet}'[hide cleaner output unless it fails]' \
+    '(--clean-only)--update-only[only update tools]' \
+    '(--update-only)--clean-only[only clean caches]' \
+    '*--skip[leave a cleaner out of this run]:cleaner:_scrubmac_cleaners' \
+    '--measure[report the space each cleaner frees]' \
+    '--json[machine-readable summary on stdout]' \
+    '--scheduled[unattended run]' \
+    '(- *)'{-h,--help}'[show help]' \
+    '(- *)'{-V,--version}'[print the version]' \
+    '1: :->first' \
+    '*:: :->rest' && return 0
+  case "$state" in
+    first)
+      _describe -t commands 'command' commands
+      _scrubmac_cleaners
+      ;;
+    rest)
+      # words[1] is the command; CURRENT is the word being completed
+      case "${words[1]}" in
+        run | enable | disable | status) _scrubmac_cleaners ;;
+        config)
+          if ((CURRENT == 2)); then
+            _values 'config' list get set unset path keys
+          elif ((CURRENT == 3)) && [[ "${words[2]}" == (get|set|unset) ]]; then
+            _scrubmac_keys
+          fi
+          ;;
+        schedule)
+          if ((CURRENT == 2)); then
+            _values 'schedule' status daily weekly off
+          elif ((CURRENT == 3)) && [[ "${words[2]}" == weekly ]]; then
+            _values 'day' mon tue wed thu fri sat sun
+          fi
+          ;;
+        list) ((CURRENT == 2)) && _values 'option' --names ;;
+        update) ((CURRENT == 2)) && _values 'option' --check ;;
+        last) ((CURRENT == 2)) && _values 'option' --json ;;
+        doctor | configure | version | help) ;;
+        *) _scrubmac_cleaners ;;
+      esac
+      ;;
+  esac
+}
+
+_scrubmac "$@"
