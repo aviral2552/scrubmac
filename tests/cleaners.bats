@@ -894,6 +894,17 @@ EOF
   printf 'min-release-age=7\n' >"$u"
   npm_config_min_release_age=null run reg npm-min-release-age --user "$u" --global "$g"
   [ "$output" = NaN ] # the string "null" from the environment is no null
+  # a key[] list is multiplied as it stands (no ${X} expansion): only a
+  # one-element list of a number is a number
+  printf 'min-release-age[]=12\n' >"$u"
+  run reg npm-min-release-age --user "$u" --global /nonexistent
+  [ "$output" = 12 ]
+  local v
+  for v in 'min-release-age[]=${HOME}' 'min-release-age[]' 'min-release-age[]=false'; do
+    printf '%s\n' "$v" >"$u"
+    run reg npm-min-release-age --user "$u" --global /nonexistent
+    [ "$output" = NaN ]
+  done
   printf 'min-release-age=${JUNK}\n' >"$u"
   JUNK=abc run reg npm-min-release-age --user "$u" --global "$g"
   [ "$output" = NaN ]
@@ -1423,7 +1434,7 @@ installed_with_before() {
   grep -qx $'note\tglobal updates held: npm min-release-age \'Infinity\' could not be read' "$SANDBOX/report"
 }
 
-@test "npm: a min-release-age set to null still rules out --before on npm 11.10–11.14, and a level below it still applies" {
+@test "npm: a min-release-age set to null still rules out --before on npm 11.10–11.14, and a level below it still applies (on 11.15+ too)" {
   need_node
   npm_fixture
   npm_globals tool:1.0.0:1.3.0
@@ -1449,6 +1460,18 @@ installed_with_before() {
   NPM_VER=11.10.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh
   grep -qx 'npm install -g tool@1.1.0 --min-release-age=14' "$CALL_LOG"
   : >"$CALL_LOG"
+  # npm 11.15+ no longer refuse --before, but a null level still hides the
+  # global npmrc's 14 from `npm config get` — and a --before would override it
+  rm "$SANDBOX/npmpkg/npmrc"
+  printf 'min-release-age=null\n' >"$HOME/.npmrc"
+  printf 'min-release-age=14\n' >"$SANDBOX/globalrc"
+  echo "$SANDBOX/globalrc" >"$SANDBOX/npmfx/config-globalconfig"
+  rm -f "$SANDBOX/npmfx/config-before" # (11.15 reports no before)
+  NPM_VER=11.15.0 CMM_COOLDOWN_DAYS=3 run run_cleaner 30-npm.sh
+  grep -qx 'npm install -g tool@1.1.0 --min-release-age=14' "$CALL_LOG"
+  refute grep -q -- '--before' "$CALL_LOG"
+  : >"$CALL_LOG"
+  rm "$SANDBOX/npmfx/config-globalconfig" "$SANDBOX/globalrc"
   printf 'min-release-age=7d\n' >"$HOME/.npmrc" # npm itself refuses every install on it
   echo 'Invalid Date' >"$SANDBOX/npmfx/config-before"
   NPM_VER=11.13.0 CMM_COOLDOWN_DAYS=3 CMM_REPORT_FILE="$SANDBOX/report" run run_cleaner 30-npm.sh
@@ -3785,7 +3808,7 @@ DRYRUN_ALLOW="$STATUS_ALLOW"'
  --dry-run( |$)
 ^gem cleanup -d$
 ^[a-z-]+ (--version|--help)$
-^npm (outdated -g --json|ls -g --long --json|root -g|view .+|config get (min-release-age|before|userconfig|globalconfig))$
+^npm (outdated -g --json|ls -g --long --json|root -g|view .+|config get (min-release-age|before|userconfig|globalconfig) -g)$
 ^pnpm (--version|ls -g --depth=0 --json|outdated -g --format json|config get minimumReleaseAge|root -g|bin -g)$
 ^bun (--version|outdated -g)$
 ^curl -fsSL --max-time 30 -K - -H Accept: application/vnd\.github\.v3\+json https://api\.github\.com/repos/Jarred-Sumner/bun-releases-for-updater/releases/latest$

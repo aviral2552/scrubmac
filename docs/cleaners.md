@@ -123,7 +123,9 @@ not fail the run.
   like registry installs (use `npm link` for a private tool). A package the
   configured registry does not know (E404) is skipped with a note.
 - The cutoff: `COOLDOWN_DAYS`, or your own `min-release-age` / `before`
-  (read with `npm config get min-release-age` and `npm config get before`)
+  (read with `npm config get min-release-age -g` and `npm config get before
+  -g` — global installs skip the project config, and from `$HOME` a
+  `~/.npmrc` that is not your userconfig would read as one)
   when stricter — a cutoff on the command line would override, and so
   relax, those settings, so scrubmac passes the stricter one itself: as
   `--before=<cutoff>`, or, when your npm config sets `min-release-age`
@@ -133,18 +135,20 @@ not fail the run.
   report a `before` of their own making while `min-release-age` is set (now
   minus those days, cut to the second): it is not counted as yours —
   rounded up, it would make the gate a day stricter than asked for. When
-  `npm config get min-release-age` says `null` on those npms, the setting
-  may still be there: 11.10–11.13 hide it once read, and a level set to
-  `null` hides the value of a level below it — which still applies — while
-  npm still refuses a `--before` over a `null`. So scrubmac then reads the
-  setting the way npm does (`lib/registry.cjs npm-min-release-age`): its
-  levels are the `npm_config_*` environment names in any case (the last one
-  winning, as in npm), the userconfig, the globalconfig and npm's own npmrc
-  (beside its package), each with npm's own ini rules (a BOM, CRLF, `;`/`#`
-  comments, quotes, `key[]` lists, a `[section]` ending the top level,
-  `${VAR}`s, numbers such as `1.4e1`); a `null` level lets the ones below
-  show through, and one that sets nothing else still makes the gate
-  `--min-release-age=<cooldown>`. The files are the ones `npm config get`
+  `npm config get min-release-age` says `null` on npm ≥ 11.10, the setting
+  may still be there: 11.10–11.13 hide it once read, and on every npm since
+  11.10 a level set to `null` hides the value of a level below it — which
+  still applies — while 11.10–11.14 refuse a `--before` over a `null`, and
+  later npms would let a `--before` override that lower value. So scrubmac
+  then reads the setting the way npm does (`lib/registry.cjs
+  npm-min-release-age`): its levels are the `npm_config_*` environment
+  names in any case (the last one winning, as in npm), the userconfig, the
+  globalconfig and npm's own npmrc (beside its package), each with npm's own
+  ini rules (a BOM, CRLF, `;`/`#` comments, quotes, a `[section]` ending the
+  top level, `${VAR}`s, numbers such as `1.4e1`, and `key[]` lists, which
+  npm multiplies as they stand: a number only as a one-element list of one,
+  unexpanded); a `null` level lets the ones below show through, and one that
+  sets nothing else still makes the gate `--min-release-age=<cooldown>`. The files are the ones `npm config get`
   names; when it names none (npm will not print a path its redaction would
   change), those the environment, the user npmrc or npm's own names, else
   `~/.npmrc` and `<prefix>/etc/npmrc`. A value npm cannot read at the
