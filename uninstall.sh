@@ -245,6 +245,12 @@ remove_install() {
     REFUSED=1
     return 0
   fi
+  # a clone install.sh did not make may hold someone's work (see install.sh)
+  if [ ! -f "$dir/.scrubmac-install" ] && why="$(cmm_local_work "$dir")"; then
+    echo "error: left $dir alone — it is a git checkout with $why (delete it yourself once nothing in it is needed)" >&2
+    REFUSED=1
+    return 0
+  fi
   rm -rf "${dir:?}"
   REMOVED=1
 }

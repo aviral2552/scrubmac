@@ -89,7 +89,7 @@ while the cooldown is on. To opt out: `scrubmac config set COOLDOWN_DAYS 0`;
 for one run: `CMM_COOLDOWN_DAYS=0 scrubmac`. Details:
 [security.md](security.md#s4--supply-chain-cooldown).
 
-## "uv tool(s) are pinned to a past --exclude-newer date"
+## "N uv tool(s) still held back by an exclude-newer cutoff in their receipts"
 
 uv stores `--exclude-newer` in each tool's receipt. scrubmac before 3.1 —
 and 3.1 with a uv older than 0.11.4, which cannot store a relative span —
@@ -180,8 +180,9 @@ It requires an interactive TTY. Either run it from a terminal, or use
 ## Yarn berry does nothing
 
 Correct: Yarn 2+ keeps caches per-project and removed `yarn global`. The
-cleaner explains and moves on; classic Yarn 1 still gets a global upgrade +
-cache clean.
+cleaner explains and moves on; classic Yarn 1 still gets a cache clean, and
+a global upgrade with `COOLDOWN_DAYS=0` (the cooldown holds it otherwise:
+Yarn 1 cannot filter by release age).
 
 ## Update says my copy has diverged
 
@@ -230,8 +231,10 @@ may be someone's working clone:
 - the install path is a symlink to it (the dev-clone setup): run that
   clone's own install.sh, which refreshes the links in place, or remove the
   link first;
-- it is a git checkout with uncommitted or untracked files, a stash, or
-  commits that are on no remote: commit and push, or move it away, first.
+- it is a git checkout with uncommitted or untracked files (also ones that
+  only your own global or `.git/info/exclude` ignore rules hide), a stash,
+  or commits that are on no remote and in no release tag: commit and push,
+  or move it away, first.
 
 A clean git install from before 3.1 (everything pushed, nothing edited) is
 upgraded as usual.

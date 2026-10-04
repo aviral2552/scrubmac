@@ -47,7 +47,9 @@ that pass extra flags.
   It checks the install dir before touching anything (a mistyped
   `CMM_PREFIX` no longer costs the real install its links and schedule —
   nor, with `--purge`, your configuration), and handles a symlinked install
-  path: the link goes, and its target too when install.sh created it.
+  path: the link goes, and its target too when install.sh created it. A git
+  checkout install.sh did not make is never deleted while it holds local
+  work (uncommitted, untracked, stashed or unpushed).
 - A Homebrew upgrade of scrubmac itself during a run (by the homebrew
   cleaner) deleted the files later cleaners were about to run. Built-in
   cleaners now run from a private copy made at the start of the run.
@@ -178,9 +180,10 @@ that pass extra flags.
   dependencies included, never downgrading:
   - npm, pnpm and Bun: a shared resolver installs the newest release old
     enough (within each global's saved range for pnpm and Bun, whose `^`/`~`
-    is kept), stepping over deprecated releases and ones that need a newer
-    Node, and each manager's own age gate holds the dependencies (`npm
-    install --before`, pnpm's `minimum-release-age`, Bun's
+    is kept — exact pins and other ranges never move), stepping over
+    deprecated releases and ones that need a newer Node, and each manager's
+    own age gate holds the dependencies (`npm install --before` or
+    `--min-release-age`, pnpm's `minimum-release-age`, Bun's
     `--minimum-release-age`); pnpm < 10.16 and Bun < 1.3, which have no
     gate, hold global updates. `bun upgrade` runs only when the release it
     would install is old enough.

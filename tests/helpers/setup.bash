@@ -98,11 +98,16 @@ setup_sandbox() {
   export CMM_LINK_DIRS="$HOME/.local/bin" # never the host's /usr/local/bin
   export STATE_DIR="$HOME/.local/state/scrubmac"
   export LOCK="$STATE_DIR/run.lock"
-  # A TIMEOUT for tests that look for its watchdog (`sleep WD_SECS`) after
-  # the run: a duration picked per test, so a test running in parallel
-  # elsewhere is unlikely to match it.
+  # A TIMEOUT for tests that look for its watchdog after the run (see
+  # wd_sleep_stub): a duration picked per test.
   WD_SECS=$((3000 + RANDOM % 997))
   export WD_SECS
+  # The dispatcher by a path inside the sandbox, for tests that start it in
+  # the background or on a pty: a hang (a process that ignores TERM, which
+  # BATS_TEST_TIMEOUT sends) is still killed by teardown's pkill.
+  mkdir -p "$SANDBOX/bg"
+  ln -s "$CMM" "$SANDBOX/bg/scrubmac"
+  export CMM_BG="$SANDBOX/bg/scrubmac"
   # Safety net: no test may ever reach the host's launchd, notification
   # center or crontab. These silent defaults (no call-log lines) answer
   # "not loaded" / "no crontab"; tests that assert on them install logging
@@ -313,14 +318,22 @@ plain_copy() {
   printf '%s\n' "$SANDBOX/copy/bin/scrubmac"
 }
 
-# no_watchdog_left SECS — no TIMEOUT watchdog (`sleep SECS`, a duration the
-# test picked to be recognizable) outlived the run.
+# wd_sleep_stub — every `sleep` of this test runs as "$SANDBOX/wdsleep …"
+# (exec -a), so the watchdog's `sleep WD_SECS` can be told apart from any
+# other process on the host.
+wd_sleep_stub() {
+  printf '#!/bin/bash\nexec -a "%s/wdsleep" "%s/sleep" "$@"\n' "$SANDBOX" "$SYSBIN" >"$STUB_BIN/sleep"
+  chmod 755 "$STUB_BIN/sleep"
+}
+
+# no_watchdog_left SECS — no TIMEOUT watchdog (`sleep SECS`, through
+# wd_sleep_stub) outlived the run.
 no_watchdog_left() {
   local i=0
-  while pgrep -f "sleep $1\$" >/dev/null; do
+  while pgrep -f "^$SANDBOX/wdsleep $1\$" >/dev/null; do
     i=$((i + 1))
     if [ "$i" -ge 20 ]; then
-      pkill -f "sleep $1\$" 2>/dev/null || true
+      pkill -f "^$SANDBOX/wdsleep $1\$" 2>/dev/null || true
       echo "a watchdog (sleep $1) outlived the run" >&2
       return 1
     fi

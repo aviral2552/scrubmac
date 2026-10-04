@@ -180,16 +180,23 @@ uv_user_exclude_newer() {
 }
 
 # uv_age_seconds VALUE — how far back an exclude-newer VALUE reaches, in
-# seconds: an RFC 3339 timestamp or a date (taken as UTC midnight), a
-# "friendly" duration (24 hours, 1 week, 30 days) or an ISO 8601 one (P7D,
-# PT24H). 0 for false; nothing when it cannot be read.
+# seconds: an RFC 3339 timestamp (its offset honored), a date — which uv
+# reads as the END of that day in local time, i.e. the next local midnight
+# (2026-09-27 in UTC+5:30 is 2026-09-27T18:30:00Z) —, a "friendly" duration
+# (24 hours, 1 week, 30 days) or an ISO 8601 one (P7D, PT24H). 0 for false;
+# nothing when it cannot be read.
 uv_age_seconds() {
   local v="$1" ep now
   case "$v" in
     false) echo 0 ;;
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] | [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*)
-      case "$v" in *T*) ;; *) v="${v}T00:00:00Z" ;; esac
-      ep="$(cmm_iso_to_epoch "$v")" || return 0
+      case "$v" in
+        *T*) ep="$(cmm_iso_to_epoch "$v")" || return 0 ;;
+        *)
+          ep="$(date -j -v+1d -f '%Y-%m-%d %H:%M:%S' "$v 00:00:00" '+%s' 2>/dev/null ||
+            date -d "$v 1 day" '+%s' 2>/dev/null)" || return 0
+          ;;
+      esac
       now="$(date -u '+%s')"
       echo $((now > ep ? now - ep : 0))
       ;;

@@ -91,8 +91,9 @@ EXIT STATUS
   0 all cleaners succeeded or were skipped; 1 at least one cleaner failed,
   timed out, or was refused (also: 'config get' of an unknown key, 'last
   --json' with no run yet, an 'update' that failed or was refused, a
-  'schedule' launchd could not load); 2 usage or environment error; 130
-  interrupted.
+  'schedule' launchd could not load); 2 usage or environment error, or
+  another run holds the lock; 130 interrupted (with a partial summary once
+  cleaners have started).
 
 PROJECT
   https://github.com/aviral2552/scrubmac
@@ -484,7 +485,8 @@ cmm_config_put() {
   cmm_require_readable "$CMM_CONFIG_FILE"
   {
     if [ -f "$CMM_CONFIG_FILE" ]; then
-      grep -v -E "^[[:space:]]*${key}[[:space:]]*=" "$CMM_CONFIG_FILE" || true
+      # (rewritten with plain line ends: a byte-order mark and CRLF go)
+      cmm_config_lines | grep -v -E "^[[:space:]]*${key}[[:space:]]*=" || true
     fi
     if [ "$nargs" -eq 2 ]; then
       printf '%s=%s\n' "$key" "$val"
@@ -528,7 +530,7 @@ cmd_config() {
       # custom keys in the config file
       cmm_setting_keys
       if [ -r "$CMM_CONFIG_FILE" ]; then
-        { grep -E '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._/-]*$' "$CMM_CONFIG_FILE" 2>/dev/null || true; } |
+        { cmm_config_lines | grep -E '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._/-]*$' || true; } |
           sed 's/=.*//' | while IFS= read -r key; do
           cmm_setting_info "$key" || printf '%s\n' "$key"
         done | awk '!seen[$0]++'
@@ -548,7 +550,7 @@ cmd_config() {
           custom="$custom $key"
           printf '%-24s %-12s %-8s %s\n' "$key" "$(config_get "$key" "")" custom "(not a built-in setting; read by custom cleaners)"
         done <<EOF
-$(grep -E '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._/-]*$' "$CMM_CONFIG_FILE" 2>/dev/null || true)
+$(cmm_config_lines | grep -E '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._/-]*$' || true)
 EOF
       fi
       note ""
@@ -557,7 +559,7 @@ EOF
     get)
       [ "$#" -eq 1 ] || usage_err "usage: scrubmac config get KEY"
       cmm__valid_key "$1" || usage_err "invalid key '$1' (expected A-Z, 0-9, _)"
-      if cmm_setting_resolve "$1" || grep -Eq "^$1=[A-Za-z0-9._/-]*\$" "$CMM_CONFIG_FILE" 2>/dev/null; then
+      if cmm_setting_resolve "$1" || cmm_config_lines | grep -Eq "^$1=[A-Za-z0-9._/-]*\$"; then
         note "$CMM__S_VAL"
       else
         err "$1 is not set and is not a built-in setting$(cmm__config_key_hint "$1")"

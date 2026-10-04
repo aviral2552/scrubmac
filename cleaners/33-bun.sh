@@ -74,14 +74,16 @@ can_resolve() { have node && have npm && [ -f "$REGISTRY_CJS" ]; }
 
 # bun_policy DAYS — BUN_VER; BUN_POLICY: the minimum release age (seconds)
 # asked for — the cooldown, or install.minimumReleaseAge from your global
-# bunfig ($XDG_CONFIG_HOME/.bunfig.toml, ~/.bunfig.toml) when stricter
-# (passing a smaller value on the command line would relax it); BUN_WHY:
-# where it comes from.
+# bunfig when stricter (passing a smaller value on the command line would
+# relax it); BUN_WHY: where it comes from. The global bunfig is the one Bun
+# reads for `bun add/update -g`: $XDG_CONFIG_HOME/.bunfig.toml when
+# XDG_CONFIG_HOME is set (then ~/.bunfig.toml is ignored), ~/.bunfig.toml
+# otherwise.
 bun_policy() {
   local cfg=0
   BUN_VER="$(bun --version 2>/dev/null)" || BUN_VER=0
   if have node && [ -f "$REGISTRY_CJS" ]; then
-    cfg="$(node "$REGISTRY_CJS" bunfig-age ${XDG_CONFIG_HOME:+"$XDG_CONFIG_HOME/.bunfig.toml"} "$HOME/.bunfig.toml")" || cfg=0
+    cfg="$(node "$REGISTRY_CJS" bunfig-age "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml")" || cfg=0
   fi
   case "$cfg" in '' | *[!0-9]*) cfg=0 ;; esac
   BUN_POLICY=$(($1 * 86400))
@@ -94,21 +96,43 @@ bun_policy() {
   return 0
 }
 
+# bun_release_feed — the GitHub release `bun upgrade` installs, read the
+# way Bun reads it (GITHUB_API_DOMAIN, and GITHUB_TOKEN or
+# GITHUB_ACCESS_TOKEN as a bearer token — which lifts GitHub's 60-an-hour
+# anonymous limit). The token goes to curl as a config file on stdin, never
+# on its command line.
+bun_release_feed() {
+  local token="${GITHUB_TOKEN:-${GITHUB_ACCESS_TOKEN:-}}"
+  token="${token//\\/\\\\}"
+  token="${token//\"/\\\"}"
+  {
+    if [ -n "$token" ]; then
+      printf 'header = "Authorization: Bearer %s"\n' "$token"
+    fi
+  } | curl -fsSL --max-time 30 -K - -H 'Accept: application/vnd.github.v3+json' \
+    "https://${GITHUB_API_DOMAIN:-api.github.com}/repos/Jarred-Sumner/bun-releases-for-updater/releases/latest" 2>/dev/null
+}
+
 # bun_self_update — `bun upgrade` for standalone installs. It cannot be told
 # a version: it installs the newest release from the GitHub feed it reads
 # itself (api.github.com/repos/Jarred-Sumner/bun-releases-for-updater), so
 # under the cooldown that feed decides — upgrade when the newest release is
-# old enough, hold while it is too fresh (or cannot be read).
+# old enough, hold while it is too fresh (or cannot be read), and always
+# with BUN_CANARY=1 set (then `bun upgrade` installs the newest canary).
 bun_self_update() {
   local json verdict
   if [ "$BUN_POLICY" -eq 0 ] || [ "$(install_kind bun)" != standalone ]; then
     ai_self_update bun bun upgrade
     return 0
   fi
+  if [ "${BUN_CANARY:-}" = 1 ]; then
+    note "- bun upgrade held: BUN_CANARY=1 makes it install the newest canary build, never old enough for the cooldown ($BUN_WHY)"
+    summary_note "bun upgrade held (BUN_CANARY=1, $BUN_WHY)"
+    return 0
+  fi
   verdict=''
   if have curl && can_resolve; then
-    json="$(curl -fsSL --max-time 30 -H 'Accept: application/vnd.github.v3+json' \
-      "https://${GITHUB_API_DOMAIN:-api.github.com}/repos/Jarred-Sumner/bun-releases-for-updater/releases/latest" 2>/dev/null)" || json=''
+    json="$(bun_release_feed)" || json=''
     verdict="$(printf '%s' "$json" | node "$REGISTRY_CJS" bun-release "$BUN_VER" "$BUN_CUTOFF" 2>/dev/null)" || verdict=''
   fi
   case "$verdict" in
@@ -141,7 +165,7 @@ bun_global_dir() {
 bun_skip_note() {
   case "$2" in
     pinned:*) note "- $1: pinned to ${2#pinned:} — left alone, as 'bun update -g' would" ;;
-    range:*) note "- $1: its saved range '${2#range:}' cannot be moved by version — left to 'bun update -g'" ;;
+    range:*) note "- $1: its saved range '${2#range:}' would be rewritten by a versioned update (into an exact pin, or narrowed) — left to 'bun update -g'" ;;
     alias) note "- skipping $1: an aliased install (npm:…) — updating it by name would install a different package" ;;
     local | linked) note "- skipping $1: linked/local install (bun link, a path, file:, git)" ;;
     foreign) note "- skipping $1: its version is not a release of $1 on the registry (installed from git, a tarball, a fork or another registry?)" ;;
@@ -194,7 +218,7 @@ bun_outdated_filter() {
 # bun_cooldown_update GLOBAL_DIR — each global package to the newest release
 # its saved range allows that is published before BUN_CUTOFF.
 bun_cooldown_update() {
-  local rows kind name cur mode held=0 unsuitable=0
+  local rows kind name cur spec held=0 unsuitable=0
   note "- cooldown: updating global packages only to releases published before $BUN_CUTOFF ($BUN_WHY)"
   if ! rows="$(node "$REGISTRY_CJS" bun-globals "$1")"; then
     warn "could not read Bun's global packages"
@@ -203,7 +227,7 @@ bun_cooldown_update() {
   fi
   bun_outdated_filter
   BUN_BLOCKED=0
-  while IFS="$TAB" read -r kind name cur mode <&3; do
+  while IFS="$TAB" read -r kind name cur _ spec <&3; do # pkg NAME VERSION MODE SPEC
     case "$kind" in
       skip)
         bun_skip_note "$name" "$cur"
@@ -215,7 +239,7 @@ bun_cooldown_update() {
     if [ -n "$BUN_OUTDATED" ] && [ "${BUN_OUTDATED#* "$name" }" = "$BUN_OUTDATED" ]; then
       continue # already the newest release
     fi
-    reg_resolve "$name" "$cur" "$BUN_CUTOFF" "$mode"
+    reg_resolve "$name" "$cur" "$BUN_CUTOFF" "$spec" # within the saved range's own bounds
     case "$REG_VERDICT" in
       pick)
         if [ "$BUN_BLOCKED" = 1 ]; then

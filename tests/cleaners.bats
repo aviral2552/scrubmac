@@ -115,7 +115,8 @@ EOF
 # an "error" object there makes it exit 1, as npm does on E404),
 # meta-<pkg>.json (`npm view "<pkg>@<v1> || …" name version deprecated
 # engines --json`) and config-<key> (`npm config get <key>`; "null" when
-# absent); "/" and "@" in names become "__" and "AT". `npm root -g` is
+# absent; `npm --version` prints $NPM_VER, 11.0.0); "/" and "@" in names
+# become "__" and "AT". `npm root -g` is
 # $SANDBOX/npmfx/root. The stub lives inside a fake npm package
 # ($SANDBOX/npmpkg, linked from the stub dir) so the resolver finds a semver
 # there when a test plants one.
@@ -131,6 +132,7 @@ case "$1" in
   outdated) [ "$3" = --json ] && cat "$fx/outdated.json" 2>/dev/null; exit 1 ;;
   ls) cat "$fx/ls.json" 2>/dev/null; exit 0 ;;
   root) echo "$fx/root"; exit 0 ;;
+  --version) echo "${NPM_VER:-11.0.0}"; exit 0 ;;
   config) [ -f "$fx/config-$3" ] && cat "$fx/config-$3" || echo null; exit 0 ;;
   view)
     case "$3" in
@@ -632,6 +634,47 @@ EOF
   [ -z "$output" ]
 }
 
+@test "registry pnpm-globals: pnpm >= 11 groups wherever globalDir puts them; --major 10 keeps pnpm 10's single project" {
+  need_node
+  local g="$SANDBOX/my-global-dir/v11" # global-dir set: no /global/ in the paths
+  mkdir -p "$g/grp1" "$g/grp2"
+  printf '{"dependencies":{"ms":"^2.1.1","kleur":"4.1.4"}}' >"$g/grp1/package.json"
+  printf '{"dependencies":{"@types/node":"~26.6.0"}}' >"$g/grp2/package.json"
+  local json
+  json="[{\"path\": \"$g\", \"dependencies\": {
+    \"ms\": {\"from\": \"ms\", \"version\": \"2.1.1\", \"path\": \"$g/grp1/node_modules/ms\"},
+    \"kleur\": {\"from\": \"kleur\", \"version\": \"4.1.4\", \"path\": \"$g/grp1/node_modules/kleur\"},
+    \"@types/node\": {\"from\": \"@types/node\", \"version\": \"26.6.0\", \"path\": \"$g/grp2/node_modules/@types/node\"}}}]"
+  run reg pnpm-globals --major 11 <<<"$json"
+  [ "$status" -eq 0 ]
+  want $'member\t'"$g/grp1"$'\tms\t2.1.1\tcaret\t^2.1.1' $'member\t'"$g/grp1"$'\tkleur\t4.1.4\tpinned\t4.1.4' \
+    $'member\t'"$g/grp2"$'\t@types/node\t26.6.0\ttilde\t~26.6.0'
+  got
+  run reg pnpm-globals <<<"$json" # no --major: a vN root means pnpm >= 11
+  got
+  local p10="$SANDBOX/g10/5"
+  mkdir -p "$p10"
+  printf '{"dependencies":{"ms":"^2.1.1","kleur":"4.1.4"}}' >"$p10/package.json"
+  run reg pnpm-globals --major 10 <<EOF
+[{"path": "$p10", "dependencies": {
+  "ms": {"from": "ms", "version": "2.1.1", "path": "$p10/node_modules/ms"},
+  "kleur": {"from": "kleur", "version": "4.1.4", "path": "$p10/node_modules/kleur"}}}]
+EOF
+  want $'member\tsolo:ms\tms\t2.1.1\tcaret\t^2.1.1' $'member\tsolo:kleur\tkleur\t4.1.4\tpinned\t4.1.4'
+  got
+}
+
+@test "registry pnpm-legacy: the packages left in pnpm 10's global project beside pnpm 11's root" {
+  need_node
+  mkdir -p "$SANDBOX/glob/v11" "$SANDBOX/glob/5"
+  run reg pnpm-legacy "$SANDBOX/glob/v11"
+  [ -z "$output" ]
+  printf '{"dependencies":{"ms":"2.1.1","is-odd":"^2.0.0"}}' >"$SANDBOX/glob/5/package.json"
+  run reg pnpm-legacy "$SANDBOX/glob/v11"
+  want ms is-odd
+  got
+}
+
 @test "registry pnpm-outdated: the globals whose latest release is not the installed one" {
   need_node
   # pnpm's "wanted" for globals is the locked version, so it cannot tell
@@ -659,13 +702,102 @@ EOF
   ln -s "$SANDBOX/src" "$g/node_modules/tool"
   run reg bun-globals "$g"
   [ "$status" -eq 0 ]
-  want $'pkg\tms\t2.1.1\tcaret' $'pkg\t@types/node\t26.5.0\ttilde' $'skip\tis-number\tpinned:6.0.0' \
-    $'skip\tkleur-alias\talias' $'skip\tlocal\tlocal' $'skip\ttool\tlinked' $'pkg\tanything\t1.0.0\tlatest' \
+  want $'pkg\tms\t2.1.1\tcaret\t^2.1.1' $'pkg\t@types/node\t26.5.0\ttilde\t~26.5.0' $'skip\tis-number\tpinned:6.0.0' \
+    $'skip\tkleur-alias\talias' $'skip\tlocal\tlocal' $'skip\ttool\tlinked' $'skip\tanything\trange:*' \
     $'skip\tranged\trange:>=1 <3' $'skip\tweird\tmissing' $'skip\tgone\tmissing'
   got
   run reg bun-globals "$SANDBOX/nowhere" # no global packages yet
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "registry bun-globals: Bun's isolated linker (node_modules/NAME -> .bun/…) is a registry install, not a link" {
+  need_node
+  local g="$SANDBOX/bunglobal"
+  mkdir -p "$g/node_modules/.bun/ms@2.1.1/node_modules/ms" "$g/node_modules/.bun/@types+node@26.6.2/node_modules/@types/node" \
+    "$g/node_modules/@types" "$SANDBOX/src/mytool"
+  printf '{"name":"ms","version":"2.1.1"}' >"$g/node_modules/.bun/ms@2.1.1/node_modules/ms/package.json"
+  printf '{"name":"@types/node","version":"26.6.2"}' >"$g/node_modules/.bun/@types+node@26.6.2/node_modules/@types/node/package.json"
+  printf '{"name":"mytool","version":"1.0.0"}' >"$SANDBOX/src/mytool/package.json"
+  ln -s .bun/ms@2.1.1/node_modules/ms "$g/node_modules/ms"
+  ln -s ../.bun/@types+node@26.6.2/node_modules/@types/node "$g/node_modules/@types/node"
+  ln -s "$SANDBOX/src/mytool" "$g/node_modules/mytool" # bun link: a real link
+  printf '{"dependencies":{"ms":"^2.1.1","@types/node":"^26.6.2","mytool":"^1.0.0"}}' >"$g/package.json"
+  run reg bun-globals "$g"
+  [ "$status" -eq 0 ]
+  want $'pkg\tms\t2.1.1\tcaret\t^2.1.1' $'pkg\t@types/node\t26.6.2\tcaret\t^26.6.2' $'skip\tmytool\tlinked'
+  got
+}
+
+@test "registry: ranges a versioned update would narrow or pin (~1, ^0, ^0.0, *, latest) are not moved; ^1, ^0.3, ~1.2 are" {
+  need_node
+  local g="$SANDBOX/specs" spec
+  for spec in '^1' '^1.2' '^0.3' '^0.0.4' '~1.2' '~1.2.3' '~1' '~0' '^0' '^0.0' '*' 'latest' '1.x'; do
+    rm -rf "$g"
+    mkdir -p "$g/node_modules/p"
+    printf '{"name":"p","version":"1.2.3"}' >"$g/node_modules/p/package.json"
+    printf '{"dependencies":{"p":"%s"}}' "$spec" >"$g/package.json"
+    printf '%s => ' "$spec" >>"$SANDBOX/modes"
+    reg bun-globals "$g" | cut -f1,4,3 >>"$SANDBOX/modes"
+  done
+  diff "$SANDBOX/modes" - <<'EOF'
+^1 => pkg	1.2.3	caret
+^1.2 => pkg	1.2.3	caret
+^0.3 => pkg	1.2.3	caret
+^0.0.4 => pkg	1.2.3	caret
+~1.2 => pkg	1.2.3	tilde
+~1.2.3 => pkg	1.2.3	tilde
+~1 => skip	range:~1
+~0 => skip	range:~0
+^0 => skip	range:^0
+^0.0 => skip	range:^0.0
+* => skip	range:*
+latest => skip	range:latest
+1.x => skip	range:1.x
+EOF
+}
+
+@test "registry pick: a saved range's own bounds apply (^0 allows 0.3.0, ~1 allows 1.5.0, ^0.0 allows 0.0.9)" {
+  need_node
+  run reg pick x 0.2.5 "$(ago 7)" '^0' <<<"$(view_json 1.0.0 0.2.5:90 0.3.0:60 1.0.0:50)"
+  [ "$output" = $'pick\t0.3.0' ] # caret of the installed 0.2.5 would allow nothing
+  run reg pick x 1.2.3 "$(ago 7)" '~1' <<<"$(view_json 2.0.0 1.2.3:90 1.2.4:80 1.5.0:60 2.0.0:50)"
+  [ "$output" = $'pick\t1.5.0\t1.2.4' ]
+  run reg pick x 0.0.3 "$(ago 7)" '^0.0' <<<"$(view_json 0.1.0 0.0.3:90 0.0.9:60 0.1.0:50)"
+  [ "$output" = $'pick\t0.0.9' ]
+  run reg pick x 1.2.3 "$(ago 7)" '~1.2' <<<"$(view_json 2.0.0 1.2.3:90 1.2.4:80 1.5.0:60 2.0.0:50)"
+  [ "$output" = $'pick\t1.2.4' ]
+  run reg pick x 1.2.3 "$(ago 7)" '>=1 <2' <<<'{}' # not a ^/~ range: not a mode
+  [ "$status" -eq 3 ]
+}
+
+@test "registry bunfig-age: floats, inline tables, exponents and hex count too (a smaller reading would relax yours)" {
+  need_node
+  printf '[install]\nminimumReleaseAge = 1209600.0\n' >"$SANDBOX/float.toml"
+  printf 'install = { linker = "isolated", minimumReleaseAge = 1_209_600 }\n' >"$SANDBOX/inline.toml"
+  printf '[install]\nminimumReleaseAge = 1.2096e6\n' >"$SANDBOX/exp.toml"
+  printf '[install]\nminimumReleaseAge = 0x127500\n' >"$SANDBOX/hex.toml"
+  printf '[install]\nminimumReleaseAge = 1209599.5\n' >"$SANDBOX/half.toml"
+  local f
+  for f in float inline exp hex; do
+    run reg bunfig-age "$SANDBOX/$f.toml"
+    [ "$output" = 1209600 ] || {
+      echo "$f: $output"
+      false
+    }
+  done
+  run reg bunfig-age "$SANDBOX/half.toml"
+  [ "$output" = 1209600 ] # rounded up: never relaxed
+}
+
+@test "registry cutoff --ceil-days: whole days back, rounded up" {
+  need_node
+  run reg cutoff --days 7 --ceil-days
+  [ "$output" = 7 ]
+  run reg cutoff --days 0 --ceil-days
+  [ "$output" = 0 ]
+  run reg cutoff --days 7 --before "$("$REAL_NODE" -e 'console.log(new Date(Date.now() - 9.5 * 864e5).toISOString())')" --ceil-days
+  [ "$output" = 10 ]
 }
 
 @test "registry bun-outdated: Latest vs Current; Bun's banner alone means up to date; anything else is unreadable" {
@@ -927,6 +1059,29 @@ installed_with_before() {
   [[ "$output" == *"published before 2026-09-01T00:00:00Z"* ]] || false
 }
 
+@test "npm: with your min-release-age set, npm >= 11.10 gets --min-release-age=DAYS (11.10–11.14 refuse --before next to it)" {
+  need_node
+  npm_fixture
+  npm_globals tool:1.0.0:1.3.0
+  npm_view tool 1.3.0 1.0.0:90 1.1.0:30 1.2.0:10 1.3.0:1
+  echo 3 >"$SANDBOX/npmfx/config-min-release-age"
+  NPM_VER=11.14.1 CMM_COOLDOWN_DAYS=7 run run_cleaner 30-npm.sh
+  [ "$status" -eq 0 ]
+  grep -qx 'npm install -g tool@1.2.0 --min-release-age=7' "$CALL_LOG" # the stricter: the cooldown's 7 days
+  refute grep -q -- '--before' "$CALL_LOG"
+  : >"$CALL_LOG"
+  echo 14 >"$SANDBOX/npmfx/config-min-release-age"
+  NPM_VER=11.15.0 CMM_COOLDOWN_DAYS=7 run run_cleaner 30-npm.sh
+  grep -qx 'npm install -g tool@1.1.0 --min-release-age=14' "$CALL_LOG"
+  : >"$CALL_LOG"
+  NPM_VER=11.9.0 CMM_COOLDOWN_DAYS=7 run run_cleaner 30-npm.sh # no min-release-age in this npm
+  installed_with_before tool@1.1.0
+  : >"$CALL_LOG"
+  rm "$SANDBOX/npmfx/config-min-release-age"
+  NPM_VER=11.14.1 CMM_COOLDOWN_DAYS=7 run run_cleaner 30-npm.sh # none set: --before
+  installed_with_before tool@1.2.0
+}
+
 @test "npm: with the cooldown off, your own npm min-release-age still goes through the resolver (never npm update -g)" {
   need_node
   npm_fixture
@@ -1019,6 +1174,7 @@ case "$1" in
   --version) echo "${PNPM_VER:-12.8.1}" ;;
   config) echo "${PNPM_MRA:-undefined}" ;;
   ls) cat "$SANDBOX/pnpm-ls.json" ;;
+  root) echo "${PNPM_GLOBAL_ROOT:-$SANDBOX/pnhome/global/v11}" ;;
   outdated) cat "$SANDBOX/pnpm-outdated.json" 2>/dev/null || exit 1 ;;
   add | update | self-update) pwd -P >>"$SANDBOX/pnpm-cwd" ;;
 esac
@@ -1029,12 +1185,13 @@ EOF
 
 # pnpm_globals GROUP=MEMBER[,MEMBER]… — pnpm >= 11 globals: each GROUP an
 # install group whose MEMBERs are NAME@VERSION[=SPEC] (SPEC defaults to
-# ^VERSION, pnpm's default).
+# ^VERSION, pnpm's default), under $PNPM_GLOBAL_ROOT (pnpm's global root,
+# <globalDir>/v11; $SANDBOX/pnhome/global/v11 by default).
 pnpm_globals() {
-  local arg gid m name ver spec dir deps='' specs members
+  local arg gid m name ver spec dir deps='' specs members root="${PNPM_GLOBAL_ROOT:-$SANDBOX/pnhome/global/v11}"
   for arg in "$@"; do
     gid="${arg%%=*}"
-    dir="$SANDBOX/pnhome/global/v11/$gid"
+    dir="$root/$gid"
     mkdir -p "$dir"
     specs=''
     IFS=, read -r -a members <<<"${arg#*=}"
@@ -1048,7 +1205,7 @@ pnpm_globals() {
     done
     printf '{"dependencies":{%s}}' "$specs" >"$dir/package.json"
   done
-  printf '[{"path":"%s","private":true,"dependencies":{%s}}]' "$SANDBOX/pnhome/global/v11" "$deps" >"$SANDBOX/pnpm-ls.json"
+  printf '[{"path":"%s","private":true,"dependencies":{%s}}]' "$root" "$deps" >"$SANDBOX/pnpm-ls.json"
 }
 
 # pnpm10_globals NAME@VERSION[=SPEC][:hoisted]… — pnpm 10's single global
@@ -1099,6 +1256,17 @@ pnpm update -g
 pnpm store prune
 EOF
   refute grep -q '^npm view' "$CALL_LOG"
+}
+
+@test "pnpm: without a cooldown and without global packages, no 'pnpm update -g' (it fails when 'pnpm setup' never ran)" {
+  need_node
+  npm_fixture
+  pnpm_fixture # (no global packages)
+  run run_cleaner 31-pnpm.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no global packages"* ]] || false
+  refute grep -q '^pnpm update' "$CALL_LOG"
+  grep -qx 'pnpm store prune' "$CALL_LOG"
 }
 
 @test "pnpm: the cooldown re-adds globals within their saved ranges, pnpm's own age gate holding their dependencies (S4)" {
@@ -1234,6 +1402,89 @@ EOF
   [ "$status" -eq 0 ]
   grep -qx 'pnpm add -g ms@^2.1.3 --config.minimum-release-age=10080' "$CALL_LOG"
   refute grep -q '^npm view globby' "$CALL_LOG"
+}
+
+@test "pnpm: groups are found wherever globalDir puts them — a group is re-added whole, its exact pin kept exact" {
+  need_node
+  npm_fixture
+  export PNPM_GLOBAL_ROOT="$SANDBOX/my-global-dir/v11" # pnpm config set global-dir …
+  pnpm_globals grp=ms@2.1.1,kleur@4.1.4=4.1.4
+  pnpm_fixture
+  npm_view ms 2.1.3 2.1.1:900 2.1.3:700
+  npm_view kleur 4.1.5 4.1.4:900 4.1.5:800
+  CMM_COOLDOWN_DAYS=7 run run_cleaner 31-pnpm.sh
+  [ "$status" -eq 0 ]
+  pnpm_mutating >"$SANDBOX/mutating"
+  diff "$SANDBOX/mutating" - <<'EOF'
+pnpm add -g ms@^2.1.3,kleur@4.1.4 --config.minimum-release-age=10080 --config.minimum-release-age-exclude=kleur@4.1.4
+pnpm store prune
+EOF
+}
+
+@test "pnpm: a group with a range a re-add would rewrite (*, latest, 7.x, >=…, ~1, ^0) is not re-added" {
+  need_node
+  npm_fixture
+  pnpm_globals grp=ms@2.1.1,kleur@4.1.0='>=4.1.0 <4.2.0' solo=semver@7.0.0='7.x'
+  pnpm_fixture
+  npm_view ms 2.1.3 2.1.1:900 2.1.3:700
+  npm_view kleur 4.1.5 4.1.0:900 4.1.5:800
+  npm_view semver 7.8.5 7.0.0:900 7.8.5:60
+  CMM_COOLDOWN_DAYS=7 CMM_REPORT_FILE="$SANDBOX/report" run run_cleaner 31-pnpm.sh
+  [ "$status" -eq 0 ]
+  refute grep -q '^pnpm add' "$CALL_LOG"
+  [[ "$output" == *"kleur: its saved range '>=4.1.0 <4.2.0' would be rewritten by a re-add"* ]] || false
+  [[ "$output" == *"not re-adding ms@2.1.3 this run: it shares an install group with kleur"* ]] || false
+  [[ "$output" == *"semver: its saved range '7.x' would be rewritten by a re-add"* ]] || false
+  grep -qx $'note\t1 global update(s) held: their install group (pnpm add -g a,b) cannot be re-added this run' "$SANDBOX/report"
+}
+
+@test "pnpm: a group with a member that is not a registry release (foreign) is not re-added" {
+  need_node
+  npm_fixture
+  pnpm_globals grp=ms@2.1.1,gitmade@1.0.1-dev
+  pnpm_fixture
+  npm_view ms 2.1.3 2.1.1:900 2.1.3:700
+  npm_view gitmade 1.1.0 1.0.0:900 1.1.0:90 # 1.0.1-dev was never published
+  CMM_COOLDOWN_DAYS=7 run run_cleaner 31-pnpm.sh
+  [ "$status" -eq 0 ]
+  refute grep -q '^pnpm add' "$CALL_LOG"
+  [[ "$output" == *"skipping gitmade: its version is not a release of gitmade"* ]] || false
+  [[ "$output" == *"not re-adding ms@2.1.3 this run: it shares an install group with gitmade, and it is not a registry release"* ]] || false
+}
+
+@test "pnpm: pnpm 10's global packages, which pnpm 11 no longer lists, are migrated by 'pnpm update -g' — or pointed out under the cooldown" {
+  need_node
+  npm_fixture
+  pnpm_fixture # pnpm 12, nothing in global/v11 …
+  mkdir -p "$SANDBOX/pnhome/global/5"
+  printf '{"dependencies":{"ms":"2.1.1","is-odd":"^2.0.0"}}' >"$SANDBOX/pnhome/global/5/package.json" # … but pnpm 10's are there
+  run run_cleaner 31-pnpm.sh
+  [ "$status" -eq 0 ]
+  grep -qx 'pnpm update -g' "$CALL_LOG" # migrates them
+  : >"$CALL_LOG"
+  CMM_COOLDOWN_DAYS=7 CMM_REPORT_FILE="$SANDBOX/report" run run_cleaner 31-pnpm.sh
+  [ "$status" -eq 0 ]
+  refute grep -q '^pnpm update' "$CALL_LOG"
+  [[ "$output" == *"2 global package(s) are still in pnpm 10's global directory"* ]] || false
+  grep -qx $'note\tpnpm 10 global packages not migrated — run \'pnpm update -g\' once' "$SANDBOX/report"
+  : >"$CALL_LOG"
+  PNPM_VER=10.34.6 run run_cleaner 31-pnpm.sh # pnpm 10 itself: its global/5 is not "legacy"
+  refute grep -q '^pnpm root' "$CALL_LOG"
+}
+
+@test "pnpm: a pnpm older than 9.13 cannot be told a version, so its self-update is held under the cooldown" {
+  need_node
+  npm_fixture
+  npm_view pnpm 9.15.9 9.12.3:400 9.13.0:350 9.15.9:300
+  pnpm_fixture
+  PNPM_VER=9.12.3 CMM_COOLDOWN_DAYS=7 CMM_REPORT_FILE="$SANDBOX/report" run run_cleaner 31-pnpm.sh
+  [ "$status" -eq 0 ]
+  refute grep -q '^pnpm self-update' "$CALL_LOG"
+  [[ "$output" == *"pnpm 9.12.3 cannot be told which release to self-update to"* ]] || false
+  grep -qx $'note\tpnpm self-update held: pnpm < 9.13 cannot self-update to a release old enough' "$SANDBOX/report"
+  : >"$CALL_LOG"
+  PNPM_VER=9.13.0 CMM_COOLDOWN_DAYS=7 run run_cleaner 31-pnpm.sh
+  grep -qx 'pnpm self-update 9.15.9' "$CALL_LOG"
 }
 
 @test "pnpm: a pnpm that reads stdin cannot swallow the remaining packages" {
@@ -1551,7 +1802,9 @@ EOF
   bun_fixture
   bun_dep tool '^1.0.0' 1.0.0
   npm_view tool 1.3.0 1.0.0:90 1.1.0:30 1.2.0:10 1.3.0:1
-  printf '[install]\nminimumReleaseAge = 1209600\n' >"$HOME/.bunfig.toml"
+  # the global bunfig Bun reads: $XDG_CONFIG_HOME/.bunfig.toml when that is set
+  mkdir -p "$XDG_CONFIG_HOME"
+  printf '[install]\nminimumReleaseAge = 1209600.0 # a float\n' >"$XDG_CONFIG_HOME/.bunfig.toml"
   CMM_COOLDOWN_DAYS=7 run run_cleaner 33-bun.sh
   [ "$status" -eq 0 ]
   grep -qx 'bun update -g tool@1.1.0 --minimum-release-age 1209600' "$CALL_LOG"
@@ -1560,6 +1813,54 @@ EOF
   run run_cleaner 33-bun.sh # cooldown off: never a plain update that would relax nothing
   grep -qx 'bun update -g tool@1.1.0 --minimum-release-age 1209600' "$CALL_LOG"
   refute grep -qx 'bun update -g' "$CALL_LOG"
+}
+
+@test "bun: the global bunfig is the one Bun reads — ~/.bunfig.toml only without XDG_CONFIG_HOME" {
+  need_node
+  npm_fixture
+  bun_fixture
+  bun_dep tool '^1.0.0' 1.0.0
+  npm_view tool 1.3.0 1.0.0:90 1.1.0:30 1.2.0:10 1.3.0:1
+  printf '[install]\nminimumReleaseAge = 1209600\n' >"$HOME/.bunfig.toml"
+  CMM_COOLDOWN_DAYS=7 run run_cleaner 33-bun.sh # XDG_CONFIG_HOME is set: Bun ignores ~/.bunfig.toml
+  grep -qx 'bun update -g tool@1.2.0 --minimum-release-age 604800' "$CALL_LOG"
+  : >"$CALL_LOG"
+  env -u XDG_CONFIG_HOME CMM_COOLDOWN_DAYS=7 CMM_LIB="$CMM_LIB_PATH" "$REPO_ROOT/cleaners/33-bun.sh" >/dev/null 2>&1 </dev/null
+  grep -qx 'bun update -g tool@1.1.0 --minimum-release-age 1209600' "$CALL_LOG"
+}
+
+@test "bun: under the cooldown a * or latest global is left alone — Bun would rewrite it into an exact pin" {
+  need_node
+  npm_fixture
+  bun_fixture
+  bun_dep ms '*' 2.1.1
+  bun_dep semver 'latest' 7.0.0
+  bun_dep is-odd '~2' 2.0.0
+  npm_view ms 2.1.3 2.1.1:900 2.1.3:700
+  npm_view semver 7.8.5 7.0.0:900 7.8.5:60
+  bun_release 1.4.2 30
+  CMM_COOLDOWN_DAYS=7 run run_cleaner 33-bun.sh
+  [ "$status" -eq 0 ]
+  refute grep -q '^bun update -g' "$CALL_LOG"
+  [[ "$output" == *"ms: its saved range '*' would be rewritten by a versioned update"* ]] || false
+  [[ "$output" == *"semver: its saved range 'latest' would be rewritten"* ]] || false
+  [[ "$output" == *"is-odd: its saved range '~2' would be rewritten"* ]] || false
+}
+
+@test "bun: globals Bun's isolated linker links in from node_modules/.bun are updated like any other" {
+  need_node
+  npm_fixture
+  bun_fixture
+  local g="$SANDBOX/bunglobal"
+  mkdir -p "$g/node_modules/.bun/ms@2.1.1/node_modules/ms"
+  printf '{"name":"ms","version":"2.1.1"}' >"$g/node_modules/.bun/ms@2.1.1/node_modules/ms/package.json"
+  ln -s .bun/ms@2.1.1/node_modules/ms "$g/node_modules/ms"
+  printf '{"dependencies":{"ms":"^2.1.1"}}' >"$g/package.json"
+  npm_view ms 2.1.3 2.1.1:900 2.1.3:700
+  bun_release 1.4.2 30
+  CMM_COOLDOWN_DAYS=7 run run_cleaner 33-bun.sh
+  [ "$status" -eq 0 ]
+  grep -qx 'bun update -g ms@2.1.3 --minimum-release-age 604800' "$CALL_LOG"
 }
 
 @test "bun: under the cooldown 'bun upgrade' runs when Bun's newest release is old enough, and is held otherwise" {
@@ -1587,6 +1888,40 @@ EOF
   BUN_VER=1.3.13 CMM_COOLDOWN_DAYS=7 run run_cleaner 33-bun.sh
   [[ "$output" == *"could not check the age of Bun's newest release"* ]] || false
   refute grep -q '^bun upgrade' "$CALL_LOG"
+}
+
+@test "bun: BUN_CANARY=1 holds 'bun upgrade' under the cooldown (it would install the newest canary)" {
+  need_node
+  npm_fixture
+  bun_fixture
+  bun_release 1.4.2 30
+  BUN_CANARY=1 BUN_VER=1.3.13 CMM_COOLDOWN_DAYS=7 CMM_REPORT_FILE="$SANDBOX/report" run run_cleaner 33-bun.sh
+  [ "$status" -eq 0 ]
+  refute grep -q '^bun upgrade' "$CALL_LOG"
+  [[ "$output" == *"BUN_CANARY=1 makes it install the newest canary"* ]] || false
+  grep -qx $'note\tbun upgrade held (BUN_CANARY=1, the 7-day cooldown)' "$SANDBOX/report"
+}
+
+@test "bun: the release check sends GITHUB_TOKEN (or GITHUB_ACCESS_TOKEN) as Bun does — on stdin, never in argv" {
+  need_node
+  npm_fixture
+  bun_fixture
+  local when
+  when="$(ago 30)"
+  make_stub_script curl <<EOF
+cat >"\$SANDBOX/curl-stdin"
+echo '{"tag_name":"bun-v1.4.2","published_at":"$when"}'
+EOF
+  GITHUB_TOKEN='ghp_s3cret"x' BUN_VER=1.3.13 CMM_COOLDOWN_DAYS=7 run run_cleaner 33-bun.sh
+  [ "$status" -eq 0 ]
+  grep -qx 'bun upgrade' "$CALL_LOG"
+  grep -qx 'header = "Authorization: Bearer ghp_s3cret\\"x"' "$SANDBOX/curl-stdin"
+  refute grep -q 's3cret' "$CALL_LOG" # never on a command line
+  grep -q '^curl .* -K - ' "$CALL_LOG"
+  GITHUB_ACCESS_TOKEN=gho_other BUN_VER=1.3.13 CMM_COOLDOWN_DAYS=7 run run_cleaner 33-bun.sh
+  grep -qx 'header = "Authorization: Bearer gho_other"' "$SANDBOX/curl-stdin"
+  BUN_VER=1.3.13 CMM_COOLDOWN_DAYS=7 run run_cleaner 33-bun.sh # no token: nothing sent
+  [ ! -s "$SANDBOX/curl-stdin" ]
 }
 
 @test "bun: with the cooldown on but no node/npm, global updates and the upgrade are held" {
@@ -1690,6 +2025,23 @@ EOF
   [ "$status" -eq 0 ]
   refute grep -q 'codex update' "$CALL_LOG"
   [[ "$output" == *"predates 'codex update'"* ]] || false
+}
+
+@test "codex: a copy a version manager owns is left to it (codex update would overwrite it)" {
+  local mise="$HOME/.local/share/mise"
+  mkdir -p "$mise/installs/codex/0.130.0/bin"
+  cat >"$mise/installs/codex/0.130.0/bin/codex" <<'EOF'
+#!/bin/sh
+printf '%s %s\n' codex "$*" >>"$CALL_LOG"
+[ "$1" = --help ] && printf 'Commands:\n  update    Update Codex to the latest version\n'
+exit 0
+EOF
+  chmod 755 "$mise/installs/codex/0.130.0/bin/codex"
+  export PATH="$mise/installs/codex/0.130.0/bin:$PATH"
+  run run_cleaner 46-codex.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"codex runs through mise"* ]] || false
+  refute grep -q 'codex update' "$CALL_LOG"
 }
 
 @test "codex: npm installs are left to the npm cleaner (cooldown applies there)" {
@@ -2420,6 +2772,29 @@ EOF
   refute grep -q -- '--exclude-newer false' "$CALL_LOG"
 }
 
+@test "python: a date in your exclude-newer means the end of that day, and timestamp offsets count — as uv reads them" {
+  uv_stub
+  mkdir -p "$XDG_CONFIG_HOME/uv"
+  export TZ=UTC
+  local d stamp
+  # the day that holds "7 days ago": uv's cutoff is its END (the next local
+  # midnight), later than the cooldown's — so the cooldown is the stricter
+  d="$(date -u -v-7d '+%Y-%m-%d' 2>/dev/null || date -u -d '7 days ago' '+%Y-%m-%d')"
+  printf 'exclude-newer = "%s"\n' "$d" >"$XDG_CONFIG_HOME/uv/uv.toml"
+  CMM_COOLDOWN_DAYS=7 run run_cleaner 40-python.sh
+  grep -qx 'uv tool upgrade --all --exclude-newer 7 days' "$CALL_LOG"
+  : >"$CALL_LOG"
+  # 6 hours further back on the clock, but at UTC-12: 6 hours LESS far back
+  stamp="$(date -u -v-7d -v-6H '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || date -u -d '7 days ago 6 hours ago' '+%Y-%m-%dT%H:%M:%S')"
+  printf 'exclude-newer = "%s-12:00"\n' "$stamp" >"$XDG_CONFIG_HOME/uv/uv.toml"
+  CMM_COOLDOWN_DAYS=7 run run_cleaner 40-python.sh
+  grep -qx 'uv tool upgrade --all --exclude-newer 7 days' "$CALL_LOG"
+  : >"$CALL_LOG"
+  printf 'exclude-newer = "%sZ"\n' "$stamp" >"$XDG_CONFIG_HOME/uv/uv.toml" # the same clock in UTC: stricter
+  CMM_COOLDOWN_DAYS=7 run run_cleaner 40-python.sh
+  grep -qx "uv tool upgrade --all --exclude-newer ${stamp}Z" "$CALL_LOG"
+}
+
 @test "python: a busy uv cache is skipped with a note — never hung on, never --force'd" {
   uv_stub
   PRUNE_MODE=busy run run_cleaner 40-python.sh
@@ -2595,7 +2970,7 @@ EOF
   pc_env "$SANDBOX/code/old/.pre-commit-config.yaml" "$SANDBOX/code/live/.pre-commit-config.yaml"
   run run_cleaner 63-pre-commit.sh
   [ "$status" -eq 0 ]
-  grep -qx "sqlite3 -readonly -cmd .timeout 5000 $HOME/.cache/pre-commit/db.db SELECT path FROM configs" "$CALL_LOG"
+  grep -qx "sqlite3 -init /dev/null -batch -list -noheader -readonly -cmd .timeout 5000 $HOME/.cache/pre-commit/db.db SELECT path FROM configs" "$CALL_LOG"
   grep -qx 'pre-commit gc' "$CALL_LOG"
 }
 
@@ -2609,6 +2984,22 @@ EOF
   PC_DB=new run run_cleaner 63-pre-commit.sh # nothing recorded yet: gc has nothing to misjudge
   [ "$status" -eq 0 ]
   grep -qx 'pre-commit gc' "$CALL_LOG"
+}
+
+@test "pre-commit: your sqliterc's output mode cannot garble the recorded paths (the blind spot is still seen)" {
+  pc_env "/Volumes/scrubmac-test-absent-$$/proj/.pre-commit-config.yaml"
+  # like a ~/.sqliterc or $XDG_CONFIG_HOME/sqlite3/sqliterc with ".mode json"
+  # — which only -init /dev/null keeps from loading
+  make_stub_script sqlite3 <<'EOF'
+case " $* " in
+  *" -init /dev/null "*) cat "$SANDBOX/pc-configs" ;;
+  *) sed 's/.*/[{"path":"&"}]/' "$SANDBOX/pc-configs" ;;
+esac
+EOF
+  run run_cleaner 63-pre-commit.sh
+  [ "$status" -eq 0 ]
+  refute grep -q 'pre-commit gc' "$CALL_LOG"
+  [[ "$output" == *"/Volumes/scrubmac-test-absent-$$, which is not mounted"* ]] || false
 }
 
 @test "pre-commit: a recorded config inside a folder this run cannot read skips gc (macOS privacy protection)" {
@@ -2817,11 +3208,11 @@ DRYRUN_ALLOW="$STATUS_ALLOW"'
 ^gem cleanup -d$
 ^[a-z-]+ (--version|--help)$
 ^npm (outdated -g --json|ls -g --long --json|root -g|view .+|config get (min-release-age|before))$
-^pnpm (--version|ls -g --depth=0 --json|outdated -g --format json|config get minimumReleaseAge)$
+^pnpm (--version|ls -g --depth=0 --json|outdated -g --format json|config get minimumReleaseAge|root -g)$
 ^bun (--version|outdated -g)$
-^curl -fsSL --max-time 30 -H Accept: application/vnd\.github\.v3\+json https://api\.github\.com/repos/Jarred-Sumner/bun-releases-for-updater/releases/latest$
+^curl -fsSL --max-time 30 -K - -H Accept: application/vnd\.github\.v3\+json https://api\.github\.com/repos/Jarred-Sumner/bun-releases-for-updater/releases/latest$
 ^uv tool (dir --color never|list --outdated --exclude-newer false --color never)$
-^sqlite3 -readonly -cmd \.timeout 5000 
+^sqlite3 -init /dev/null -batch -list -noheader -readonly -cmd \.timeout 5000 
 ^pipx upgrade-all --help$
 ^python3 -m pip --version$
 ^conda info --base$
@@ -2858,6 +3249,6 @@ sweep() {
   grep -qx 'pnpm ls -g --depth=0 --json' "$CALL_LOG"
   grep -qx 'yarn --version' "$CALL_LOG"
   grep -q '^curl ' "$CALL_LOG"           # Bun's release feed
-  grep -q '^sqlite3 -readonly ' "$CALL_LOG" # pre-commit's recorded configs
+  grep -q '^sqlite3 -init /dev/null ' "$CALL_LOG" # pre-commit's recorded configs
   grep -qx 'uv tool list --outdated --exclude-newer false --color never' "$CALL_LOG"
 }

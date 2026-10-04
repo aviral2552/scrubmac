@@ -104,7 +104,9 @@ pnpm_policy() {
 
 # pnpm_self_update — standalone installs only (Corepack/Homebrew/npm/
 # version-manager copies are left to their managers): the newest release
-# published before PNPM_CUTOFF, named explicitly.
+# published before PNPM_CUTOFF, named explicitly. pnpm before 9.13 takes no
+# version (`pnpm self-update X` installs the newest release anyway), so its
+# self-update is held.
 pnpm_self_update() {
   local cur
   if [ "$(install_kind pnpm)" != standalone ]; then
@@ -112,6 +114,11 @@ pnpm_self_update() {
     return 0
   fi
   cur="$PNPM_VER"
+  if ! cmm_version_ge "$cur" 9.13; then
+    note "- pnpm $cur cannot be told which release to self-update to (before 9.13 it always installs the newest): self-update held — run 'pnpm self-update' yourself"
+    summary_note "pnpm self-update held: pnpm < 9.13 cannot self-update to a release old enough"
+    return 0
+  fi
   reg_resolve pnpm "$cur" "$PNPM_CUTOFF" latest --no-engines
   case "$REG_VERDICT" in
     pick) ai_self_update pnpm pnpm self-update "$REG_VERSION" ;;
@@ -153,16 +160,18 @@ pnpm_outdated_filter() {
 }
 
 # pnpm_flush_group — update the install group collected in G_NAMES, G_VERS,
-# G_MODES and G_SPECS. Every member keeps its saved range operator: ^ and ~
-# move to the pick (or stay on the installed version), exact pins and other
-# ranges are passed as saved. pnpm >= 11 re-adds the group as a whole (one
-# member alone would uninstall the rest), with the installed version of each
-# member that does not move excluded from the age gate — without that, a
-# group-mate installed recently fails the gate. A group whose lookups failed
-# or that has a member pnpm would move onto an unsuitable release is not
-# re-added at all.
+# G_MODES and G_SPECS. Every member keeps its saved range: ^ and ~ move to
+# the newest release the range allows that is old enough (or stay on the
+# installed version) and keep their operator, exact pins stay exact. pnpm
+# >= 11 re-adds the group as a whole (one member alone would uninstall the
+# rest), with the installed version of each member that does not move
+# excluded from the age gate — without that, a group-mate installed recently
+# fails the gate. A group is not re-added at all when a member could not be
+# checked, is not a registry release (foreign, missing), would land on an
+# unsuitable release, or has a range a re-add would rewrite (*, latest,
+# 7.x, >=1 <2, ~1, ^0 — pnpm saves them as ^/~ of a version).
 pnpm_flush_group() {
-  local i name ver mode spec target joined sel changed=0 blocked='' sels=() excl=() movers=() moved=()
+  local i name ver mode spec target joined sel changed=0 blocked='' why='' sels=() excl=() movers=() moved=()
   [ "${#G_NAMES[@]}" -gt 0 ] || return 0
   i=0
   while [ "$i" -lt "${#G_NAMES[@]}" ]; do
@@ -173,11 +182,16 @@ pnpm_flush_group() {
     i=$((i + 1))
     target="$ver"
     case "$mode" in
-      caret | tilde | latest)
+      latest | range)
+        note "- $name: its saved range '$spec' would be rewritten by a re-add — left to 'pnpm update -g'"
+        blocked="${blocked:-$name}"
+        why="${why:-its saved range ($spec) would be rewritten}"
+        ;;
+      caret | tilde)
         if [ -n "$PNPM_OUTDATED" ] && [ "${PNPM_OUTDATED#* "$name" }" = "$PNPM_OUTDATED" ]; then
           REG_VERDICT=none
         else
-          reg_resolve "$name" "$ver" "$PNPM_CUTOFF" "$mode"
+          reg_resolve "$name" "$ver" "$PNPM_CUTOFF" "$spec" # within the saved range's own bounds
         fi
         case "$REG_VERDICT" in
           pick)
@@ -186,6 +200,7 @@ pnpm_flush_group() {
               PNPM_UNSUITABLE=$((PNPM_UNSUITABLE + 1))
               note "- $name $ver: not suitable — the newest release old enough is deprecated or needs a newer Node.js; left as is"
               blocked="$name"
+              why='pnpm would move it onto an unsuitable release'
             else
               target="$REG_VERSION"
               changed=1
@@ -200,13 +215,19 @@ pnpm_flush_group() {
             PNPM_UNSUITABLE=$((PNPM_UNSUITABLE + 1))
             note "- $name $ver: not suitable — the newer releases old enough are deprecated or need a newer Node.js; left as is"
             blocked="$name"
+            why='pnpm would move it onto an unsuitable release'
             ;;
-          foreign | missing) pnpm_skip_note "$name" "$REG_VERDICT" ;;
+          foreign | missing)
+            pnpm_skip_note "$name" "$REG_VERDICT"
+            blocked="$name"
+            why='it is not a registry release'
+            ;;
           none) ;;
           *)
             warn "registry lookup failed for $name"
             cmm_fail_later
             blocked="$name"
+            why='it could not be checked'
             ;;
         esac
         ;;
@@ -227,7 +248,8 @@ pnpm_flush_group() {
   G_NAMES=() G_VERS=() G_MODES=() G_SPECS=()
   [ "$changed" -eq 1 ] || return 0
   if [ -n "$blocked" ] && [ "${#sels[@]}" -gt 1 ]; then
-    note "- not re-adding ${movers[*]} this run: it shares an install group with $blocked, which pnpm would move or which could not be checked"
+    note "- not re-adding ${movers[*]} this run: it shares an install group with $blocked, and $why"
+    PNPM_GROUPHELD=$((PNPM_GROUPHELD + ${#movers[@]}))
     return 0
   fi
   if [ "$PNPM_MAJOR" -ge 11 ]; then
@@ -237,7 +259,7 @@ pnpm_flush_group() {
     )"
     step pnpm add -g "$joined" --config.minimum-release-age="$PNPM_GATE" ${excl[@]+"${excl[@]}"}
   else
-    i=0 # pnpm 10: one global project, no a,b groups — one add per package
+    i=0 # pnpm 10: one global project, no a,b groups: one add per package
     while [ "$i" -lt "${#sels[@]}" ]; do
       [ "${moved[$i]}" = 1 ] && step pnpm add -g "${sels[$i]}" --config.minimum-release-age="$PNPM_GATE"
       i=$((i + 1))
@@ -247,9 +269,14 @@ pnpm_flush_group() {
 
 # pnpm_update_globals — every global package to its pick (see the header).
 pnpm_update_globals() {
-  local json rows line kind group name ver mode spec prev=''
+  local json rows line kind group name ver mode spec prev='' legacy
+  legacy="$(pnpm_legacy_globals)"
+  if [ -n "$legacy" ]; then
+    note "- $(printf '%s\n' "$legacy" | awk 'NF { n++ } END { print n + 0 }') global package(s) are still in pnpm 10's global directory, which this pnpm ($PNPM_VER) no longer lists: only 'pnpm update -g' moves them over (it updates them too, without the cooldown) — run it once yourself"
+    summary_note "pnpm 10 global packages not migrated — run 'pnpm update -g' once"
+  fi
   if ! json="$(pnpm ls -g --depth=0 --json 2>/dev/null)" ||
-    ! rows="$(printf '%s' "$json" | node "$REGISTRY_CJS" pnpm-globals)"; then
+    ! rows="$(printf '%s' "$json" | node "$REGISTRY_CJS" pnpm-globals --major "$PNPM_MAJOR")"; then
     warn "could not read 'pnpm ls -g --depth=0 --json'"
     cmm_fail_later
     return 0
@@ -262,6 +289,7 @@ pnpm_update_globals() {
   pnpm_outdated_filter
   PNPM_HELD=0
   PNPM_UNSUITABLE=0
+  PNPM_GROUPHELD=0
   G_NAMES=() G_VERS=() G_MODES=() G_SPECS=()
   while IFS= read -r line <&3; do
     kind="${line%%"$TAB"*}"
@@ -288,7 +316,34 @@ EOF
   pnpm_flush_group
   [ "$PNPM_HELD" -gt 0 ] && summary_note "$PNPM_HELD global update(s) held by the cooldown ($PNPM_WHY)"
   [ "$PNPM_UNSUITABLE" -gt 0 ] && summary_note "$PNPM_UNSUITABLE global update(s) not suitable (deprecated, or need a newer Node.js)"
+  [ "$PNPM_GROUPHELD" -gt 0 ] && summary_note "$PNPM_GROUPHELD global update(s) held: their install group (pnpm add -g a,b) cannot be re-added this run"
   return 0
+}
+
+# pnpm_legacy_globals — on pnpm >= 11, the packages still in pnpm 10's global
+# project (<globalDir>/5, beside the vN root `pnpm root -g` names): pnpm 11
+# no longer lists them, and only `pnpm update -g` migrates them.
+pnpm_legacy_globals() {
+  local root
+  [ "$PNPM_MAJOR" -ge 11 ] || return 0
+  { have node && [ -f "$REGISTRY_CJS" ]; } || return 0
+  root="$(pnpm root -g 2>/dev/null)" || return 0
+  [ -n "$root" ] || return 0
+  node "$REGISTRY_CJS" pnpm-legacy "$root" 2>/dev/null || true
+}
+
+# pnpm_has_globals — pnpm has global packages, so `pnpm update -g` has work:
+# with none, and no `pnpm setup` ever run (pnpm from Homebrew or Corepack,
+# used for projects only), it fails outright — its global bin directory is
+# not on PATH. pnpm 10's leftovers count (`pnpm update -g` migrates them).
+# Without node to read pnpm's list, assume it has.
+pnpm_has_globals() {
+  local json rows
+  { have node && [ -f "$REGISTRY_CJS" ]; } || return 0
+  [ -n "$(pnpm_legacy_globals)" ] && return 0
+  json="$(pnpm ls -g --depth=0 --json 2>/dev/null)" || return 0
+  rows="$(printf '%s' "$json" | node "$REGISTRY_CJS" pnpm-globals --major "$PNPM_MAJOR" 2>/dev/null)" || return 0
+  [ -n "$rows" ]
 }
 
 skip_unless pnpm
@@ -307,7 +362,11 @@ if updating; then
   pnpm_policy "$days"
   if [ "$PNPM_POLICY" -eq 0 ]; then
     ai_self_update pnpm pnpm self-update
-    step pnpm update -g
+    if pnpm_has_globals; then
+      step pnpm update -g
+    else
+      note "- no global packages"
+    fi
   elif ! can_resolve; then
     note "- cooldown active ($PNPM_WHY) but node/npm (needed for registry lookups) not found: global updates and the self-update are held"
     summary_note "global updates held (node/npm not found for the cooldown)"

@@ -40,7 +40,7 @@ cron_run() {
 @test "cron and terminal runs exclude each other (regression: the lock lived in TMPDIR)" {
   make_cleaner 10-slow.sh 'echo SLOW-START' 'sleep 30'
   # a "terminal" run, with a per-user TMPDIR like macOS sets for login sessions
-  TMPDIR="$SANDBOX/terminal-tmp" bash -c 'mkdir -p "$TMPDIR" && exec "$CMM"' >"$SANDBOX/term.out" 2>&1 3>&- &
+  TMPDIR="$SANDBOX/terminal-tmp" bash -c 'mkdir -p "$TMPDIR" && exec "$CMM_BG"' >"$SANDBOX/term.out" 2>&1 3>&- &
   local pid=$! i=0
   while ! grep -q SLOW-START "$SANDBOX/term.out" 2>/dev/null; do
     i=$((i + 1))

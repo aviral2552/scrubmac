@@ -103,36 +103,6 @@ die() {
   exit 2
 }
 
-# local_work DIR — DIR is a git checkout holding work a mirror would destroy:
-# prints what (uncommitted or untracked files, a stash, commits that are on
-# no remote) and succeeds. Git's environment is ignored (a GIT_DIR from a
-# hook would point it at another repository).
-local_work() {
-  local d="$1" out
-  [ -e "$d/.git" ] || return 1
-  if ! have git; then
-    printf 'a .git (and no git here to check it for local work)'
-    return 0
-  fi
-  lw_git() (
-    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
-      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CEILING_DIRECTORIES
-    git -C "$d" "$@"
-  )
-  if ! out="$(lw_git status --porcelain 2>/dev/null)"; then
-    printf 'a .git that git cannot read'
-  elif [ -n "$out" ]; then
-    printf 'uncommitted or untracked files'
-  elif lw_git rev-parse -q --verify refs/stash >/dev/null 2>&1; then
-    printf 'a stash'
-  elif [ -n "$(lw_git rev-list --max-count=1 HEAD --branches --not --remotes 2>/dev/null || echo unknown)" ]; then
-    printf 'commits that are on no remote'
-  else
-    return 1
-  fi
-  return 0
-}
-
 # Canonical paths only: "$HOME/." or a symlinked parent must not slip past
 # the guards below (rsync --delete erases whatever is in the way).
 if [ -L "$DEST_DIR" ] && [ ! -e "$DEST_DIR" ]; then
@@ -197,7 +167,7 @@ else
     if [ -n "$DEST_LINK" ]; then
       die "$DEST_LINK links to $DEST_DIR, which install.sh did not create (a working clone?) — run that copy's own install.sh, or remove the link first"
     fi
-    if why="$(local_work "$DEST_DIR")"; then
+    if why="$(cmm_local_work "$DEST_DIR")"; then
       die "$DEST_DIR is a git checkout with $why — refusing to mirror over it (that would delete it); commit and push, or move it away, first"
     fi
   fi

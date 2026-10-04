@@ -23,7 +23,7 @@ dir, when `$TMPDIR` is unset or missing), plus — until v4 — a second,
 transitional lock taken exactly where cleanmymac 2.x takes it, so an
 unmigrated 2.x copy and scrubmac still exclude each other when both run with
 the same `TMPDIR` (a 2.x cron job and a 3.x terminal run still do not see
-each other's — [S1](security.md#s1--no-privilege-escalation-ever)).
+each other's — see [Hardening in the codebase](security.md#hardening-in-the-codebase)).
 
 ## The wizard
 

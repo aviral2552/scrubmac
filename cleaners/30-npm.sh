@@ -97,17 +97,31 @@ npm_skip_note() {
 }
 
 # npm_policy DAYS — the cutoff to hold updates to (NPM_CUTOFF, an ISO date,
-# or "none") and why (NPM_WHY): the cooldown, or your own npm min-release-age
-# or before setting when stricter. A --before on the command line would
-# override (relax) those settings, so the stricter one is passed explicitly.
+# or "none"), why (NPM_WHY), and how to hand it to npm (NPM_GATE): the
+# cooldown, or your own npm min-release-age or before setting when stricter.
+# A cutoff on the command line overrides (relaxes) those settings, so the
+# stricter one is passed explicitly — as --before=DATE, or, when your npm
+# config sets min-release-age (npm >= 11.10), as --min-release-age=DAYS
+# (rounded up): npm 11.10–11.14 refuse a --before next to it ("--min-
+# release-age cannot be provided when using --before"; fixed in 11.15.0).
 npm_policy() {
-  local mra before why=''
+  local mra before why='' days
   mra="$(npm config get min-release-age 2>/dev/null)" || mra=''
   before="$(npm config get before 2>/dev/null)" || before=''
+  case "$mra" in '' | null | 0 | *[!0-9.]*) mra='' ;; esac
   NPM_CUTOFF="$(node "$REGISTRY_CJS" cutoff --days "$1" --days "$mra" --before "$before")" || NPM_CUTOFF=none
+  NPM_GATE="--before=$NPM_CUTOFF"
+  if [ -n "$mra" ] && [ "$NPM_CUTOFF" != none ] && cmm_version_ge "$(npm --version 2>/dev/null || echo 0)" 11.10; then
+    days="$(node "$REGISTRY_CJS" cutoff --days "$1" --days "$mra" --before "$before" --ceil-days)" || days=''
+    if [ -n "$days" ] && [ "$days" -gt 0 ]; then
+      NPM_GATE="--min-release-age=$days"
+      NPM_CUTOFF="$(node "$REGISTRY_CJS" cutoff --days "$days")" # what npm will hold to
+    fi
+  fi
   [ "$1" -gt 0 ] && why="the ${1}-day cooldown"
-  case "$mra" in '' | null | 0 | *[!0-9]*) ;; *) why="${why:+$why; }npm min-release-age=$mra" ;; esac
-  case "$before" in '' | null | undefined) ;; *) why="${why:+$why; }npm before=$before" ;; esac
+  [ -n "$mra" ] && why="${why:+$why; }npm min-release-age=$mra"
+  # (npm 11.10–11.14 report a `before` derived from min-release-age: not yours)
+  case "$mra:$before" in :null | :undefined | :) ;; :*) why="${why:+$why; }npm before=$before" ;; esac
   NPM_WHY="$why"
 }
 
@@ -128,7 +142,7 @@ npm_cooldown_update() {
     outdated=$((outdated + 1))
     reg_resolve "$pkg" "$cur" "$NPM_CUTOFF" latest
     case "$REG_VERDICT" in
-      pick) step npm install -g "$pkg@$REG_VERSION" --before="$NPM_CUTOFF" ;;
+      pick) step npm install -g "$pkg@$REG_VERSION" "$NPM_GATE" ;;
       held)
         held=$((held + 1))
         note "- $pkg $cur: every newer release is too fresh ($pkg $REG_VERSION is newer than $NPM_CUTOFF) — held"

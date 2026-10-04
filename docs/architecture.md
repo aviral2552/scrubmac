@@ -1,6 +1,6 @@
 # Architecture
 
-About 7,600 lines of bash 3.2-compatible shell (and one node script, the registry resolver), structured as a thin
+About 7,800 lines of bash 3.2-compatible shell (and one node script, the registry resolver), structured as a thin
 dispatcher, a small set of libraries, and independent cleaner processes.
 
 ```
@@ -48,10 +48,12 @@ bin/scrubmac ──sources──▶ lib/common.sh     helpers shared with every 
    time, which differs between a launchd job and a shell with `TZ` set):
    `ln -sn` creates it atomically, with its content. A lock whose pid is dead,
    or alive with a different start time (pid reuse after a reboot), is stale.
-   Breaking it moves the lock aside (`mv`, which only one contender can win
-   for a given lock) and then looks at what moved: a lock that a racing run
-   created since the check is put back, never removed. Then every contender
-   races to create it again — exactly one wins. A holder whose start time
+   Breakers take turns under a mutex (`run.lock.breaking`, a symlink naming
+   its holder the same way): under it the lock is re-read and removed only
+   while it still names the stale holder, so a lock that a racing run just
+   created is never removed (a mutex whose holder died mid-break is broken
+   the same way a stale lock is). Then every contender races to create the
+   lock again — exactly one wins. A holder whose start time
    cannot be read is assumed alive. A state dir that cannot be written is
    reported as such (exit 2), not as "already in progress". The lock never lives in `$TMPDIR`, which
    differs between cron, launchd and terminal sessions. (A transitional

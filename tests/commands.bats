@@ -106,6 +106,22 @@ valid_json() {
   [[ "$output" != *DOCKER-RAN* ]] || false
 }
 
+@test "config get/set/unset/keys read a CRLF file with a byte-order mark the way cleaners do" {
+  mkdir -p "$(CFGDIR)"
+  printf '\357\273\277COOLDOWN_DAYS=3\r\nMYKEY=abc\r\n# a note\r\n' >"$(CFGDIR)/config"
+  run "$CMM" config get MYKEY
+  [ "$status" -eq 0 ]
+  [ "$output" = abc ]
+  run "$CMM" config keys
+  [[ "$output" == *MYKEY* ]] || false
+  run "$CMM" config unset COOLDOWN_DAYS
+  [ "$status" -eq 0 ]
+  run "$CMM" config get COOLDOWN_DAYS
+  [ "$output" = 7 ] # back to the default
+  grep -qx 'MYKEY=abc' "$(CFGDIR)/config"
+  grep -qx '# a note' "$(CFGDIR)/config"
+}
+
 @test "state files keep their header, your comments and one line per name" {
   make_cleaner 10-alpha.sh 'echo ALPHA'
   make_cleaner 20-beta.sh 'echo BETA'

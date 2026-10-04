@@ -450,6 +450,8 @@ EOF
   [ "$status" -eq 1 ]
   [ -n "$REAL_PYTHON" ] || skip "no python3 to validate JSON"
   "$REAL_PYTHON" -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$STATE_DIR/last-run.json"
+  # the summary (in the log) must not carry the cut character either
+  "$REAL_PYTHON" -c 'import sys; [open(f, "rb").read().decode("utf-8") for f in sys.argv[1:]]' "$STATE_DIR"/logs/run-*.log
 }
 
 @test "a tool that exits 75 fails its cleaner (75 means skipped only from the cleaner itself)" {
@@ -698,10 +700,10 @@ EOF
 @test "breaking a stale lock never steals the fresh lock of a run that raced in" {
   hold_lock "$(dead_pid)"
   # a racing run breaks the stale lock and takes it just before our break
-  # moves the lock aside: what moves is the racer's lock, which goes back
-  make_stub_script mv <<EOF
-[ "\$1" = "$LOCK" ] && { rm -f "$LOCK"; ln -sn 424242:racer "$LOCK"; }
-exec "$SYSBIN/mv" "\$@"
+  # starts: under the breakers' mutex the lock is re-read, and left alone
+  make_stub_script ln <<EOF
+[ "\$3" = "$LOCK.breaking" ] && { rm -f "$LOCK"; "$SYSBIN/ln" -sn 424242:racer "$LOCK"; }
+exec "$SYSBIN/ln" "\$@"
 EOF
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   run "$CMM"
@@ -710,23 +712,19 @@ EOF
   [[ "$output" != *"removed a stale lock"* ]] || false
   [ "$(readlink "$LOCK")" = 424242:racer ]
   [[ "$output" != *ALPHA-RAN* ]] || false
-  [ -z "$(find "$STATE_DIR" -name 'run.lock.stale*')" ]
+  [ ! -e "$LOCK.breaking" ] && [ ! -L "$LOCK.breaking" ] || false
 }
 
-@test "two runs breaking the same stale lock: exactly one of them runs" {
+@test "a breaker that died mid-break leaves its mutex behind: the next run gets past it" {
   hold_lock "$(dead_pid)"
-  make_cleaner 10-alpha.sh 'echo ALPHA-RAN; sleep 3' # (long enough that both runs overlap)
-  "$CMM" >"$SANDBOX/a.out" 2>&1 &
-  a=$!
-  "$CMM" >"$SANDBOX/b.out" 2>&1 &
-  b=$!
-  ra=0
-  rb=0
-  wait "$a" || ra=$?
-  wait "$b" || rb=$?
-  [ "$(cat "$SANDBOX/a.out" "$SANDBOX/b.out" | grep -c ALPHA-RAN)" -eq 1 ]
-  [ $((ra + rb)) -eq 2 ] # one ran (0), one was refused (2)
-  [ ! -e "$LOCK" ]
+  ln -s "$(dead_pid):gone" "$LOCK.breaking"
+  make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
+  run "$CMM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *ALPHA-RAN* ]] || false
+  [[ "$output" == *"removed a stale lock"* ]] || false
+  [ ! -L "$LOCK.breaking" ]
+  [ -z "$(find "$STATE_DIR" -name 'run.lock.breaking.stale*')" ]
 }
 
 @test "a run never removes a lock that is no longer its own" {
@@ -790,7 +788,8 @@ EOF
   # A background job inherits SIGINT as ignored (and bash cannot trap a
   # signal ignored at entry); a real Ctrl-C hits a foreground run. perl
   # restores the default disposition before exec'ing the dispatcher.
-  CMM_TIMEOUT=$WD_SECS perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or die' "$CMM" >"$SANDBOX/out" 2>&1 3>&- &
+  wd_sleep_stub
+  CMM_TIMEOUT=$WD_SECS perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or die' "$CMM_BG" >"$SANDBOX/out" 2>&1 3>&- &
   local pid=$! i=0
   while ! grep -q SLOW-START "$SANDBOX/out" 2>/dev/null; do
     i=$((i + 1))
@@ -812,7 +811,8 @@ EOF
 @test "SIGTERM (e.g. launchd stopping the job) is handled like an interrupt" {
   hang_child
   make_cleaner 10-slow.sh 'echo SLOW-START' "\"$SANDBOX/hangchild\" &" 'wait'
-  CMM_TIMEOUT=$WD_SECS "$CMM" >"$SANDBOX/out" 2>&1 3>&- &
+  wd_sleep_stub
+  CMM_TIMEOUT=$WD_SECS "$CMM_BG" >"$SANDBOX/out" 2>&1 3>&- &
   local pid=$! i=0
   while ! grep -q SLOW-START "$SANDBOX/out" 2>/dev/null; do
     i=$((i + 1))
@@ -831,7 +831,8 @@ EOF
 @test "SIGHUP (the terminal went away) is handled like an interrupt" {
   hang_child
   make_cleaner 10-slow.sh 'echo SLOW-START' "\"$SANDBOX/hangchild\" &" 'wait'
-  CMM_TIMEOUT=$WD_SECS "$CMM" >"$SANDBOX/out" 2>&1 3>&- &
+  wd_sleep_stub
+  CMM_TIMEOUT=$WD_SECS "$CMM_BG" >"$SANDBOX/out" 2>&1 3>&- &
   local pid=$! i=0
   while ! grep -q SLOW-START "$SANDBOX/out" 2>/dev/null; do
     i=$((i + 1))
@@ -869,7 +870,7 @@ slow_cleaner() {
 
 @test "terminal: Ctrl-C stops the cleaner, prints STOPPED and the summary, exits 130 — no job-control noise" {
   slow_cleaner
-  run ptyrun w,c,s3 -- "$CMM"
+  run ptyrun w,c,s3 -- "$CMM_BG"
   [[ "$output" == *"[ptyrun] exit status 130"* ]] || false
   [[ "$output" == *"interrupted — stopping slow"* ]] || false
   [[ "$output" == *STOPPED* ]] || false
@@ -881,7 +882,7 @@ slow_cleaner() {
 
 @test "terminal: a second Ctrl-C during the stop does not cut it short" {
   slow_cleaner "trap '' TERM"
-  CMM__KILL_GRACE=3 run ptyrun w,c,s1,c,s5 -- "$CMM"
+  CMM__KILL_GRACE=3 run ptyrun w,c,s1,c,s5 -- "$CMM_BG"
   [[ "$output" == *"[ptyrun] exit status 130"* ]] || false
   [[ "$output" == *STOPPED* ]] || false
   no_hang_child
@@ -891,7 +892,7 @@ slow_cleaner() {
 
 @test "terminal closed mid-run: the run is still recorded, the lock released, nothing leaked" {
   slow_cleaner
-  run ptyrun w,h,s4 -- "$CMM"
+  run ptyrun w,h,s4 -- "$CMM_BG"
   no_hang_child
   grep -q '"interrupted": true' "$STATE_DIR/last-run.json"
   [ ! -L "$LOCK" ]
@@ -900,7 +901,7 @@ slow_cleaner() {
 
 @test "terminal: Ctrl-C on 'scrubmac | tee' (tee dies too) still records the run and releases the lock" {
   slow_cleaner
-  run ptyrun w,c,s3 -- /bin/bash -c '"$CMM" 2>&1 | tee "$SANDBOX/teed"'
+  run ptyrun w,c,s3 -- /bin/bash -c '"$CMM_BG" 2>&1 | tee "$SANDBOX/teed"'
   no_hang_child
   [ -n "$REAL_PYTHON" ]
   "$REAL_PYTHON" -c 'import json, sys; d = json.load(open(sys.argv[1])); sys.exit(0 if d["interrupted"] else 1)' "$STATE_DIR/last-run.json"
@@ -915,7 +916,7 @@ slow_cleaner() {
   [ -z "$(find "$TMPDIR" -maxdepth 1 -name 'scrubmac.run.*' 2>/dev/null)" ]
 }
 
-@test "a cleaner finishing right at TIMEOUT is not reported as a timeout" {
+@test "a quick cleaner under a 1 s TIMEOUT is never reported as a timeout (process groups)" {
   make_cleaner 10-edge.sh 'exit 0'
   local i
   for i in 1 2 3 4 5; do
@@ -1154,7 +1155,7 @@ EOF
 exit 0
 EOF
   unset CMM_BREW_PREFIX
-  "$CMM" >"$SANDBOX/out" 2>&1 3>&- &
+  "$CMM_BG" >"$SANDBOX/out" 2>&1 3>&- &
   local pid=$! rc=0
   wait_for test -e "$SANDBOX/brew-probed"
   kill -TERM "$pid"
@@ -1170,7 +1171,7 @@ EOF
 : >"$SANDBOX/notifying"
 sleep 2
 EOF
-  CMM_NOTIFY=always "$CMM" >"$SANDBOX/out" 2>&1 3>&- &
+  CMM_NOTIFY=always "$CMM_BG" >"$SANDBOX/out" 2>&1 3>&- &
   local pid=$! rc=0
   wait_for test -e "$SANDBOX/notifying"
   kill -TERM "$pid"
@@ -1184,7 +1185,7 @@ EOF
   hang_child 'trap "" TERM'
   # (it exits only once the leftover ignores TERM: then the stop needs the grace)
   make_cleaner 10-leaver.sh "\"$SANDBOX/hangchild\" &" "while [ ! -e \"$SANDBOX/hangchild.ready\" ]; do sleep 0.1; done" 'echo LEFT-ONE' 'exit 0'
-  CMM__PGRP=1 CMM__KILL_GRACE=6 "$CMM" --json >"$SANDBOX/out.json" 2>"$SANDBOX/err" &
+  CMM__PGRP=1 CMM__KILL_GRACE=6 "$CMM_BG" --json >"$SANDBOX/out.json" 2>"$SANDBOX/err" &
   local pid=$! rc=0
   wait_for grep -q LEFT-ONE "$SANDBOX/err"
   sleep 1.5 # inside the 6 s grace the leftover gets before KILL
@@ -1194,4 +1195,20 @@ EOF
   [ -n "$REAL_PYTHON" ] || skip "no python3 to read the JSON"
   "$REAL_PYTHON" -c 'import json, sys; d = json.load(open(sys.argv[1])); c = d["cleaners"][0]; sys.exit(0 if d["interrupted"] and c["status"] == "ok" and c["exit_code"] == 0 else 1)' "$SANDBOX/out.json"
   no_hang_child
+}
+
+@test "an interrupt while a failed cleaner's output is replayed (quiet mode) keeps its own result" {
+  make_cleaner 10-noisy.sh 'i=0; while [ $i -lt 30000 ]; do echo "a line of output, number $i"; i=$((i + 1)); done' \
+    ": >\"$SANDBOX/noisy-done\"" 'exit 1'
+  # the replay (far more than a pipe holds) blocks on a reader that drains
+  # only after 4 s
+  "$CMM_BG" --quiet > >(sleep 4; cat >/dev/null) 2>&1 &
+  local pid=$! rc=0
+  wait_for test -e "$SANDBOX/noisy-done"
+  sleep 1
+  kill -TERM "$pid"
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 130 ]
+  [ -n "$REAL_PYTHON" ] || skip "no python3 to read the JSON"
+  "$REAL_PYTHON" -c 'import json, sys; d = json.load(open(sys.argv[1])); c = d["cleaners"][0]; sys.exit(0 if c["status"] == "fail" and c["exit_code"] == 1 else 1)' "$STATE_DIR/last-run.json"
 }

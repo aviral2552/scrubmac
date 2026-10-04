@@ -227,6 +227,23 @@ seed_old_config() {
   [ ! -e "$SANDBOX/elsewhere/pid" ]
 }
 
+@test "a 3.0 disabled file that cannot be read now is converted once it can be" {
+  [ "$(id -u)" -ne 0 ] || skip "root reads any file"
+  make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
+  make_cleaner 60-docker.sh '# default: off' 'echo DOCKER-RAN'
+  mkdir -p "$NEWCFG"
+  printf 'alpha\n' >"$NEWCFG/disabled" # 3.0 format: no header, no enabled file
+  chmod 000 "$NEWCFG/disabled"
+  run "$CMM" list
+  chmod 644 "$NEWCFG/disabled"
+  [ "$status" -eq 2 ]
+  run "$CMM"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kept your earlier choices enabled: docker"* ]] || false
+  [[ "$output" == *DOCKER-RAN* ]] || false
+  [[ "$output" != *ALPHA-RAN* ]] || false
+}
+
 @test "no legacy lock is taken when TMPDIR points nowhere (and the run still works)" {
   make_cleaner 10-alpha.sh 'echo ALPHA-RAN'
   # the run's scratch dir falls back to /tmp: keep that inside the sandbox

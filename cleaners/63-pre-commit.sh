@@ -30,6 +30,14 @@ unlistable() {
   return 0
 }
 
+# pc_sql DB QUERY — one plain value per line, whatever your sqliterc says
+# (-init /dev/null: no ~/.sqliterc or $XDG_CONFIG_HOME/sqlite3/sqliterc,
+# whose .mode box/json/… would garble the paths), read-only, waiting up to
+# 5 s for a lock pre-commit holds.
+pc_sql() {
+  sqlite3 -init /dev/null -batch -list -noheader -readonly -cmd '.timeout 5000' "$1" "$2" 2>/dev/null
+}
+
 # pc_blind_spot — print why `pre-commit gc` must not run now (and succeed),
 # or fail when it may. gc counts every recorded config it cannot read as
 # deleted (cfgv's isfile() is false on EPERM) and removes the hook
@@ -43,9 +51,9 @@ pc_blind_spot() {
   local db="$pc_home/db.db" paths p a vol n
   [ -f "$db" ] || return 1 # nothing recorded: gc has nothing to misjudge
   if have sqlite3; then
-    if ! paths="$(sqlite3 -readonly -cmd '.timeout 5000' "$db" 'SELECT path FROM configs' 2>/dev/null)"; then
+    if ! paths="$(pc_sql "$db" 'SELECT path FROM configs')"; then
       # a store that has never recorded a config has no configs table yet
-      n="$(sqlite3 -readonly -cmd '.timeout 5000' "$db" "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'configs'" 2>/dev/null)" || n=''
+      n="$(pc_sql "$db" "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'configs'")" || n=''
       [ "$n" = 0 ] && return 1
       printf '%s\n' "pre-commit's database ($db) could not be read"
       return 0

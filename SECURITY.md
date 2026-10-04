@@ -37,8 +37,12 @@ unneeded dependencies and old formula versions), executes only cleaner
 files that are owned by you and not writable
 by anyone else (a refusal fails the run), gives cleaners no stdin, parses
 (never sources) its config file, applies a supply-chain cooldown by default,
-self-updates only by fast-forwarding to a release tag (signature-checked
-against keys pinned in your installed copy, once releases are signed) or via
-Homebrew, installs and uninstalls only into directories that hold a scrubmac
-install, and makes no network calls of its own. The full threat model,
+self-updates only by fast-forwarding — to a release tag by default
+(signature-checked against keys pinned in your installed copy, once releases
+are signed), to the tracked branch with `UPDATE_CHANNEL=branch` or when a
+copy that pins no keys finds no release tags — or via Homebrew, installs and
+uninstalls only into directories that hold a scrubmac install (never over a
+git checkout holding local work), and makes no network calls of its own
+except one: under the cooldown, the bun cleaner reads Bun's release feed to
+learn a release's age. The full threat model,
 including accepted residual risks, lives in [docs/security.md](docs/security.md).

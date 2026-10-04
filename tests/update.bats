@@ -334,6 +334,23 @@ require_ssh_signing() {
   [ "$(cat "$INST/VERSION")" = 1.1.0 ]
 }
 
+@test "an older maintenance release on its own branch is not a failed update" {
+  make_origin
+  tag v1.0.0
+  git -C "$ORIGIN" checkout -q -b release-0.9 HEAD
+  echo "0.9.1" >"$ORIGIN/VERSION"
+  git -C "$ORIGIN" commit -qam "0.9.1"
+  tag v0.9.1
+  git -C "$ORIGIN" checkout -q master
+  git clone -q "$ORIGIN" "$INST"
+  run "$INST/bin/scrubmac" update --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Already up to date"* ]] || false
+  [[ "$output" != *"skipping release v0.9.1"* ]] || false
+  run "$INST/bin/scrubmac" update
+  [ "$status" -eq 0 ]
+}
+
 @test "with pinned keys, an unsigned tag on an old commit never freezes updates" {
   require_ssh_signing
   ssh_key release

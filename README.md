@@ -39,16 +39,16 @@ if you like.
   cooldown never downgrades anything. One setting turns it off.
 - **Preview everything.** `scrubmac --dry-run` prints every command that
   would change something and runs none of them; `scrubmac status` shows cache
-  sizes and pending updates without touching your tools. (Both still do
-  scrubmac's own first-run setup and one-time migrations.)
+  sizes and pending updates without touching your tools. (A dry run still
+  does scrubmac's own first-run setup; both do its one-time migrations.)
 - **One failure never stops the rest.** Each cleaner runs in its own
   process, with a time limit (a hung tool is stopped together with the
   processes it started) and no stdin; the summary says exactly what
   happened, and every real run leaves a log.
-- **Auditable.** About 7,600 lines of shellcheck-clean bash (about 5,800
-  without comments and blank lines) plus a 700-line dependency-free node
+- **Auditable.** About 7,800 lines of shellcheck-clean bash (about 5,900
+  without comments and blank lines) plus an 800-line dependency-free node
   resolver for the cooldown, a [threat model](docs/security.md), and a test
-  suite of ~580 hermetic tests plus a live end-to-end run on real macOS —
+  suite of ~610 hermetic tests plus a live end-to-end run on real macOS —
   every command checked against its tool's documentation.
 
 ## Install

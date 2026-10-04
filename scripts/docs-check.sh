@@ -119,10 +119,15 @@ keys="$(sed -n '/^CMM_SETTINGS=/,/^[^A-Z]/p' "$ROOT/lib/dispatch.sh" |
 [ -n "$keys" ] || problem "could not read the settings registry from lib/dispatch.sh"
 for key in $keys; do
   def="$(sed -n "s/^CMM_SETTINGS='//; s/^$key|\([^|]*\)|.*/\1/p" "$ROOT/lib/dispatch.sh" | head -n 1)"
-  grep -Fq "| \`$key\` | \`$def\` |" "$CONF" ||
+  # (column alignment in the table, and how the man entry wraps, do not matter)
+  grep -Eq "^\|[[:space:]]*\`$key\`[[:space:]]*\|[[:space:]]*\`$def\`[[:space:]]*\|" "$CONF" ||
     problem "setting $key is not in docs/configuration.md's table with its default ($def)"
   grep -Fxq ".B $key" "$MAN" || problem "setting $key has no '.B $key' entry in man/scrubmac.1"
-  awk -v k=".B $key" -v d="(default $def)" '$0 == k { f = 1; next } f { if (index($0, d)) ok = 1; if (/^\.(TP|SH)/) exit } END { exit !ok }' "$MAN" ||
+  awk -v k=".B $key" -v d="(default $def)" '
+    $0 == k { f = 1; next }
+    f && /^\.(TP|SH)/ { exit }
+    f { b = b " " $0 }
+    END { gsub(/[ \t]+/, " ", b); exit !index(b, d) }' "$MAN" ||
     problem "man/scrubmac.1's '.B $key' entry does not say '(default $def)'"
 done
 
@@ -131,8 +136,9 @@ cmds="$(awk '/^case "\$CMD" in$/ { on = 1; next } on && /^esac/ { exit } on && /
 [ -n "$cmds" ] || problem "could not read the subcommands from bin/scrubmac"
 for cmd in $cmds; do
   grep -Eq "scrubmac $cmd([^a-z-]|\$)" "$README" || problem "README.md never shows 'scrubmac $cmd'"
-  awk -v c="$cmd" '/^\.B / && $2 == c { f = 1 } END { exit !f }' "$MAN" ||
-    problem "man/scrubmac.1 has no '.B $cmd' entry"
+  # an entry of its own in COMMANDS (.TP, then .B CMD), not a mention elsewhere
+  awk -v c="$cmd" '/^\.SH / { s = $2 } s == "COMMANDS" && p == ".TP" && /^\.B / && $2 == c { f = 1 } { p = $0 } END { exit !f }' "$MAN" ||
+    problem "man/scrubmac.1 has no '.B $cmd' entry under COMMANDS"
 done
 
 if [ "$fail" -eq 0 ]; then

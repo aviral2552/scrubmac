@@ -149,6 +149,9 @@ cmm__update_release() {
   # so one stray high-numbered tag on an old commit must not hide a newer
   # release.
   for tag in $tags; do
+    # a release no newer than this copy is never a target, nor a failure (a
+    # maintenance release on its own branch is not a reason to refuse)
+    cmm_version_ge "$CMM_VERSION" "${tag#v}" && continue
     ref="$CMM__TAG_NS/$tag"
     if cmm__git merge-base --is-ancestor "$ref^{commit}" HEAD 2>/dev/null; then
       continue

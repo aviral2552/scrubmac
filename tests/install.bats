@@ -306,6 +306,43 @@ EOF
   done
 }
 
+@test "never mirrors over files that only your own git ignore rules hide (or a hidden untracked view)" {
+  git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$CMM_PREFIX"
+  printf '*.local.md\n' >"$SANDBOX/global-excludes"
+  git -C "$CMM_PREFIX" config core.excludesFile "$SANDBOX/global-excludes"
+  printf 'my notes\n' >"$CMM_PREFIX/NOTES.local.md"
+  run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"untracked files that only your own git ignore rules hide"* ]] || false
+  [ -f "$CMM_PREFIX/NOTES.local.md" ]
+  rm -f "$CMM_PREFIX/NOTES.local.md"
+  git -C "$CMM_PREFIX" config status.showUntrackedFiles no
+  printf '#!/usr/bin/env bash\n' >"$CMM_PREFIX/cleaners/95-wip.sh"
+  run "$INSTALL"
+  [ "$status" -eq 2 ]
+  [ -f "$CMM_PREFIX/cleaners/95-wip.sh" ]
+}
+
+@test "a git install that took release updates (its origin/* lagging behind) is still upgraded" {
+  git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$CMM_PREFIX"
+  # what 'scrubmac update' does on the release channel: tags into a private
+  # namespace, then a fast-forward — origin/master never moves
+  git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m "release 9.9.9"
+  git -C "$CMM_PREFIX" update-ref refs/scrubmac/release-tags/v9.9.9 HEAD
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -f "$CMM_PREFIX/.scrubmac-install" ]
+}
+
+@test "a shallow clone of a release tag (no remote branches at all) is upgraded" {
+  git clone -q --bare "$BATS_FILE_TMPDIR/src-cache/origin.git" "$SANDBOX/origin.git"
+  git -C "$SANDBOX/origin.git" tag v0.0.1-test HEAD
+  git clone -q --depth 1 --branch v0.0.1-test "file://$SANDBOX/origin.git" "$CMM_PREFIX" 2>/dev/null
+  run "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -f "$CMM_PREFIX/.scrubmac-install" ]
+}
+
 @test "upgrades a clean, fully pushed git install that predates the marker (a 3.0 install)" {
   git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$CMM_PREFIX"
   run "$INSTALL"

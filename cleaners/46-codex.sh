@@ -10,7 +10,9 @@
 # and runs the matching updater (Homebrew cask, standalone installer); older
 # releases have no update command — and would take "update" as a prompt — so
 # it is only run when `codex --help` lists it. npm installs are left to the
-# npm cleaner (which applies the cooldown). Never touches ~/.codex (D3).
+# npm cleaner (which applies the cooldown), and copies a version manager
+# (mise, asdf, …), pipx or uv owns to that manager. Never touches ~/.codex
+# (D3).
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 . "${CMM_LIB:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"}"
@@ -21,6 +23,8 @@ skip_unless_updating
 kind="$(install_kind codex)"
 if [ "$kind" = npm ]; then
   note "- codex is npm-managed; the npm cleaner keeps it updated"
+elif [ "$kind" = manager ] || [ "$kind" = pipx ] || [ "$kind" = uv ]; then
+  ai_self_update codex # explains which manager owns it
 elif has_subcommand codex update; then
   step codex update
 elif [ "$kind" = brew ]; then

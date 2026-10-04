@@ -514,6 +514,12 @@ cmm_state_migrate() {
   [ -e "$CMM_ENABLED_FILE" ] && return 0
   local marker="$CMM_STATE_DIR/state-v2"
   [ -e "$marker" ] && return 0
+  # a 3.0 file that cannot be read now is converted once it can (runs refuse
+  # until then — cmm_require_state_readable), so it is not marked done
+  if { [ -e "$CMM_DISABLED_FILE" ] || [ -L "$CMM_DISABLED_FILE" ]; } &&
+    ! { : <"$CMM_DISABLED_FILE"; } 2>/dev/null; then
+    return 0
+  fi
   if [ -f "$CMM_DISABLED_FILE" ] && [ -r "$CMM_DISABLED_FILE" ] &&
     ! grep -q '^# scrubmac:' "$CMM_DISABLED_FILE" 2>/dev/null; then
     local n kept=''
@@ -680,11 +686,42 @@ cmm_lock_holder_alive() {
 # The run lock is a symlink whose target identifies the holder ("PID:START"):
 # creating it is a single atomic syscall that fails when the lock exists, and
 # the content arrives with it. A stale lock is broken by one run at a time
-# (a mkdir mutex), which re-reads it first, so a lock that a racing run just
-# created is never removed; then every contender races to create it again,
-# and exactly one wins.
+# (see cmm__lock_break), which re-reads it first, so a lock that a racing
+# run just created is never removed; then every contender races to create
+# it again, and exactly one wins.
+# cmm__lock_break HELD ME — remove the stale lock that names HELD, unless a
+# run took the lock since it was read. Breakers take turns under a mutex,
+# $CMM_LOCK.breaking — a symlink naming its holder, like the lock itself.
+# Under it the lock cannot change: no run can create it while it exists,
+# its holder is gone, and no other breaker is at work; so it is removed only
+# while it still names HELD. A mutex whose holder died mid-break is itself
+# broken: moved aside and checked, anything else that moved going back.
+cmm__lock_break() {
+  local held="$1" me="$2" m="$CMM_LOCK.breaking" holder moved i=0
+  while ! ln -sn "$me" "$m" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -le 50 ] || return 0 # (a live breaker for 5 s: its run will hold the lock)
+    holder="$(readlink "$m" 2>/dev/null || true)"
+    if [ -n "$holder" ] && ! cmm_lock_holder_alive "$holder"; then
+      if mv "$m" "$m.stale.$$" 2>/dev/null; then
+        moved="$(readlink "$m.stale.$$" 2>/dev/null || true)"
+        [ "$moved" = "$holder" ] || ln -sn "$moved" "$m" 2>/dev/null || true
+        rm -f "$m.stale.$$"
+      fi
+    else
+      sleep 0.1
+    fi
+  done
+  if [ "$(readlink "$CMM_LOCK" 2>/dev/null || true)" = "$held" ]; then
+    rm -f "$CMM_LOCK"
+    warn "removed a stale lock left by pid ${held%%:*}"
+  fi
+  rm -f "$m"
+  return 0
+}
+
 cmm_lock_acquire() {
-  local held again me
+  local held me
   if ! mkdir -p "$CMM_STATE_DIR" 2>/dev/null || [ ! -w "$CMM_STATE_DIR" ]; then
     err "cannot write to $CMM_STATE_DIR (the run lock and logs live there) — check its ownership and permissions"
     exit 2
@@ -713,19 +750,7 @@ cmm_lock_acquire() {
     err "another scrubmac run is already in progress (pid ${held%%:*})"
     exit 2
   fi
-  # Break the stale lock by moving it aside, then look at what moved: when
-  # a run raced in and took the lock since the check above, it is that run's
-  # lock that moved — put back, never removed. (Only one mover can win a
-  # given lock, so two runs breaking the same stale lock cannot both pass.)
-  if mv "$CMM_LOCK" "$CMM_LOCK.stale.$$" 2>/dev/null; then
-    again="$(readlink "$CMM_LOCK.stale.$$" 2>/dev/null || true)"
-    if [ -n "$again" ] && [ "$again" != "$held" ]; then
-      ln -sn "$again" "$CMM_LOCK" 2>/dev/null || true
-    else
-      warn "removed a stale lock left by pid ${held%%:*}"
-    fi
-    rm -f "$CMM_LOCK.stale.$$"
-  fi
+  cmm__lock_break "$held" "$me"
   if ln -sn "$me" "$CMM_LOCK" 2>/dev/null; then
     CMM__LOCK_HELD="$me"
     return 0
@@ -846,7 +871,7 @@ cmm_stop_cleaner() {
 
 # ---------- environment probes ----------
 # cmm_detect_offline — CMM_OFFLINE=1 when the machine has no default network
-# route (no traffic is sent: scrubmac makes no network calls of its own).
+# route (no traffic is sent: the probe reads the local routing table).
 # CMM_OFFLINE=0/1 in the environment overrides the probe.
 cmm_detect_offline() {
   case "${CMM__USER_OFFLINE:-}" in
@@ -1097,7 +1122,6 @@ cmm__exec_cleaner() {
   fi
   CMM__CUR_PID=''
   CMM__WD_PID=''
-  CMM__CUR_EXITED=0
   CMM__TIMED_OUT=0
   [ -e "$tomark" ] && CMM__TIMED_OUT=1
   return 0
@@ -1610,6 +1634,7 @@ EOF
 
     cmm__record "$name" "$status" "$secs" "$CMM__RC" "$src" "$CMM__NOTES" "$CMM__FREED" "$CMM__CACHE"
     CMM__CUR_NAME=''
+    CMM__CUR_EXITED=0 # (set when its process ended: an interrupt until here keeps its result)
     cmm__label "$status"
     cmm_log "== $name: $CMM__LABEL (${secs}s, exit $CMM__RC)"
     if [ -n "$CMM_LOG_FILE" ] && [ -s "$CMM_TMP/$name.out" ]; then

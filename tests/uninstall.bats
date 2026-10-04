@@ -171,6 +171,28 @@ EOF
   [ -L "$CMM_BIN_DIR/scrubmac" ]
 }
 
+@test "never deletes a git checkout at the install path that holds local work (its own uninstall.sh included)" {
+  local why
+  for why in untracked unpushed; do
+    rm -rf "$CMM_PREFIX"
+    git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$CMM_PREFIX"
+    case "$why" in
+      untracked) printf 'notes\n' >"$CMM_PREFIX/MY_NOTES.txt" ;;
+      unpushed) git -C "$CMM_PREFIX" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m WIP ;;
+    esac
+    run "$CMM_PREFIX/uninstall.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"is a git checkout with"* ]] || false
+    [ -d "$CMM_PREFIX/.git" ]
+  done
+  # a clean clone with everything pushed is an ordinary (pre-marker) install
+  rm -rf "$CMM_PREFIX"
+  git clone -q "$BATS_FILE_TMPDIR/src-cache/origin.git" "$CMM_PREFIX"
+  run "$CMM_PREFIX/uninstall.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$CMM_PREFIX" ]
+}
+
 @test "nothing installed at all: says so (and still exits 0)" {
   run "$UNINSTALL"
   [ "$status" -eq 0 ]

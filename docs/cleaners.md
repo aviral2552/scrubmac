@@ -124,8 +124,12 @@ not fail the run.
   configured registry does not know (E404) is skipped with a note.
 - The cutoff: `COOLDOWN_DAYS`, or your own `min-release-age` / `before`
   (read with `npm config get min-release-age` and `npm config get before`)
-  when stricter — a `--before` on the command line would override, and so
-  relax, those settings, so scrubmac passes the stricter one itself.
+  when stricter — a cutoff on the command line would override, and so
+  relax, those settings, so scrubmac passes the stricter one itself: as
+  `--before=<cutoff>`, or, when your npm config sets `min-release-age`
+  (npm ≥ 11.10), as `--min-release-age=<days, rounded up>` — npm
+  11.10–11.14 refuse a `--before` next to it ("--min-release-age cannot be
+  provided when using --before"; fixed in 11.15.0).
 - `npm update -g <pkg>…` — when there is no cutoff (cooldown off, no npm
   setting of your own), for exactly those globals after a
   `npm view <pkg> versions dist-tags --json` registry check (not run when
@@ -143,8 +147,8 @@ not fail the run.
   loaded), stepping down at most three times — when the installed release
   is deprecated too (the whole line is), the newest compatible one is taken
   anyway — and scrubmac runs `npm install -g <pkg>@<version>
-  --before=<cutoff>`: `--before` holds the package's dependencies to the
-  same cutoff. Packages whose newer releases are all too fresh are held, and
+  --before=<cutoff>` (or `--min-release-age=<days>`, see above): that holds
+  the package's dependencies to the same cutoff. Packages whose newer releases are all too fresh are held, and
   ones whose releases old enough are all deprecated or need a newer Node.js
   are reported as not suitable — each counted in the summary. npm's own
   `min-release-age` (and a `--before` with `npm update -g`) are deliberately
@@ -160,17 +164,26 @@ not fail the run.
 - Without a cooldown or a `minimumReleaseAge` of your own:
   `pnpm self-update` (standalone installs only — Corepack/Homebrew/npm/
   version-manager copies are left to their managers) and `pnpm update -g`,
-  which updates global packages within the ranges they were saved with.
+  which updates global packages within the ranges they were saved with —
+  only when there are some (`pnpm ls -g --depth=0 --json`, plus, on
+  pnpm ≥ 11, what is left in pnpm 10's global project beside `pnpm root -g`:
+  `pnpm update -g` is what migrates those): with none, and `pnpm setup`
+  never run, pnpm fails for want of a global bin directory.
 - **With one** (the stricter of `COOLDOWN_DAYS` and your own
   `minimumReleaseAge`, read with `pnpm config get minimumReleaseAge` — and
   at least pnpm 11's built-in day): global packages are listed with
   `pnpm ls -g --depth=0 --json` and resolved like npm's (`npm view` and
   scrubmac's resolver; deprecated or engine-incompatible picks are left as
   they are, since pnpm resolves ranges itself) **within the range each was
-  saved with**: `^` — the same major, `~` — the same minor; exact pins and
-  other ranges are never moved. A package that moves is re-added with its
-  operator, `pnpm add -g <pkg>@^<version> --config.minimum-release-age=<minutes>`
-  — pnpm records `^<version>` again, and its own age gate holds every
+  saved with**, by that range's own bounds: `^` — the same major (for 0.x
+  the same minor), `~1.2` — the same minor. Exact pins are never moved.
+  Ranges a re-add would rewrite are never moved either, and are left to
+  `pnpm update -g`: pnpm saves every re-added package as `^`/`~` of a
+  version, which turns `*`, `latest`, `7.x` or `>=4.1.0 <4.2.0` into
+  something else and narrows `~1`, `^0` and `^0.0`. A package that moves is
+  re-added with its operator,
+  `pnpm add -g <pkg>@^<version> --config.minimum-release-age=<minutes>` —
+  pnpm records `^<version>` again, and its own age gate holds every
   dependency to the cutoff too.
   - pnpm ≥ 11 installs `pnpm add -g a,b` as **one install group**, and
     re-adding one member alone would uninstall the others, so a group is
@@ -178,15 +191,23 @@ not fail the run.
     where it is excluded from the gate by version
     (`--config.minimum-release-age-exclude=<name>@<installed>`, repeated;
     pnpm ≥ 10.19) — without that, a group-mate installed recently would
-    fail the gate. A group is not re-added at all while one of its members
-    could not be looked up or would land on an unsuitable release. A
-    group-mate installed so recently that its own dependencies are fresh
-    still fails the gate (`ERR_PNPM_NO_MATURE_MATCHING_VERSION`): that
-    clears once they mature.
+    fail the gate. An exact pin in the group is re-added as the same exact
+    version. A group is not re-added at all while one of its members could
+    not be looked up, is not a registry release (foreign or unknown to
+    npm's registry), would land on an unsuitable release, or has a range a
+    re-add would rewrite. A group-mate installed so recently that its own
+    dependencies are fresh still fails the gate
+    (`ERR_PNPM_NO_MATURE_MATCHING_VERSION`): that clears once they mature.
+    Groups are found wherever pnpm keeps them (`<globalDir>/v11/<group>/`,
+    also with a custom `globalDir`).
   - pnpm 10 keeps every global in one project with no `a,b` groups: one
     `pnpm add -g` per package, no excludes needed.
   - pnpm < 10.16 has no `minimumReleaseAge`, so dependencies could not be
     held back: global updates are held.
+  - pnpm ≥ 11 no longer lists the packages still in pnpm 10's global
+    project (`<globalDir>/5`), and only `pnpm update -g` migrates them —
+    which also updates them, outside the cooldown — so a summary note asks
+    you to run it once.
   - Globals that `pnpm outdated -g --format json` shows at their `latest`
     release are not looked up (its `wanted` follows the lockfile, so it
     cannot tell what a range allows).
@@ -194,7 +215,8 @@ not fail the run.
     git) and aliases (`npm:`), nor their group-mates.
   - The self-update names the newest release old enough:
     `pnpm self-update <version>` (held, with a note, while every newer one
-    is too fresh).
+    is too fresh). pnpm before 9.13 ignores the version it is given and
+    installs the newest release, so its self-update is held.
   - The lookups need node and npm; without them, updates and the
     self-update are held.
 - pnpm's `minimumReleaseAge` is never passed to `pnpm update -g` or
@@ -232,7 +254,10 @@ current directory, and their `-g` forms (like `bun update -g`) fail until a
 global package exists.
 
 - Without a cooldown or a bunfig `install.minimumReleaseAge` of your own
-  (`$XDG_CONFIG_HOME/.bunfig.toml`, `~/.bunfig.toml`): `bun upgrade` —
+  (in the global bunfig Bun reads: `$XDG_CONFIG_HOME/.bunfig.toml` when
+  `XDG_CONFIG_HOME` is set — `~/.bunfig.toml` is then ignored — else
+  `~/.bunfig.toml`; integers, floats and inline tables all count):
+  `bun upgrade` —
   standalone installs only (it replaces the running binary in place, so
   Homebrew/npm/version-manager copies are left to their managers) — and
   `bun update -g`, within the saved ranges. No global packages: nothing to
@@ -241,8 +266,9 @@ global package exists.
   command line would relax yours): the global packages are read from Bun's
   global directory (named by the `bun pm ls -g` header: its `package.json`
   and each package's installed version), each is resolved like npm's
-  (`npm view` and scrubmac's resolver) within what its saved range allows
-  (`^`: the same major, `~`: the same minor), and updated with
+  (`npm view` and scrubmac's resolver) within what its saved range allows,
+  by that range's own bounds (`^`: the same major, for 0.x the same minor;
+  `~1.2`: the same minor), and updated with
   `bun update -g <pkg>@<version> --minimum-release-age <seconds>` — the
   update keeps the range's operator, and the age gate holds the package's
   dependencies to the cutoff too (Bun ≥ 1.3; older Bun holds global
@@ -251,8 +277,12 @@ global package exists.
   old enough: the remaining updates are then held with a note, not failed
   (Bun ≥ 1.4 checks only the package being updated). Exact pins
   (`bun update -g` leaves those too), linked/local installs and aliases are
-  never touched; globals `bun outdated -g` shows at their latest release
-  are not looked up. Bun's `--minimum-release-age` is never given to a
+  never touched, nor ranges such an update would rewrite: Bun turns `*`,
+  `latest` and `~2` into an exact pin and narrows `^0`/`^0.0` — those are
+  left to `bun update -g`. A package Bun's isolated linker
+  (`install.linker = "isolated"`) links in from `node_modules/.bun/` is a
+  registry install like any other. Globals `bun outdated -g` shows at their
+  latest release are not looked up. Bun's `--minimum-release-age` is never given to a
   plain `bun update -g`: that fails whenever an installed release is newer
   than the cutoff, and downgrades packages when a range allows it. The
   lookups need node and npm; without them global updates are held.
@@ -261,7 +291,10 @@ global package exists.
   (`api.github.com/repos/Jarred-Sumner/bun-releases-for-updater`, read with
   `curl`). Under the cooldown it runs only when that release is old enough
   — held, with a note, while it is too fresh, when the feed cannot be read,
-  or on a canary build (which would move to the newest canary).
+  on a canary build, or with `BUN_CANARY=1` set (either way it would move to
+  the newest canary). Like Bun, the check sends `GITHUB_TOKEN` (or
+  `GITHUB_ACCESS_TOKEN`) when set, lifting GitHub's anonymous rate limit —
+  passed to curl on stdin (`curl -K -`), never on its command line.
 - `bun pm cache rm` — clear the global package cache (from the scratch
   directory; `bun pm cache rm -g` if none could be made, which needs a
   global package); `bun pm cache` (or `bun pm cache -g`) locates it for its
@@ -283,7 +316,7 @@ cache is left alone: `deno clean` would wipe all of it.
 |---|---|
 | `uv self update` | only the uv that uv's standalone installer manages: its install receipt must name this uv's directory — the first `uv-receipt.json` that exists decides, looked up the way uv does (`$AXOUPDATER_CONFIG_PATH`, else `$XDG_CONFIG_HOME/uv` then `~/.config/uv`). uv from pip, cargo, conda, Homebrew or a version manager refuses (exit 2) — those get a note instead |
 | `uv tool upgrade --all` | upgrade uv-managed tools |
-| `uv tool upgrade --all --exclude-newer "N days"` | under the cooldown (uv ≥ 0.11.4 keeps the span relative in tool receipts; older uv gets an absolute RFC 3339 date). Your own `exclude-newer` (`UV_EXCLUDE_NEWER`, or `uv.toml`: `UV_CONFIG_FILE`, `${XDG_CONFIG_HOME:-~/.config}/uv/uv.toml`, `/etc/uv/uv.toml`) is passed instead, as written, when it reaches further back — the flag overrides both your settings and the tool receipts — or when its value cannot be read |
+| `uv tool upgrade --all --exclude-newer "N days"` | under the cooldown (uv ≥ 0.11.4 keeps the span relative in tool receipts; older uv gets an absolute RFC 3339 date). Your own `exclude-newer` (`UV_EXCLUDE_NEWER`, or `uv.toml`: `UV_CONFIG_FILE`, `${XDG_CONFIG_HOME:-~/.config}/uv/uv.toml`, `/etc/uv/uv.toml`) is passed instead, as written, when it reaches further back — the flag overrides both your settings and the tool receipts — or when its value cannot be read. Read as uv reads it: a date is the *end* of that day in local time, and a timestamp's offset counts |
 | `uv tool upgrade <tool> --exclude-newer false` | cooldown off, uv ≥ 0.11.24, before the upgrade above: for each tool whose receipt still carries a cutoff from an earlier cooldown (uv remembers it, so plain upgrades keep honoring it) *and* that the cutoff is holding back — `uv tool list --outdated --exclude-newer false` names those; uv rewrites a receipt only when its tool upgrades. Not when your own uv settings set `exclude-newer`. Older uv: a summary note says how many tools stay held back |
 | `pipx upgrade-all` | upgrade pipx-managed packages |
 | `pipx upgrade-all --cooldown N` | under the cooldown (pipx ≥ 1.16; older pipx holds its upgrades) — or your `PIPX_COOLDOWN` when larger |
@@ -349,7 +382,9 @@ matching updater (Homebrew cask, standalone installer). It is only run when
 `codex --help` lists it: older releases would take "update" as a chat
 prompt — an older Codex from the binary-only Homebrew cask is upgraded by
 name instead (`brew upgrade --cask codex`). npm installs are left to the npm
-cleaner (which applies the cooldown). Never touches `~/.codex`.
+cleaner (which applies the cooldown), and copies a version manager (mise,
+asdf, …), pipx or uv owns to that manager — `codex update` would overwrite
+them. Never touches `~/.codex`.
 
 ### gemini
 
@@ -487,7 +522,9 @@ it cannot read as deleted, so it is **skipped** (with a summary note) while
 one sits where this run cannot see it: inside a folder macOS keeps from
 scheduled jobs (`~/Desktop`, `~/Documents`, `~/Downloads`, iCloud Drive) or
 on an unmounted volume. The recorded configs come from pre-commit's `db.db`
-(`sqlite3 -readonly -cmd '.timeout 5000'`); a database that cannot be read
+(`sqlite3 -init /dev/null -batch -list -noheader -readonly -cmd '.timeout 5000'`
+— `-init /dev/null` so a `.mode` in your `sqliterc` cannot change how the
+paths print); a database that cannot be read
 (pre-commit holding a lock past the 5-second busy timeout) skips gc too,
 while a store that has never recorded a config (no `configs` table) does
 not. Without sqlite3, any unreadable protected folder blocks gc.

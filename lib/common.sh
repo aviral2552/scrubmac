@@ -497,6 +497,42 @@ cmm_is_install_dir() {
   return 0 # empty
 }
 
+# cmm_local_work DIR — DIR is a git checkout holding work that mirroring over
+# it or deleting it would destroy: prints what (uncommitted or untracked
+# files — also ones that only your own ignore rules hide, whatever
+# status.showUntrackedFiles says — a stash, or commits that are on no remote
+# and in no release tag) and succeeds. Git's environment is ignored (a
+# GIT_DIR from a hook would point it at another repository).
+cmm_local_work() {
+  local d="$1" out
+  [ -e "$d/.git" ] || return 1
+  if ! have git; then
+    printf 'a .git (and no git here to check it for local work)'
+    return 0
+  fi
+  lw_git() (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CEILING_DIRECTORIES
+    git -C "$d" "$@"
+  )
+  if ! out="$(lw_git status --porcelain --untracked-files=all 2>/dev/null)"; then
+    printf 'a .git that git cannot read'
+  elif [ -n "$out" ]; then
+    printf 'uncommitted or untracked files'
+  elif [ -n "$(lw_git ls-files --others --exclude-per-directory=.gitignore 2>/dev/null | sed -n 1p)" ]; then
+    printf 'untracked files that only your own git ignore rules hide'
+  elif lw_git rev-parse -q --verify refs/stash >/dev/null 2>&1; then
+    printf 'a stash'
+  elif [ -n "$(lw_git rev-list --max-count=1 HEAD --branches --not --remotes --tags \
+    --glob='refs/scrubmac/release-tags/*' --glob='refs/scrubmac/seen-tags/*' 2>/dev/null || echo unknown)" ]; then
+    # (a release update fetches tags only: origin/* may lag behind HEAD)
+    printf 'commits that are on no remote'
+  else
+    return 1
+  fi
+  return 0
+}
+
 # cmm_unsafe_target DIR — DIR (canonical) is "/", $HOME, or an ancestor of
 # $HOME: never a place to install into or remove.
 cmm_unsafe_target() {
@@ -609,12 +645,24 @@ date_days_ago() {
 cmm_now_iso() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
 # cmm_iso_to_epoch 2026-01-02T03:04:05Z — seconds since the epoch (BSD, then
-# GNU date); fractional seconds are ignored. Fails on unparseable input.
+# GNU date); fractional seconds are ignored, and a +hh:mm / -hhmm offset is
+# honored (Z or none: UTC). Fails on unparseable input.
 cmm_iso_to_epoch() {
-  local s="${1%%.*}"
+  local s="$1" tz='' off=0 e
+  case "$s" in
+    *T*[+-][0-9][0-9]:[0-9][0-9]) tz="${s#"${s%??????}"}" s="${s%??????}" ;;
+    *T*[+-][0-9][0-9][0-9][0-9]) tz="${s#"${s%?????}"}" s="${s%?????}" ;;
+  esac
+  s="${s%%.*}"
   s="${s%Z}"
-  date -j -u -f '%Y-%m-%dT%H:%M:%S' "$s" '+%s' 2>/dev/null ||
-    date -u -d "${s}Z" '+%s' 2>/dev/null
+  if [ -n "$tz" ]; then
+    tz="${tz/:/}"
+    off=$(((10#${tz:1:2} * 60 + 10#${tz:3:2}) * 60))
+    [ "${tz:0:1}" = - ] && off=$((-off))
+  fi
+  e="$(date -j -u -f '%Y-%m-%dT%H:%M:%S' "$s" '+%s' 2>/dev/null ||
+    date -u -d "${s}Z" '+%s' 2>/dev/null)" || return 1
+  printf '%s\n' "$((e - off))"
 }
 
 # cmm_mtime PATH — modification time in epoch seconds (GNU stat first; see
@@ -666,18 +714,24 @@ cmm_migrate_config_dir() {
 # command substitution, spaces) is ignored, so the config file can never
 # execute code. Last valid occurrence wins.
 config_get() {
-  local file="${CMM_CONFIG_FILE:-$(cmm_config_dir)/config}" v
+  local v
   case "$1" in '' | *[!A-Za-z0-9_]*) printf '%s\n' "${2:-}" && return 0 ;; esac
-  # (a file saved with CRLF line ends or a byte-order mark reads the same)
-  if v="$(LC_ALL=C awk -v k="$1=" '
-    NR == 1 { sub(/^\357\273\277/, "") }
-    { sub(/\r$/, "") }
+  if v="$(cmm_config_lines | LC_ALL=C awk -v k="$1=" '
     index($0, k) == 1 && substr($0, length(k) + 1) ~ /^[A-Za-z0-9._\/-]*$/ { v = substr($0, length(k) + 1); f = 1 }
-    END { if (f) print v; else exit 1 }' "$file" 2>/dev/null)"; then
+    END { if (f) print v; else exit 1 }')"; then
     printf '%s\n' "$v"
   else
     printf '%s\n' "${2:-}"
   fi
+}
+
+# cmm_config_lines [FILE] — the config file's lines as you wrote them, minus
+# what an editor may add around them: a byte-order mark, CRLF line ends.
+# Every reader and writer of the file goes through this.
+cmm_config_lines() {
+  local file="${1:-${CMM_CONFIG_FILE:-$(cmm_config_dir)/config}}"
+  [ -f "$file" ] || return 0
+  LC_ALL=C awk 'NR == 1 { sub(/^\357\273\277/, "") } { sub(/\r$/, ""); print }' "$file" 2>/dev/null || true
 }
 
 # setting KEY DEFAULT — the effective value of a setting for a cleaner:

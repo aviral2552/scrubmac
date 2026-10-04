@@ -121,10 +121,10 @@ and **nothing is ever downgraded**:
 
 | Manager | Mechanism |
 |---|---|
-| npm | scrubmac's resolver (`lib/registry.cjs`): for each outdated global, the newest release that is newer than the installed one, not past `latest`, and older than the cutoff — stepping over releases that are deprecated or need a newer Node — installed with `npm install -g <pkg>@<version> --before=<cutoff>`, so its dependencies are held to the cutoff too. npm itself, corepack, linked, local or aliased globals, and globals whose installed version is not a release of that name on the registry are never touched. npm's own `min-release-age`, and `--before` with `npm update -g`, would *downgrade* globals newer than the cutoff, so `--before` is only ever given with an explicit version |
-| pnpm | the same resolver, within each global's saved range (`^`: the major, `~`: the minor; exact pins never move), re-added as `pnpm add -g <pkg>@^<version> --config.minimum-release-age=<minutes>` — pnpm's own gate holds the dependencies (install groups re-added whole, group-mates that stay excluded by version). pnpm < 10.16 has no age gate: its global updates are held. A standalone pnpm self-updates to a named release old enough |
-| Bun | the same resolver, within the saved range: `bun update -g <pkg>@<version> --minimum-release-age <seconds>` (the gate holds the dependencies; Bun < 1.3 holds global updates). `bun upgrade` cannot be told a version: it runs only when the release it would install (from Bun's own update feed) is old enough |
-| uv | `uv tool upgrade --exclude-newer "N days"` — a relative span (uv ≥ 0.11.4 stores it as such in tool receipts, so it never freezes into a stale date) |
+| npm | scrubmac's resolver (`lib/registry.cjs`): for each outdated global, the newest release that is newer than the installed one, not past `latest`, and older than the cutoff — stepping over releases that are deprecated or need a newer Node — installed with `npm install -g <pkg>@<version> --before=<cutoff>`, so its dependencies are held to the cutoff too. npm itself, corepack, linked, local or aliased globals, and globals whose installed version is not a release of that name on the registry are never touched. npm's own `min-release-age`, and `--before` with `npm update -g`, would *downgrade* globals newer than the cutoff, so `--before` is only ever given with an explicit version — and when your `.npmrc` sets `min-release-age`, that is passed as `--min-release-age` instead (npm 11.10–11.14 refuse `--before` next to it) |
+| pnpm | the same resolver, within each global's saved range, re-added as `pnpm add -g <pkg>@^<version> --config.minimum-release-age=<minutes>` — pnpm's own gate holds the dependencies (install groups re-added whole, wherever `globalDir` puts them, group-mates that stay excluded by version). Only ranges a re-add keeps move (`^x.y.z`, `^1`, `^0.3`, `~1.2`), exact pins stay exact, and a group with any other range (`*`, `latest`, `7.x`, `>=…`) is held. pnpm < 10.16 has no age gate: its global updates are held; pnpm 10 leftovers that pnpm 11 no longer lists are left to `pnpm update -g`. A standalone pnpm self-updates to a named release old enough (held before 9.13, which ignores the version) |
+| Bun | the same resolver, within the saved range: `bun update -g <pkg>@<version> --minimum-release-age <seconds>` (the gate holds the dependencies; Bun < 1.3 holds global updates); `*`, `latest` and ranges an update would narrow are left alone, and the global bunfig is read the way Bun reads it. `bun upgrade` cannot be told a version: it runs only when the release it would install (from Bun's own update feed) is old enough — and never with `BUN_CANARY=1` |
+| uv | `uv tool upgrade --exclude-newer "N days"` — a relative span (uv ≥ 0.11.4 stores it as such in tool receipts, so it never freezes into a stale date); your own `exclude-newer` is compared the way uv reads it (a date means the end of that day, local time) |
 | pipx | `pipx upgrade-all --cooldown N` (pipx ≥ 1.16; older pipx holds its upgrades) |
 | Yarn classic | no age filter exists: global upgrades are **held** while the cooldown is on |
 | Homebrew | not applicable: a curated registry with its own review |
@@ -210,12 +210,17 @@ document.
   uninstall.sh removes only directories that hold one — compared as
   canonical paths, and never `/`, your home, or a parent of it — and when the
   install path is a symlink, it deletes the target only if install.sh made
-  it (a link to a dev clone is kept)
+  it (a link to a dev clone is kept); neither one mirrors over or deletes a
+  git checkout install.sh did not make while it holds local work
+  (uncommitted, untracked, stashed or unpushed)
 - fight SIP or modify system state (the 1.x "macOS core cleaner" died trying;
   its absence is a feature, not a gap)
-- make network calls of its own (everything network-touching is a package
-  manager you chose to run; `update` is plain git/brew; offline detection
-  reads the local routing table)
+- make network calls of its own — with one exception: under the cooldown,
+  the bun cleaner reads Bun's release feed (`api.github.com`, with `curl`)
+  to learn the age of the release `bun upgrade` would install, since `bun
+  upgrade` cannot be told a version. Everything else network-touching is a
+  package manager you chose to run; `update` is plain git/brew; offline
+  detection reads the local routing table
 - put secrets in command argv (the `run` wrapper echoes every command; the
   contract in CONTRIBUTING.md forbids secret-bearing arguments)
 
@@ -245,9 +250,9 @@ document.
 - concurrent runs are excluded by a per-user lock in the state dir; it
   records the holder's pid *and start time* (in UTC, or the start tick on
   Linux — the same from a launchd job and from a shell with `TZ` set), so a
-  reused pid never fakes a live holder, and a stale lock is broken by moving
-  it aside and checking what moved, so a racing run's fresh lock is put back,
-  never removed.
+  reused pid never fakes a live holder, and a stale lock is broken by one run
+  at a time, under a mutex that names its holder the same way, so a racing
+  run's fresh lock is never removed.
   Until v4 a second, transitional lock is also taken in `${TMPDIR:-/tmp}`,
   exactly as cleanmymac 2.x takes it, so an unmigrated 2.x copy and scrubmac
   still exclude each other when they share a `TMPDIR` — best effort: in a
