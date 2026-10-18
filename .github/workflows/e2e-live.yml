@@ -208,7 +208,7 @@ jobs:
         run: |
           if brew list --formula scrubmac >/dev/null 2>&1; then brew uninstall --formula scrubmac; fi
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: e2e-${{ matrix.os }}
@@ -246,7 +246,7 @@ jobs:
           tail -n 60 linux.log
           python3 tests/e2e-live/assert_run.py linux.json --exit 0 --no-fail --ok docker,conda,composer,go
           docker image inspect scrubmac-e2e >/dev/null # tagged images are never touched
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: e2e-linux
